@@ -4,9 +4,16 @@ project(zaitaku_mealpace NONE)
 # CMake はタスクランナー。中身は arduino-cli と Python（docs/decisions/0001）。
 # 使い方:
 #   cmake -S . -B build -DPORT=/dev/ttyACM0
+#   cmake --build build --target deps     # 初回のみ
 #   cmake --build build --target build
 #   cmake --build build --target upload
 #   cmake --build build --target record -- SUBJECT=self COND=water
+#
+# PYTHON3 には deps の pip と record が使う python を渡せる。Debian / Ubuntu の
+# システム Python は pip install を拒む（PEP 668, externally-managed-environment）ので、
+# その場合は venv を作って渡す:
+#   python3 -m venv .venv
+#   cmake -S . -B build -DPORT=/dev/ttyACM0 -DPYTHON3=$PWD/.venv/bin/python3
 
 set(FQBN "arduino:mbed_nano:nanorp2040connect" CACHE STRING "Arduino FQBN")
 set(PORT "/dev/ttyACM0" CACHE STRING "Serial port")

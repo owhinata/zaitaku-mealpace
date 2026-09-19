@@ -43,11 +43,24 @@ CMakeLists.txt       build / upload / record のタスク定義
 
 ## 使い方（分岐点まで）
 
+必要なもの: `arduino-cli`（1.5.1 で確認）、`cmake` 3.16 以上、`python3`。
+`arduino-cli` は公式手順でユーザー領域（`~/.local/bin` など）に入れてよい。
+
 ```
 cmake -S . -B build -DPORT=/dev/ttyACM0
+cmake --build build --target deps     # 初回のみ。ボードコア約 100 MB を取得する
 cmake --build build --target build
 cmake --build build --target upload
 cmake --build build --target record -- SUBJECT=self COND=water
+```
+
+Debian / Ubuntu のシステム Python は `pip install` を拒む（PEP 668,
+`externally-managed-environment`）。その場合は venv を作って `-DPYTHON3=` で渡す。
+`.venv/` は .gitignore 済み。
+
+```
+python3 -m venv .venv
+cmake -S . -B build -DPORT=/dev/ttyACM0 -DPYTHON3=$PWD/.venv/bin/python3
 ```
 
 ## ライセンス
