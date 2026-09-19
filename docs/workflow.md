@@ -108,6 +108,10 @@ Codex の呼び出しは codex plugin（`/codex:*`）に一本化する。
 ## 言語
 
 - コミットメッセージ（件名と本文）は英語。
+  - 件名は英語の命令形で、50字程度まで。種別の接頭辞（`feat:` など）は付けない。
+  - Issue に対応するコミットは、件名の先頭に `#N` を付ける（`#1 Document dev environment setup`）。
+    `#` で始まる行はエディタ経由だとコメントとして消えるので、`git commit -m` か `-F` で渡す。
+  - `Closes` / `Fixes` は使わない。Issue を閉じるのは人。
 - Issue、PR、Milestone、コメント、`docs/` は日本語。
 
 ## セッション
