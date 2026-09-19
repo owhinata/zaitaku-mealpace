@@ -17,7 +17,7 @@ M0 準備（9/19〜9/21）
 - #1: 開発環境を導入し、`firmware/logger` のビルドが無修正で通った（arduino:mbed_nano 4.6.0、docs/log/2026-09-19.md）。
   Python 依存は `.venv` に入れ、`-DPYTHON3=` で渡す。実機への書き込みは未実施。
 - #3: 生の音声波形の線引きを docs/decisions/0005 に記録し、AGENTS.md・docs/workflow.md・codex-review skill を直した。
-  CLAUDE.md の該当行の差し替え（人）が残っている。
+  CLAUDE.md の該当行も差し替え済み。
 - Edge Impulse プロジェクト未作成。
 - ロボセンサー技研への問い合わせ未送付（代替センサ、docs/decisions/0002、#5）。
 
@@ -25,8 +25,7 @@ M0 準備（9/19〜9/21）
 
 M0 準備（期限 9/21）
 
-- #3 CLAUDE.md の該当行を人が差し替える（差し替え案は #3 の本文）。済んだら #3 を人が閉じる。
-- #1 差分を人が確認して閉じる。
+- #1・#3 差分を人が確認して閉じる。
 - #2 実機に書き込み、フレームの受信を確認する。plan レビューのゲートを実際に1回通す。
   `monitor` の baudrate（115200）と `Serial.begin(2000000)` の食い違いをここで実測して揃える。
 - #4 Edge Impulse プロジェクトを作成し、設定を記録する（人）。
