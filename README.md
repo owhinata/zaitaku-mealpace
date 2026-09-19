@@ -23,6 +23,8 @@
 
 ```
 CLAUDE.md            不変の制約（作らないもの、データの扱い、公開範囲）
+AGENTS.md            Codex 向けの制約の要約（レビューの判定基準）
+.claude/             plan レビューの skill と、plan・制約領域の編集を止める hook
 docs/plan.md         段階と関門、判定基準
 docs/status.md       現在地。セッション末に更新
 docs/decisions/      1判断1ファイル

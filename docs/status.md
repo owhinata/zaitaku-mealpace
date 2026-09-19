@@ -9,6 +9,10 @@ M0 準備（9/19〜9/21）
 ## 直近の状態
 
 - リポジトリ初期化。文書・骨格・記録スクリプトを配置。
+- GitHub に Milestone M0〜M6 とラベル3つを作成。
+- Codex のレビュールールと plan レビューのゲートを配置（docs/workflow.md、docs/decisions/0004）。
+  承認は plan ファイルのハッシュと Codex 出力の PLAN-SHA 行に結びつく。hook は判定できないとき block する。
+  hook は単体で動作確認済み（承認→通過、plan を1文字変えると block）。Codex を実際に呼ぶ plan レビューは未実施。
 - ファームウェアは未ビルド・未書き込み。
 - Edge Impulse プロジェクト未作成。
 - ロボセンサー技研への問い合わせ未送付（代替センサ、docs/decisions/0002）。

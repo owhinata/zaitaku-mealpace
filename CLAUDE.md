@@ -7,6 +7,8 @@
 ## セッションの入口と出口
 
 - 入口: `docs/status.md` と `docs/plan.md` を読む。担当する Issue の番号を確認する。
+- Issue の着手は plan mode から始める。制約領域に触れる plan は、確定前に Codex のレビューを通す
+  （`docs/workflow.md`「レビュー（Codex）」、docs/decisions/0004）。
 - 出口: `docs/status.md` を更新し、変更点を3行で報告する。
 - Issue を close するのは人。特に関門（Milestone 末尾の「判定」Issue）はエージェントが閉じない。
 
