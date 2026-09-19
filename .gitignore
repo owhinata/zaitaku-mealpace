@@ -1,0 +1,22 @@
+# 生データ・個人データ
+data/raw/
+data/**/*.wav
+data/**/*.csv
+!data/sample/**
+data/**/meta.json
+!data/sample/**/meta.json
+
+# ビルド
+build/
+firmware/**/build/
+*.bin
+*.uf2
+*.elf
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Edge Impulse ローカル
+.ei/
