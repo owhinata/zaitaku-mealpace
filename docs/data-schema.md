@@ -4,10 +4,11 @@
 
 ```
 data/raw/20260922-193012_self_water/
-  imu.csv      t_ms, ax, ay, az, gx, gy, gz
-  audio.wav    16 kHz, mono, int16
-  analog.csv   t_ms, ch0, ch1, ...      （代替センサ使用時のみ）
-  events.csv   t_ms, label, note
+  imu.csv           t_ms, ax, ay, az, gx, gy, gz
+  audio.wav         16 kHz, mono, int16
+  audio_chunks.csv  t_ms, sample_index
+  analog.csv        t_ms, ch0, ch1, ...      （代替センサ使用時のみ）
+  events.csv        t_ms, label, note
   meta.json
 ```
 
@@ -54,9 +55,16 @@ data/raw/20260922-193012_self_water/
     {"id": "imu", "part": "LSM6DSOX", "iface": "onboard"},
     {"id": "mic", "part": "MP34DT06JTR", "iface": "onboard-pdm"}
   ],
-  "notes": ""
+  "notes": "",
+  "fw": "logger",
+  "imu_hz": 104,
+  "audio_hz": 16000
 }
 ```
+
+- `fw` / `imu_hz` / `audio_hz` は装置の META フレームの中身がそのまま入る（装置の申告値）。
+  `sample_rates` は PC 側の既定値。どちらを正とするかと、META が届かなかった場合の扱いは
+  `docs/decisions/0006`。
 
 ## シリアルのフレーム形式（装置 → PC）
 

@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """装置からのバイナリフレームを受けて、セッションフォルダに書く（docs/data-schema.md）。
 
-キー入力でマーカーを打つ:
+キー入力でマーカーを打つ（tty があるときだけ）:
   s 嚥下  t 発話  c 咳  n 首の動き  q 静止  b 一口  o 観察（次の行を note に）  Ctrl-C 終了
+
+--duration <秒> を付けると、その秒数で自分から終了する（Ctrl-C と同じ後始末を通る）。
+SUBJECT / COND / POSITION / BAND / DURATION の環境変数を、対応する引数の既定値として読む。
 
 フレーム: [A5 5A][id u8][len u16 LE][t_ms u32 LE][payload][xor u8]
   id 0x01 IMU (float32 x6)  0x02 AUDIO (int16 x N)  0x03 ANALOG (uint16 x N)  0x7F META (JSON)
@@ -17,6 +20,13 @@ import serial
 SYNC = b"\xa5\x5a"
 ID_IMU, ID_AUDIO, ID_ANALOG, ID_META = 0x01, 0x02, 0x03, 0x7F
 AUDIO_HZ, IMU_HZ = 16000, 104
+STREAM_NAMES = {ID_IMU: "IMU", ID_AUDIO: "AUDIO", ID_ANALOG: "ANALOG", ID_META: "META"}
+
+
+def env_default(name: str, fallback: str) -> str:
+    """環境変数を引数の既定値にする。空文字列は未指定として扱う（CMake から渡る場合用）。"""
+    v = os.environ.get(name, "")
+    return v if v else fallback
 
 
 def getch_loop(on_key):
@@ -105,9 +115,17 @@ class Session:
         print(f"saved: {self.dir}")
 
 
-def read_frames(ser: serial.Serial, on_frame):
+def read_frames(ser: serial.Serial, on_frame, stats: dict, deadline: float | None = None):
+    """フレームを読み続ける。
+
+    stats["ok"][stream_id] に**正常受信フレーム数**（xor 検証を通って on_frame に渡った数）、
+    stats["xor_err"] に **XOR 不一致数**（SYNC と長さと xor バイトまで読めたが xor が合わずに
+    捨てたフレーム候補の数）を数える。deadline（time.monotonic の値）を過ぎたら戻る。
+    """
     buf = bytearray()
     while True:
+        if deadline is not None and time.monotonic() >= deadline:
+            return
         buf += ser.read(4096)
         while True:
             i = buf.find(SYNC)
@@ -125,7 +143,10 @@ def read_frames(ser: serial.Serial, on_frame):
             for b in buf[i + 2:i + 9 + ln]:
                 x ^= b
             if x == buf[end - 1]:
+                stats["ok"][sid] = stats["ok"].get(sid, 0) + 1
                 on_frame(sid, t_ms, payload)
+            else:
+                stats["xor_err"] += 1
             del buf[:end]
 
 
@@ -134,17 +155,20 @@ def main():
     ap.add_argument("--port", default=os.environ.get("PORT", "/dev/ttyACM0"))
     ap.add_argument("--baud", type=int, default=2000000)
     ap.add_argument("--out", type=Path, default=Path("data/raw"))
-    ap.add_argument("--subject", default="self")
-    ap.add_argument("--cond", default="water")
-    ap.add_argument("--position", default="midline-below-thyroid")
-    ap.add_argument("--band", default="elastic-25mm")
+    ap.add_argument("--subject", default=env_default("SUBJECT", "self"))
+    ap.add_argument("--cond", default=env_default("COND", "water"))
+    ap.add_argument("--position", default=env_default("POSITION", "midline-below-thyroid"))
+    ap.add_argument("--band", default=env_default("BAND", "elastic-25mm"))
+    ap.add_argument("--duration", type=float, default=float(env_default("DURATION", "0")),
+                    help="秒。0 なら Ctrl-C で止めるまで回る")
     a = ap.parse_args()
     if a.subject not in ("self", "p1"):
         sys.exit("subject は self か p1")
 
     sess = Session(a.out, a.subject, a.cond, a.position, a.band)
     ser = serial.Serial(a.port, a.baud, timeout=0.05)
-    print("recording... keys: s t c n q b o / Ctrl-C to stop")
+    stats = {"ok": {}, "xor_err": 0}
+    deadline = time.monotonic() + a.duration if a.duration > 0 else None
 
     def on_key(ch):
         if ch in "stcnqb":
@@ -152,13 +176,23 @@ def main():
         elif ch == "o":
             sess.mark("o", input("note: "))
 
-    threading.Thread(target=getch_loop, args=(on_key,), daemon=True).start()
+    if sys.stdin.isatty():
+        print("recording... keys: s t c n q b o / Ctrl-C to stop")
+        threading.Thread(target=getch_loop, args=(on_key,), daemon=True).start()
+    else:
+        print("recording... tty が無いのでマーカー入力は無効")
+    if deadline is not None:
+        print(f"  --duration {a.duration:g} 秒で自動終了する")
     try:
-        read_frames(ser, sess.on_frame)
+        read_frames(ser, sess.on_frame, stats, deadline)
     except KeyboardInterrupt:
         pass
     finally:
         ser.close(); sess.close()
+        print("正常受信フレーム数:")
+        for sid in sorted(stats["ok"]):
+            print(f"  {STREAM_NAMES.get(sid, f'0x{sid:02X}')}: {stats['ok'][sid]}")
+        print(f"XOR 不一致数: {stats['xor_err']}")
 
 
 if __name__ == "__main__":

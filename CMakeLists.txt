@@ -7,7 +7,11 @@ project(zaitaku_mealpace NONE)
 #   cmake --build build --target deps     # 初回のみ
 #   cmake --build build --target build
 #   cmake --build build --target upload
-#   cmake --build build --target record -- SUBJECT=self COND=water
+#   SUBJECT=self COND=water DURATION=10 cmake --build build --target record
+#
+# record に渡す SUBJECT / COND / POSITION / BAND / DURATION は環境変数として
+# tools/record.py に届く（record.py が既定値として読む）。CMake の $ENV{} は
+# configure 時に評価されてしまうので、ここでは引数に展開しない。
 #
 # PYTHON3 には deps の pip と record が使う python を渡せる。Debian / Ubuntu の
 # システム Python は pip install を拒む（PEP 668, externally-managed-environment）ので、
@@ -38,14 +42,17 @@ add_custom_target(upload
   COMMAND ${ARDUINO_CLI} upload --fqbn ${FQBN} --port ${PORT} --input-dir ${BUILD_OUT} ${SKETCH}
   COMMENT "書き込み")
 
+# baudrate は logger.ino の Serial.begin(2000000) と record.py の既定に揃えてある。
+# USB CDC では値が無視される（#2 で 115200 と 2000000 を実測し、受信バイト数も
+# フレーム数も同じだった）。揃えてあるのは読む人が迷わないようにするため。
 add_custom_target(monitor
-  COMMAND ${ARDUINO_CLI} monitor --port ${PORT} --config baudrate=115200
+  COMMAND ${ARDUINO_CLI} monitor --port ${PORT} --config baudrate=2000000
   COMMENT "シリアルモニタ（デバッグ用。記録は record を使う）")
 
-# record は環境変数 SUBJECT / COND / POSITION を受け取る
+# record は環境変数 SUBJECT / COND / POSITION / BAND / DURATION を受け取る。
+# 値は record.py が環境変数から読むので、ここでは引数に展開しない。
 add_custom_target(record
   COMMAND ${CMAKE_COMMAND} -E env PORT=${PORT}
           ${PYTHON3} ${CMAKE_SOURCE_DIR}/tools/record.py
           --port ${PORT} --out ${CMAKE_SOURCE_DIR}/data/raw
-          --subject $ENV{SUBJECT} --cond $ENV{COND} --position $ENV{POSITION}
-  COMMENT "記録（PC 側）。SUBJECT=self COND=water POSITION=midline-below-thyroid")
+  COMMENT "記録（PC 側）。SUBJECT=self COND=water POSITION=midline-below-thyroid DURATION=10")
