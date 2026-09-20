@@ -12,7 +12,7 @@ SUBJECT / COND / POSITION / BAND / DURATION の環境変数を、対応する引
   id 0x01 IMU (float32 x6)  0x02 AUDIO (int16 x N)  0x03 ANALOG (uint16 x N)  0x7F META (JSON)
 """
 from __future__ import annotations
-import argparse, csv, json, os, struct, subprocess, sys, threading, time, wave
+import argparse, csv, json, os, re, struct, subprocess, sys, threading, time, wave
 from datetime import datetime
 from pathlib import Path
 
@@ -61,6 +61,9 @@ class Session:
     def __init__(self, out: Path, subject: str, cond: str, position: str, band: str):
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         self.dir = out / f"{stamp}_{subject}_{cond}"
+        # セッションは out の直下にだけ作る。cond に ../ が入っても外に出さない（docs/decisions/0007）。
+        if self.dir.resolve().parent != out.resolve():
+            sys.exit(f"セッションフォルダが {out} の直下になりません: {self.dir}")
         self.dir.mkdir(parents=True, exist_ok=False)
         self.imu = open(self.dir / "imu.csv", "w", newline="", encoding="utf-8")
         self.imu_w = csv.writer(self.imu); self.imu_w.writerow(["t_ms", "ax", "ay", "az", "gx", "gy", "gz"])
@@ -165,8 +168,10 @@ def main():
     a = ap.parse_args()
     if a.subject not in ("self", "p1"):
         sys.exit("subject は self か p1")
+    if not re.fullmatch(r"[A-Za-z0-9-]+", a.cond):
+        sys.exit("cond は英数字とハイフンのみ")
 
-    sess = Session(RAW_DIR,a.subject, a.cond, a.position, a.band)
+    sess = Session(RAW_DIR, a.subject, a.cond, a.position, a.band)
     ser = serial.Serial(a.port, a.baud, timeout=0.05)
     stats = {"ok": {}, "xor_err": 0}
     deadline = time.monotonic() + a.duration if a.duration > 0 else None
