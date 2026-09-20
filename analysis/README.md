@@ -9,10 +9,90 @@ PC 側の解析・評価。ファームウェアが何で書かれていても�
 
 M1 では `features.py` ＋ ロジスティック回帰、M2 から Edge Impulse。
 
+## 特徴量（`features.py`）
+
+窓は 1.0 秒 / 0.25 秒（`evaluate.py` の `WINDOW_S` / `HOP_S` を import する）。1窓 29 次元。式の定義と理由は
+`docs/decisions/0012-feature-definitions.md`。M1 の PC 側の評価用の定義で、#13 の結果を見てから動かさない。
+依存は numpy と標準ライブラリだけ。
+
+```
+python analysis/features.py <セッションフォルダ>
+```
+
+表示するのはセッション名・窓の数・次元・`valid` の数・最初と最後の `t_start_s` だけ。特徴量の値は表示しない。
+特徴量をファイルに書く機能は無い（使う側が `extract_session` を呼んで、その場で計算する）。
+
+```python
+f = features.extract_session(session_dir)   # WindowFeatures(session, t_start_s (n,), X (n, 29) float32, valid (n,) bool)
+s = features.Standardizer.fit([学習側の WindowFeatures, ...])   # valid な窓だけ。s.sessions に使ったセッション名
+Z = s.transform(f.X)
+```
+
+`extract_session` は常に正規化前の値を返す。正規化の統計量は `Standardizer.fit` に渡したセッションだけから作る
+（評価側を渡さない）。`std` が 0 の次元は 1 に置き換える。有効な窓が無い `fit`、末尾が 29 次元でない `transform` は
+`ValueError`。戻り値に生の波形と IMU の系列は含めない。
+
+### 次元の一覧（`FEATURE_NAMES` と同じ順）
+
+前処理: 加速度 3 軸とジャイロ 3 軸は、それぞれ窓内の平均を引く。フィルタは掛けない。分散・RMS は ÷ n。
+
+| # | 名前 | 定義 | 次元 |
+|---|---|---|---|
+| 0–2 | `acc_ptp_x` `acc_ptp_y` `acc_ptp_z` | 振幅: 加速度の各軸の peak-to-peak（g） | 3 |
+| 3 | `gyro_norm_ptp` | 振幅: ジャイロのノルムの peak-to-peak（deg/s） | 1 |
+| 4–6 | `acc_rms_x` `acc_rms_y` `acc_rms_z` | RMS: 加速度の各軸 | 3 |
+| 7–9 | `gyro_rms_x` `gyro_rms_y` `gyro_rms_z` | RMS: ジャイロの各軸 | 3 |
+| 10 | `acc_peak_count` | ピーク数: 加速度のノルムの局所極大（`x[i] > x[i−1]` かつ `x[i] ≥ x[i+1]`、窓の両端は数えない）。高さがノルムの窓内 RMS × 1.0 以上、最小間隔 50 ms（`t_ms` の差。近いものは高いほうを残す） | 1 |
+| 11–13 | `acc_axis_x` `acc_axis_y` `acc_axis_z` | 主軸方向: 加速度の 3×3 共分散行列の第1固有ベクトル（単位ベクトル）。符号は Y、X、Z の順で最初の `|成分|` ≥ 1e-6 を正に。λ1 < 1e-8 g²（静止）か `λ1 − λ2 < 0.01 × λ1` のときは `[0, 1, 0]` | 3 |
+| 14–26 | `mfcc_0` 〜 `mfcc_12` | MFCC: フレーム 25 ms（400）/ 10 ms（160）、Hamming、プリエンファシス 0.97、`n_fft` 512、パワーは `|FFT|² ÷ 512`、メル 26 本（0〜8000 Hz、HTK 式、三角フィルタは面積の正規化なし）、`log(E + 1e-10)`、DCT-II（ortho）の先頭 13 係数（c0 を含む）。窓内の 98 フレームの平均 | 13 |
+| 27 | `spectral_centroid_hz` | スペクトル重心: フレーム（MFCC と同じ切り方、Hamming、プリエンファシス前）ごとの `Σ f·P / Σ P`（Hz）の窓内平均。`Σ P < 1e-12` のフレームは 0 | 1 |
+| 28 | `zero_crossing_rate` | ゼロ交差率: 窓内の平均を引いた波形の符号（`≥ 0` を正）の変化回数 ÷ (N − 1) | 1 |
+
+音声は int16 を 32768 で割った float32。読み込みは標準ライブラリの `wave`。
+
+### 定数（`features.py` の冒頭）
+
+| 定数 | 値 | 意味 |
+|---|---|---|
+| `AUDIO_HZ` | 16000 | これ以外のサンプルレートは `ValueError` |
+| `AUDIO_CHUNK_T_OFFSET_MS` | 0.0 | `audio_chunks.csv` の `t_ms` に足す補正（下の #15 の注記） |
+| `GAP_RATIO` | 1.5 | 1周期のこの倍以上の差分を飛びとする（`tools/check_session.py` と同じ） |
+| `MIN_IMU_ROW_RATIO` | 0.9 | 窓の IMU 行数が期待（1.0 ÷ 周期）のこの割合未満なら `valid = False` |
+| `PEAK_HEIGHT_RMS_RATIO` / `PEAK_MIN_DISTANCE_S` | 1.0 / 0.050 | ピーク数 |
+| `AXIS_SIGN_EPS` / `AXIS_MIN_EIGENVALUE` / `AXIS_MIN_EIGEN_GAP_RATIO` / `AXIS_DEFAULT` | 1e-6 / 1e-8 / 0.01 / `[0, 1, 0]` | 主軸方向 |
+| `FRAME_LEN` / `FRAME_HOP` / `PREEMPHASIS` / `N_FFT` / `N_MEL` / `MEL_FMIN_HZ`–`MEL_FMAX_HZ` / `LOG_FLOOR` / `N_MFCC` | 400 / 160 / 0.97 / 512 / 26 / 0–8000 / 1e-10 / 13 | MFCC |
+| `CENTROID_MIN_POWER` | 1e-12 | スペクトル重心を 0 にするフレームの `Σ P` の境 |
+
+### `t_ms` の扱いと窓
+
+- 時間軸は装置の `t_ms` ÷ 1000（秒）。0 への付け替えはしない。`evaluate.load_events` と同じ軸なので、`t_start_s` は
+  そのまま `event_metrics` の `positive_windows` に使える。
+- 音声サンプルの時刻は `audio_chunks.csv` の `(sample_index, t_ms)` をアンカーにして出す。チャンクの間は線形補間、
+  最後のアンカー以後は 16 kHz の傾きで WAV の最後まで補外する。チャンク長は `sample_index` の差分の最頻値。
+- 各ストリームの範囲は半開区間。音声は `[先頭サンプルの時刻, 最終サンプルの直後の時刻)`、IMU は
+  `[最初の行の t_ms, 最後の行の t_ms + 1周期)`。窓は両者の重なりに、遅いほうの開始から 0.25 秒刻みで置く。
+  IMU の1周期は、飛びでない `t_ms` の差分（中央値の 1.5 倍未満）の平均。
+- IMU は `t_ms` が `[開始, 開始 + 1.0)` に入る行（約 105 行）。音声は窓の開始時刻に最も近いサンプルから 16000 サンプル固定。
+- 取りこぼし: 差分が 1.5 周期以上の箇所を飛びとし、飛びの区間 `(前の時刻, 次の時刻)` と交わる窓、IMU の行数が期待の
+  90% 未満の窓、音声が 16000 サンプルに満たない窓は `valid = False`。窓は落とさず、グリッドは等間隔のまま返す。
+  無効な窓でも `X` は有限値（窓に入ったサンプルで計算。IMU が 2 行未満なら IMU の 14 次元、音声が足りなければ音の
+  15 次元を 0 にする）。無効な窓を学習と正規化から外すこと、評価での扱いは #13 で決める。
+- 入力の検証（合わなければ `ValueError`）: `audio.wav` が mono・int16・16000 Hz（`meta.json` のトップレベル `audio_hz`
+  を優先し、無ければ `sample_rates.audio_hz`。docs/decisions/0006。WAV のヘッダーとも一致）、`audio_chunks.csv` が
+  2 行以上・最初の `sample_index` が 0・`sample_index` が狭義の単調増加・`t_ms` が単調非減少、最終チャンクの長さ
+  （WAV のサンプル数 − 最後の `sample_index`）が 1 以上チャンク長以下、`imu.csv` が 2 行以上で `t_ms` が単調非減少。
+
+### #15 の注記（`AUDIO_CHUNK_T_OFFSET_MS`）
+
+チャンクの `t_ms` は「先頭サンプルの時刻」として扱う（`docs/data-schema.md`）。実装が末尾付近の時刻を刻んでいる疑い
+（#15、最大 4 ms）がある。補正は定数 `AUDIO_CHUNK_T_OFFSET_MS`（`t_ms` に足す ms。既定 0.0）の1か所に置いてあり、
+#15 の結論で変える（末尾の時刻だと分かれば負の値）。
+
 ## テスト
 
-`evaluate.py` と `split.py` の数え方は、合成データのテスト（`test_evaluate.py`・`test_split.py`）で
-固定している。標準ライブラリの `unittest` だけで動く。合成データは一時フォルダに作り、`data/` は使わない。
+`evaluate.py` と `split.py` の数え方、`features.py` の窓と特徴量は、合成データのテスト（`test_evaluate.py`・
+`test_split.py`・`test_features.py`）で固定している。`test_features.py` は numpy を使う。ほかは標準ライブラリの
+`unittest` だけで動く。合成データは一時フォルダに作り、`data/` は使わない。
 
 ```
 python -m unittest discover -s analysis -v
