@@ -91,6 +91,10 @@ M1 ロギング・分岐点（9/22〜9/27）。M0 準備の関門は 9/20 に通
   記録の形式・マーカーの時刻の取り方・引数・出力先は変えていない。pty の上で子プロセスを動かすテスト 13 件を足した
   （`tools/test_record_tty.py`。修正前のコードでは 12 件が落ちる）。実機での確認（10 秒の記録。終了後の入力、マーカー、
   `o` の note の表示）は人が行い、問題は無かった。
+- 進め方: plan の素案づくりと Codex の plan レビューの実施も subagent に移した（docs/decisions/0016、docs/workflow.md
+  「メインと subagent」、codex-review skill）。メインが plan mode にいるのは、確定した plan を承認する間だけ。
+  `plan-approve.sh` はメインだけが実行する（plan を書いた本人が承認しない）。ゲートの hook と
+  「Issue の着手は plan mode から」は変えていない。
 - ロボセンサー技研への問い合わせ未送付（代替センサ、docs/decisions/0002、#5）。
 
 ## 次にやること

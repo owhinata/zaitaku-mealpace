@@ -13,7 +13,7 @@ Codex 呼び出しは codex plugin（`codex@openai-codex`）のランタイム�
 
 | レビュー対象 | 使うもの |
 |---|---|
-| **実装計画（plan mode の plan ファイル）** | **この skill**（`plan-approve.sh` で ExitPlanMode の marker を書く） |
+| **実装計画（scratchpad の素案、または plan mode の plan ファイル）** | **この skill**（`plan-approve.sh` で ExitPlanMode の marker を書く） |
 | 関門のレビュー、制約に近い領域の差分 | `/codex:adversarial-review --base <ref> <focus>` |
 | それ以外の差分 | `/codex:review --base <ref>` |
 | 不具合の原因追跡 | `/codex:rescue` |
@@ -22,17 +22,31 @@ plan だけがこの skill に残っている理由: plugin の review コマン
 まだコードになっていない会話中の plan をレビューできない。制約違反は実装してから
 見つけるより plan の段階で止めるほうが安いので、ここだけ自前で持つ。
 
+## 誰が実行するか（docs/decisions/0016）
+
+- 手順 1〜3（プロンプトを書く、Codex に投げる、裏取りと報告）は、plan を書いた subagent が行う。
+  レビューが済んだら報告して止まる。
+- **手順 4（`plan-approve.sh`）はメインのエージェントだけが行う。`--skip` も同じ。subagent は実行しない。**
+  `plan-approve.sh` は scratchpad の plan ファイルでも通り、`edit-gate.sh` は marker が空でないことしか見ないので、
+  plan を書いた本人が承認できてしまう。それを運用で塞いでいる。
+- CONCERN の採否と、plan の中の選択肢を決めるのは人。subagent は人に質問できないので、決めてもらう点を
+  報告に並べてメインに渡す。
+- plan レビューを担当する subagent は同時に1つまで。初回から再レビュー（resume）までを同じ subagent が続ける。
+
 ## 実行手順
 
 ### 1. plan を自己完結した 1 枚のプロンプトに落とす
 
-plan は plan mode の plan ファイル（`~/.claude/plans/*.md`）に書いてあること。承認は plan ファイルの
-ハッシュに結びつくので、レビューに出す plan とファイルの中身を一致させる。
+plan は全文が1つのファイルに書いてあること。plan を作る段階では scratchpad の素案ファイル
+（`plan-<Issue 番号>.md`）でよい。承認は**ファイルの内容の**ハッシュに結びつくので、承認のときに素案を
+plan mode の plan ファイル（`~/.claude/plans/*.md`）へ一字一句そのままコピーすれば、素案に対する `PLAN-SHA` が
+そのまま通る。レビューに出す plan とファイルの中身は、常に一致させる。
 
 Codex はこの会話のコンテキストを見られない。「上記の plan」のような参照は書かない。
 scratchpad にプロンプトファイルを書く:
 
-- 1行目に `PLAN-SHA: <plan ファイルの sha256 先頭16桁>`（`sha256sum < <plan ファイル> | cut -c1-16`）。
+- 1行目に `PLAN-SHA: <plan を書いたファイル（素案でよい）の sha256 先頭16桁>`
+  （`sha256sum < <plan ファイル> | cut -c1-16`）。
   「出力の冒頭に、この行をそのまま書け」と指示する。`plan-approve.sh` は、出力の PLAN-SHA が
   承認時点の plan ファイルと一致しなければ拒否する。別の plan や直す前の plan へのレビューで
   承認されるのを防ぐためなので、plan を直したらハッシュを取り直して再レビューする
@@ -105,9 +119,13 @@ node "$(ls -d "$HOME"/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-c
   同じ指摘が続く、または直すたびに隣の指摘が出て収束しないときは、その旨を添えて人に渡す。
 - BLOCKING が誤りだと考える場合も、自分で verdict を読み替えない。根拠を付けて人に渡す。
 
-### 4. 承認（ここがゲート）
+### 4. 承認（ここがゲート。メインだけが行う）
 
 marker を書くのは `plan-approve.sh` だけ。`touch` や手書きで marker を作らない。
+**この手順を実行するのはメインのエージェントだけ**（docs/decisions/0016）。plan を書いた subagent は、
+手順 3 の報告で止まる。
+
+メインは plan mode に入り、確定した plan を scratchpad から plan ファイルへ一字一句そのままコピーしてから:
 
 ```bash
 bash .claude/hooks/plan-approve.sh <plan ファイル> <Codex の出力ファイル>

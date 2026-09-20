@@ -1,6 +1,6 @@
 # 0015 メインのエージェントは管理だけを行い、作業は subagent が行う
 
-日付: 2026-09-20　状態: 採用
+日付: 2026-09-20　状態: 採用（一部を docs/decisions/0016 で改めた）
 
 ## 決定
 
@@ -10,6 +10,8 @@
   制約領域の実装、評価の数え方・時刻の換算・分割が絡む作業、plan の素案づくりは opus（または既定の上位の model）。
 - plan mode への出入り（`EnterPlanMode` / `ExitPlanMode`）、Codex の plan レビュー、`plan-approve.sh`、コミットはメインが行う。
   subagent は `ExitPlanMode` を実行できない。
+  （2026-09-20、docs/decisions/0016 で Codex の plan レビューの実施を subagent に移した。`plan-approve.sh` と
+  plan mode の出入り、コミットはメインのまま。）
 - 手順の詳細は `docs/workflow.md`「メインと subagent」。「1 セッション 1 Issue」は「1つの subagent に1つの Issue の、範囲を
   区切った作業」に置き換える。メインのセッションは、複数の Issue を続けて管理してよい。
 - ゲートは変えない。Issue の着手は plan mode から、制約領域に触れる plan は Codex のレビュー、決めるのは人、

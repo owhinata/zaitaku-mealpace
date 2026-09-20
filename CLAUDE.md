@@ -7,9 +7,11 @@
 ## セッションの入口と出口
 
 - 入口: `docs/status.md` と `docs/plan.md` を読む。担当する Issue の番号を確認する。
-- メインのエージェントは管理だけを行い、Issue の作業は subagent が行う。plan mode の出入り（subagent は `ExitPlanMode` を
-  実行できない）、Codex のレビュー、コミットはメインが行う（`docs/workflow.md`「メインと subagent」、docs/decisions/0015）。
-  subagent として起動された場合は、渡された plan と指示の範囲だけを実行し、git の操作をしない。
+- メインのエージェントは管理だけを行い、Issue の作業は subagent が行う。plan の素案づくりと Codex の plan
+  レビューも subagent が行う。plan mode の出入り（subagent は `ExitPlanMode` を実行できない）、
+  `plan-approve.sh`、コミットはメインが行う（`docs/workflow.md`「メインと subagent」、docs/decisions/0015・0016）。
+  subagent として起動された場合は、渡された plan と指示の範囲だけを実行し、`plan-approve.sh` の実行と
+  git の操作をしない。
 - Issue の着手は plan mode から始める。制約領域に触れる plan は、確定前に Codex のレビューを通す
   （`docs/workflow.md`「レビュー（Codex）」、docs/decisions/0004）。
 - 出口: `docs/status.md` を更新し、変更点を3行で報告する。
