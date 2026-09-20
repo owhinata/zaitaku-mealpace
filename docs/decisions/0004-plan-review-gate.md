@@ -8,6 +8,7 @@
   「セッションの入口と出口」にこの一行を追記する。
 - 制約領域に触れる plan は、確定前に Codex でレビューする。ゲートは BLOCKING だけとし、
   CONCERN の採否は人が決める。再レビューは2回まで。
+  （2026-09-20、docs/decisions/0009 で回数の上限をなくした。）
 - 承認は plan 本文のハッシュに結びつける。承認を書く経路は `.claude/hooks/plan-approve.sh` だけとし、
   Codex の出力に BLOCKING の verdict があれば機械的に拒否する。
 - 制約領域（`analysis/`、`firmware/`、`tools/record.py`、`docs/evaluation.md`、
