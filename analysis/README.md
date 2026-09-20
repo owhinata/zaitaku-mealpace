@@ -5,6 +5,7 @@ PC 側の解析・評価。ファームウェアが何で書かれていても�
 - `features.py`   窓ごとの特徴量（IMU＋音）
 - `evaluate.py`   `docs/evaluation.md` の定義でイベント単位の検出率・誤検出率を出す
 - `split.py`      セッション単位で学習／評価を分ける（窓単位の分割は実装しない）
+- `train_eval.py` M1 の分岐点: ロジスティック回帰で学習し、上の3つを使って採点した報告を出す
 - `to_edge_impulse.py`  events.csv のラベルで WAV/CSV を Edge Impulse に投入する形に整える
 
 M1 では `features.py` ＋ ロジスティック回帰、M2 から Edge Impulse。
@@ -98,11 +99,60 @@ Z = s.transform(f.X)
 ものではない。記録済みのセッションの変換は要らない（CSV と WAV の値は変わらず、読み方だけが変わる）。
 `AUDIO_CHUNK_T_OFFSET_MS`（既定 0.0）は、換算のあとに足す補正（ms）。系統的なずれが分かったとき用で、0.0 のまま残してある。
 
+## 学習と評価（`train_eval.py`）
+
+M1 の分岐点の数字（#13）を出す。手順の定義と理由は `docs/decisions/0014-m1-training-procedure.md`。
+実データを見る前に固定した。結果を見てから、ラベルの規則・閾値の決め方・モデルの設定・分割を動かさない。
+依存は numpy と scikit-learn（`tools/requirements.txt`）。
+
+```
+python analysis/train_eval.py data/raw --eval-min <N>           # 既定。学習側だけ
+python analysis/train_eval.py data/raw --eval-min <N> --final   # 評価側を採点する
+```
+
+- `--eval-min` は必須。最後の2収集日のセッション数（`docs/recording-protocol.md`）。subject は `self` 固定。
+- **既定の実行**は学習側のセッションだけを使い、交差検証の数字と閾値を出す。何度実行してもよい。評価側は
+  `meta.json`（`split_sessions` が subject の検査に読む）のほかは開かず、報告にはセッション名だけを出す。
+- **`--final`** を付けたときだけ、評価側を採点する。実行した後は評価側を動かさない。
+- 報告は標準出力に Markdown で出す。ファイルは書かない（モデル・特徴量・確率を保存しない）。
+  波形、特徴量の値、個々の窓の確率は出さない。
+
+### 手順の要約
+
+1. 分割: `split_sessions(root, eval_min, subject="self")`。フォルダ名の日付で、評価側がちょうど 2 収集日、学習側が
+   1 収集日以上、学習側のどの日も評価側のどの日より前、を検査する。外れたら止まる。
+2. 特徴量: `features.extract_session`。`valid = False` の窓は学習と正規化に使わず、採点では陰性として扱う
+   （陽性にしない）。数を報告に出す。
+3. 学習のラベル: 嚥下のマーカー `t` に対して、窓の中心 `w + 0.5` が `[t, t + 1.0]` に入る窓が陽性。中心が
+   `[t − 0.5, t)` か `(t + 1.0, t + 1.5]` の窓は学習に使わない。どの嚥下の `[t − 0.5, t + 1.5]` にも中心が入らない窓が
+   陰性。学習のラベルだけの規則で、評価の数え方（`docs/evaluation.md`、docs/decisions/0011）は変えない。
+4. モデル: `features.Standardizer`（統計量は、学習に使うセッションの `valid` な窓の全部。「使わない」窓も入れる）＋
+   `LogisticRegression(C=1.0, class_weight="balanced", max_iter=1000)`（`lbfgs`。乱数を使わない）。探索しない。
+5. 交差検証（学習側だけ）: 学習側の収集日が 2 日以上なら収集日ごと、1 日なら1セッションごと。fold ごとに
+   `Standardizer` とモデルを作り直す。グループが 2 つ未満、fold の学習側に陽性と陰性がそろわない、合算で嚥下が 0 件か
+   非嚥下の時間が 0、のときは fold とセッション名を示して止まる。
+6. 閾値: 候補 0.05, 0.10, …, 0.95 を、交差検証の確率に対して評価と同じ数え方（`event_metrics` → 回数の合算）で採点する。
+   誤検出率が 3.0 回/分以下の候補のうち検出率が最大（同率なら高いほう）。無ければ誤検出率が最小（同率なら高いほう）。
+7. 最終モデルは学習側の全セッションで作り直す。`--final` のときだけ、評価側のセッションごとに `event_metrics` を計算し、
+   `split_sessions` が返した `eval` の一覧をそのままキーにして `evaluate.aggregate` に渡す。
+8. 参考値として、常時陽性の場合（全窓を陽性にした場合）の数字と、陽性窓の割合（陽性窓 ÷ 全窓）を並べる
+   （docs/decisions/0011「既知の弱点」）。
+
+### 再現の条件
+
+同じ入力で、同じコミット・同じ依存の版（scikit-learn、numpy）・同じ実行環境なら、報告は一字一句同じになる
+（`lbfgs` は乱数を使わない）。版や BLAS、実行環境をまたいだ一致は保証しない。報告の「実行の条件」に出る
+コミットのハッシュと scikit-learn・numpy の版が、再現の条件。
+追跡しているファイルに未コミットの変更があると、報告のコミットに `-dirty` が付く。`--final` は、その状態では
+採点せずに止まる（先にコミットする）。既定の実行は止まらない。
+
 ## テスト
 
-`evaluate.py` と `split.py` の数え方、`features.py` の窓と特徴量は、合成データのテスト（`test_evaluate.py`・
-`test_split.py`・`test_features.py`）で固定している。`test_features.py` は numpy を使う。ほかは標準ライブラリの
-`unittest` だけで動く。合成データは一時フォルダに作り、`data/` は使わない。
+`evaluate.py` と `split.py` の数え方、`features.py` の窓と特徴量、`train_eval.py` の手順は、合成データのテスト
+（`test_evaluate.py`・`test_split.py`・`test_features.py`・`test_train_eval.py`）で固定している。`test_features.py` は
+numpy、`test_train_eval.py` は numpy と scikit-learn を使う。ほかは標準ライブラリの `unittest` だけで動く。
+合成データは一時フォルダに作り、`data/` は使わない。`test_train_eval.py` は 60 秒の合成セッションを 9 つ作って
+学習を繰り返すので、20 秒ほど掛かる。
 
 ```
 python -m unittest discover -s analysis -v
