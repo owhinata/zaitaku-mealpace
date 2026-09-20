@@ -38,12 +38,16 @@ def make_session(root: Path, name: str = "20260920-120000_self_quiet", *,
                  imu_t0_ms: int = 0, imu_dur_ms: float = 10000, imu_period_ms: float = IMU_PERIOD_MS,
                  acc=None, gyro=None, drop_imu=None,
                  audio_t0_ms: int = 0, n_samples: int = 160000, audio=silence, drop_chunks=None,
+                 chunk_lens: dict | None = None,
                  wav_trim: int = 0, wav_extra: int = 0, wav_hz: int = HZ, channels: int = 1,
                  meta: dict | None = None) -> Path:
     """合成セッションを作る。acc / gyro は秒 → (n,3)、audio は秒 → [-1, 1]。
 
     drop_imu: 抜く行の bool を返す関数（引数は t_ms）。drop_chunks: 抜くチャンク番号の range
     （tools/record.py と同じく、CSV の行と WAV のサンプルの両方を抜き、以後の sample_index を詰める）。
+    chunk_lens: {チャンク番号: サンプル数}。指定の無いチャンクは CHUNK（64）。
+    チャンクの t_ms は、装置と同じく「先頭サンプルの時刻 + チャンクの長さぶん」（64 サンプルなら + 4 ms。
+    docs/decisions/0013）。wav_trim で最終チャンクが短くなるときは、その長さぶん。
     """
     d = root / name
     d.mkdir()
@@ -59,12 +63,20 @@ def make_session(root: Path, name: str = "20260920-120000_self_quiet", *,
         for i in np.nonzero(keep)[0]:
             w.writerow([t_ms[i]] + [f"{v:.4f}" for v in (*a[i], *g[i])])
 
-    x = audio(audio_t0_ms / 1000.0 + np.arange(n_samples) / HZ)
-    pcm = np.round(x * 32767).astype("<i2")
     chunk_ids = np.arange(n_samples // CHUNK)
+    lens = np.full(len(chunk_ids), CHUNK, dtype=np.int64)
+    for c, n in (chunk_lens or {}).items():
+        lens[c] = n
+    starts = np.concatenate([[0], np.cumsum(lens)[:-1]])   # 取りこぼしが無いときの先頭サンプルの番号
+    x = audio(audio_t0_ms / 1000.0 + np.arange(int(lens.sum())) / HZ)
+    pcm = np.round(x * 32767).astype("<i2")
     if drop_chunks is not None:
         chunk_ids = np.array([c for c in chunk_ids if c not in drop_chunks])
-        pcm = np.concatenate([pcm[c * CHUNK:(c + 1) * CHUNK] for c in chunk_ids])
+        pcm = np.concatenate([pcm[starts[c]:starts[c] + lens[c]] for c in chunk_ids])
+    sent = lens[chunk_ids].copy()   # 装置が送った長さ。t_ms の進みはこの長さぶん
+    sent[-1] = max(sent[-1] - wav_trim, 0)
+    chunk_t_ms = [audio_t0_ms + int(round((starts[c] + n) * 1000 / HZ)) for c, n in zip(chunk_ids, sent)]
+    chunk_si = np.concatenate([[0], np.cumsum(lens[chunk_ids])[:-1]])
     if wav_trim:
         pcm = pcm[:-wav_trim]
     if wav_extra:
@@ -74,7 +86,7 @@ def make_session(root: Path, name: str = "20260920-120000_self_quiet", *,
     with wave.open(str(d / "audio.wav"), "wb") as wv:
         wv.setnchannels(channels); wv.setsampwidth(2); wv.setframerate(wav_hz)
         wv.writeframes(pcm.tobytes())
-    write_chunks(d, [(audio_t0_ms + int(c) * 4, i * CHUNK) for i, c in enumerate(chunk_ids)])
+    write_chunks(d, [(int(t), int(i)) for t, i in zip(chunk_t_ms, chunk_si)])
 
     (d / "events.csv").write_text("t_ms,label,note\n", encoding="utf-8")
     m = {"subject": "self", "cond": "quiet", "sample_rates": {"imu_hz": 104, "audio_hz": HZ, "analog_hz": 0},
@@ -94,6 +106,14 @@ def write_chunks(d: Path, rows) -> None:
 def read_chunks(d: Path) -> list[list[int]]:
     with (d / "audio_chunks.csv").open(encoding="utf-8") as f:
         return [[int(r["t_ms"]), int(r["sample_index"])] for r in csv.DictReader(f)]
+
+
+def chunk_timing(d: Path):
+    """features.py の換算の途中の値: (チャンクごとの長さ, 先頭サンプルの時刻のアンカー ms, 音声の飛びの区間)。"""
+    x, si, t_ms, chunk_len = features._load_audio(d)
+    lengths = features._chunk_lengths(len(x), si)
+    anchor_ms = features._chunk_anchors_ms(t_ms, lengths)
+    return lengths, anchor_ms, features._audio_gaps(anchor_ms, lengths, chunk_len)
 
 
 def on_axis(axis: int, fn):
@@ -278,15 +298,95 @@ class GapTest(TmpCase):
         f = features.extract_session(d)
         self.assertEqual(f.X.shape, (37, 29))
         np.testing.assert_allclose(np.diff(f.t_start_s), 0.25, atol=1e-9)
-        expected_bad = intersects(f.t_start_s, 3.996, 4.100)
-        self.assertEqual(int(expected_bad.sum()), 5)   # 開始 3.0〜4.0
+        # 生の t_ms は 4000（チャンク 999）と 4104（チャンク 1025）。飛びの区間は、チャンク 999 の推定の終端 4.000 から
+        # チャンク 1025 の推定の先頭 4.100 まで。窓 [3, 4) は交わらない
+        rows = read_chunks(d)
+        self.assertEqual([rows[999][0], rows[1000][0]], [4000, 4104])
+        expected_bad = intersects(f.t_start_s, 4.000, 4.100)
+        self.assertEqual(int(expected_bad.sum()), 4)   # 開始 3.25〜4.0
+        np.testing.assert_array_equal(f.t_start_s[expected_bad], [3.25, 3.5, 3.75, 4.0])
         np.testing.assert_array_equal(f.valid, ~expected_bad)
+        lengths, anchor_ms, gaps = chunk_timing(d)
+        self.assertEqual(gaps, [(4.000, 4.100)])
+        self.assertEqual(anchor_ms[1000], 4100.0)   # 飛びの後のアンカー = チャンク 1025 の先頭サンプルの時刻
         self.assertTrue(np.isfinite(f.X).all())
         c = f.X[:, I_CENTROID]
         for s, hz in ((2.0, 500.0), (4.25, 500.0), (5.0, 500.0), (6.0, 3000.0), (9.0, 3000.0)):
             k = int(np.argmin(np.abs(f.t_start_s - s)))
             self.assertAlmostEqual(f.t_start_s[k], s, places=9)
             self.assertAlmostEqual(float(c[k]), hz, delta=20.0, msg=f"窓の開始 {s}")
+
+
+class ChunkTimestampTest(TmpCase):
+    """チャンクの t_ms（読み出した直後の時刻）から先頭サンプルの時刻への換算（docs/decisions/0013）。"""
+
+    def test_f10_frequency_switch_appears_at_the_right_time(self):
+        # IMU を 1.0 秒から始めて、窓のグリッドを音声の先頭ではなく IMU で決める（音声の時刻が 4 ms ずれると、
+        # 同じ開始時刻の窓に入るサンプルが 64 個ずれる）。500 Hz → 3000 Hz の切り替えは 5.0 秒
+        def audio(t):
+            return np.where(t < 5.0, sine(500)(t), sine(3000)(t))
+        f = features.extract_session(make_session(self.root, imu_t0_ms=1000, audio=audio))
+        self.assertEqual(f.X.shape, (33, 29))
+        np.testing.assert_allclose(f.t_start_s, 1.0 + 0.25 * np.arange(33), atol=1e-9)
+        self.assertTrue(f.valid.all())
+        c = {float(s): float(v) for s, v in zip(np.round(f.t_start_s, 9), f.X[:, I_CENTROID])}
+        self.assertAlmostEqual(c[2.0], 500.0, delta=20.0)
+        self.assertAlmostEqual(c[6.0], 3000.0, delta=20.0)
+        # 窓 [4, 5) は 500 Hz だけ、窓 [5, 6) は 3000 Hz だけ。切り替えの反対側のサンプルが混ざらない
+        self.assertAlmostEqual(c[4.0], c[2.0], delta=0.01)
+        self.assertAlmostEqual(c[5.0], c[6.0], delta=0.01)
+        self.assertTrue(c[2.0] + 100 < c[4.5] < c[6.0] - 100, c[4.5])   # 窓 [4.5, 5.5) は半分ずつ
+
+    def test_f10_chunks_of_32_and_96_samples(self):
+        d = make_session(self.root, audio=sine(1000), chunk_lens={500: 32, 1500: 96})
+        rows = read_chunks(d)
+        self.assertEqual([r[0] for r in rows[499:502]], [2000, 2002, 2006])     # 32 サンプルぶん = 2 ms
+        self.assertEqual([r[0] for r in rows[1499:1502]], [5998, 6004, 6008])   # 96 サンプルぶん = 6 ms
+        lengths, anchor_ms, gaps = chunk_timing(d)
+        self.assertEqual([int(lengths[500]), int(lengths[1500]), int(lengths[0]), int(lengths[-1])], [32, 96, 64, 64])
+        si = np.array([r[1] for r in rows])
+        np.testing.assert_allclose(anchor_ms, si * 1000.0 / HZ, atol=1e-9)   # 各アンカー = 先頭サンプルの時刻
+        t = features._sample_times(160000, si, anchor_ms / 1000.0)
+        np.testing.assert_allclose(t, np.arange(160001) / HZ, atol=1e-9)
+        np.testing.assert_allclose(np.diff(t), 1.0 / HZ, atol=1e-12)
+        self.assertEqual(gaps, [])   # 96 サンプルのチャンクの t_ms の差分 6 ms は飛びではない
+        f = features.extract_session(d)
+        self.assertEqual(f.X.shape, (37, 29))
+        self.assertTrue(f.valid.all())
+
+    def test_f10_short_last_chunk_anchor(self):
+        d = make_session(self.root, wav_trim=32)
+        rows = read_chunks(d)
+        self.assertEqual([rows[-2][0], rows[-1][0]], [9996, 9998])
+        lengths, anchor_ms, gaps = chunk_timing(d)
+        self.assertEqual(int(lengths[-1]), 32)
+        self.assertEqual(anchor_ms[-1], rows[-1][0] - 2.0)   # t_ms − 2 ms = 9996
+        self.assertEqual(gaps, [])
+
+    def jitter(self, name: str, ms: int) -> Path:
+        """チャンク 1000 の t_ms だけを ms 遅らせる（前との差分 4 + ms、前のチャンクとの空白 ms）。"""
+        d = make_session(self.root, name)
+        rows = read_chunks(d)
+        rows[1000][0] += ms
+        write_chunks(d, rows)
+        return d
+
+    def test_f10_diff_5ms_is_not_a_gap(self):
+        d = self.jitter("a", 1)
+        rows = read_chunks(d)
+        self.assertEqual(rows[1000][0] - rows[999][0], 5)
+        self.assertEqual(chunk_timing(d)[2], [])
+        self.assertTrue(features.extract_session(d).valid.all())
+
+    def test_f10_diff_6ms_is_a_gap(self):
+        d = self.jitter("b", 2)
+        rows = read_chunks(d)
+        self.assertEqual(rows[1000][0] - rows[999][0], 6)
+        self.assertEqual(chunk_timing(d)[2], [(4.000, 4.002)])
+        f = features.extract_session(d)
+        expected_bad = intersects(f.t_start_s, 4.000, 4.002)
+        np.testing.assert_array_equal(f.t_start_s[expected_bad], [3.25, 3.5, 3.75, 4.0])
+        np.testing.assert_array_equal(f.valid, ~expected_bad)
 
 
 class StandardizerTest(TmpCase):

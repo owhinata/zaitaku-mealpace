@@ -25,8 +25,10 @@ from evaluate import WINDOW_S, HOP_S   # 窓長とホップは二重に定義し
 AUDIO_HZ = 16000                  # docs/data-schema.md。これ以外の WAV は受け付けない
 AUDIO_SCALE = 32768.0             # int16 → float32
 WINDOW_SAMPLES = int(round(WINDOW_S * AUDIO_HZ))   # 16000
-AUDIO_CHUNK_T_OFFSET_MS = 0.0     # audio_chunks.csv の t_ms に足す補正。#15 の結論で変える（README）
-GAP_RATIO = 1.5                   # 1周期のこの倍以上の差分を飛びとする（tools/check_session.py と同じ）
+AUDIO_CHUNK_T_OFFSET_MS = 0.0     # 先頭サンプルの時刻への換算（t_ms − チャンクの長さぶん）のあとに足す補正。
+                                  # 系統的なずれが分かったとき用（docs/decisions/0013）
+GAP_RATIO = 1.5                   # 1周期のこの倍以上の差分を飛びとする（tools/check_session.py と同じ）。
+                                  # 音声は、チャンクの間の空白が周期の GAP_RATIO − 1 倍以上
 MIN_IMU_ROW_RATIO = 0.9           # 窓の IMU 行数が期待のこの割合未満なら valid = False
 
 PEAK_HEIGHT_RMS_RATIO = 1.0       # ピークの高さの下限 = 窓内の RMS × この値
@@ -152,6 +154,32 @@ def _load_audio(session: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]
     return x, si, t_ms, chunk_len
 
 
+def _chunk_lengths(n: int, si: np.ndarray) -> np.ndarray:
+    """チャンクごとのサンプル数 L[i] = sample_index[i+1] − sample_index[i]。最終行は WAV のサンプル数 n − sample_index[last]。"""
+    return np.diff(np.append(si, n))
+
+
+def _chunk_anchors_ms(t_ms: np.ndarray, lengths: np.ndarray) -> np.ndarray:
+    """チャンクの先頭サンプルの時刻の推定値（ms）。
+
+    audio_chunks.csv の t_ms は、装置がチャンクを読み出した直後の millis()。論理上はチャンクの終端側の時刻として扱い、
+    チャンクの長さぶん戻す（docs/data-schema.md、docs/decisions/0013）。
+    """
+    return t_ms - 1000.0 * lengths / AUDIO_HZ + AUDIO_CHUNK_T_OFFSET_MS
+
+
+def _audio_gaps(anchor_ms: np.ndarray, lengths: np.ndarray, chunk_len: int) -> list[tuple[float, float]]:
+    """音声の飛びの区間 (前のチャンクの推定の終端, 次のチャンクの推定の先頭)（秒）。
+
+    空白が、最頻のチャンク長から出す周期の GAP_RATIO − 1 倍以上の箇所を飛びとする。チャンク長が一定なら
+    「t_ms の差分が 1.5 周期以上」（tools/check_session.py）と同じ判定。長さの違う正常なチャンクは空白が 0。
+    """
+    end_ms = anchor_ms + 1000.0 * lengths / AUDIO_HZ
+    blank_ms = anchor_ms[1:] - end_ms[:-1]
+    i = np.nonzero(blank_ms >= (GAP_RATIO - 1.0) * 1000.0 * chunk_len / AUDIO_HZ)[0]
+    return [(end_ms[k] / 1000.0, anchor_ms[k + 1] / 1000.0) for k in i]
+
+
 def _sample_times(n: int, si: np.ndarray, anchor_s: np.ndarray) -> np.ndarray:
     """サンプル 0〜n（n は最終サンプルの直後）の時刻。チャンクの間は線形補間、最後のアンカー以後は 16 kHz で補外。"""
     idx = np.arange(n + 1, dtype=np.float64)
@@ -173,7 +201,7 @@ def _imu_period_ms(t_ms: np.ndarray) -> float:
 
 
 def _gaps(t_ms: np.ndarray, period_ms: float) -> list[tuple[float, float]]:
-    """差分が 1.5 周期以上の箇所を、飛びの区間 (前の時刻, 次の時刻)（秒）で返す。"""
+    """IMU 用。差分が 1.5 周期以上の箇所を、飛びの区間 (前の時刻, 次の時刻)（秒）で返す。"""
     i = np.nonzero(np.diff(t_ms) >= GAP_RATIO * period_ms)[0]
     return [(t_ms[k] / 1000.0, t_ms[k + 1] / 1000.0) for k in i]
 
@@ -287,8 +315,10 @@ def extract_session(session_dir: Path) -> WindowFeatures:
 
     imu_t = imu_t_ms / 1000.0
     imu_period_ms = _imu_period_ms(imu_t_ms)
-    sample_t = _sample_times(len(audio), chunk_si, (chunk_t_ms + AUDIO_CHUNK_T_OFFSET_MS) / 1000.0)
-    gaps = _gaps(imu_t_ms, imu_period_ms) + _gaps(chunk_t_ms, chunk_len / AUDIO_HZ * 1000.0)
+    chunk_lengths = _chunk_lengths(len(audio), chunk_si)
+    anchor_ms = _chunk_anchors_ms(chunk_t_ms, chunk_lengths)
+    sample_t = _sample_times(len(audio), chunk_si, anchor_ms / 1000.0)
+    gaps = _gaps(imu_t_ms, imu_period_ms) + _audio_gaps(anchor_ms, chunk_lengths, chunk_len)
 
     # 各ストリームの範囲は半開区間。音声は最終サンプルの直後まで、IMU は最後の行 + 1周期まで
     t_lo = max(imu_t[0], sample_t[0])

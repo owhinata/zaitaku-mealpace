@@ -27,7 +27,9 @@ data/raw/20260922-193012_self_water/
 ## audio.wav
 
 - 16 kHz, mono, int16。基板 PDM マイク
-- 装置から届いた音声チャンクは先頭サンプルの `t_ms` を持つ。WAV には連続波形として書き、
+- 音声チャンクの `t_ms` は、装置が PDM の受信コールバックでそのチャンクを読み出した直後に取った `millis()`。
+  論理上はチャンクの終端側の時刻として扱い、先頭サンプルの時刻の推定値を `t_ms − 1000 × チャンクのサンプル数 ÷ audio_hz` ms
+  （64 サンプル・16 kHz なら 4 ms 前）とする（docs/decisions/0013）。WAV には連続波形として書き、
   各チャンクの `t_ms` は `audio_chunks.csv`（`t_ms, sample_index`）に別途残す
 
 ## analog.csv（拡張点）
