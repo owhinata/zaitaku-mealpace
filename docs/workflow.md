@@ -119,6 +119,9 @@ Codex の呼び出しは codex plugin（`/codex:*`）に一本化する。
 1. `docs/status.md` と `docs/plan.md` を読ませる。
 2. 「Issue #N をやって」。
 3. 終わったら `docs/status.md` を更新させ、差分を自分で見る。
+   - `docs/status.md` の更新は、その Issue のコミットに含める。status だけのコミットを作らない。
+   - `docs/status.md` に Issue の open / close は書かない。正は GitHub。書くのは、作業の結果と、
+     次にやること（まだ作業が残っている Issue）だけ。「確認して閉じる」のような待ちの状態は書かない。
 4. 週1回、`docs/plan.md` の関門と現在地を自分で見直す。
 
 ## 相談するとき
