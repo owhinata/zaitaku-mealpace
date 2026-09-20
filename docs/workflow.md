@@ -4,9 +4,53 @@
 
 - 考える: チャット（Claude / ChatGPT）。リポジトリの URL と Issue 番号を渡して相談する。
   結論は Issue のコメントか `docs/decisions/` に書く。書かれない結論は存在しない。
-- 作る: Claude Code。1 セッション 1 Issue。入口と出口は CLAUDE.md の通り。
+- 作る: Claude Code。入口と出口は CLAUDE.md の通り。メインのエージェントは管理だけを行い、作業は subagent が行う
+  （下の「メインと subagent」、docs/decisions/0015）。
 - 見直す: Codex。plan 確定前に plan レビュー、関門（Milestone 完了時）に adversarial review。
   対象はコードの正しさより「CLAUDE.md の制約に触れていないか」。詳細は「レビュー（Codex）」。
+
+## メインと subagent
+
+メインのエージェント（人と話しているセッション）は管理だけを行う。Issue の作業は subagent に任せる（docs/decisions/0015）。
+
+**メインがやること**
+
+- Issue・`docs/status.md`・`docs/plan.md` を読み、進め方を決める。人に決めてもらう点は、作業を始める前に聞く。
+- plan を書く。plan mode への出入り（`EnterPlanMode` / `ExitPlanMode`）、Codex の plan レビュー、`plan-approve.sh` はメインが行う。
+  **subagent は `ExitPlanMode` を実行できない。** 下調べや plan の素案は、読むだけの subagent（Plan / Explore）に任せてよい。
+- subagent を起動し、報告を受け取って確かめる。テストを自分で走らせ、差分を読み、plan から外れた点と subagent が自分で決めた点を
+  Issue のコメントに残す。
+- Codex の出力の裏取り、Issue へのコメント、`docs/status.md` と `docs/log/` の更新、コミット。push は人に確認してから。
+- 実機や人の手が要る作業（装着しての記録、音声を聞いて確かめる、など）を人に頼み、結果を受け取る。
+
+**subagent がやること**
+
+- コード・テスト・文書の作成と変更、使い捨ての解析スクリプト、切り出しなどの作業。1つの subagent には1つの Issue の、範囲を
+  区切った作業だけを渡す。レビューの指摘への数行の修正も、原則として subagent に渡す。
+- 渡すもの: CLAUDE.md を最初に読むこと、承認済みの plan のパス、変えてよいファイルと変えてはいけないファイル、確認の方法、
+  報告の形式。plan と実物が食い違って進められないときは、読み替えずに止まって報告させる。
+- 守らせること: 編集は Edit / Write で行う（制約領域は hook が見ている。Bash で書き換えない）。git の add / commit / push を
+  しない。指示が無いかぎり実機と `data/raw/` に触らない。生の波形や特徴量の値を報告に出さない。
+
+**model の選び方**
+
+- sonnet: 文書の清書、合成データで確かめる小さなスクリプト、切り出しのような機械的な作業、読むだけの下調べ。
+- opus（または既定の上位の model）: 制約領域（`analysis/`、`firmware/`、`tools/record.py`、`docs/evaluation.md`、
+  `docs/data-schema.md`）の実装、評価の数え方・時刻の換算・分割が絡む作業、plan の素案づくり。迷ったら上位を使う。
+
+**plan mode と並行作業（M1 で分かったこと）**
+
+- メインが plan mode に入ると、実行中の subagent も編集と実行ができなくなる。**subagent が実装している間は plan mode に入らない。**
+  止めてしまった subagent は、plan mode を出てから再開させる。
+- plan ファイル（`~/.claude/plans/*.md`）は1つしかない。subagent には plan ファイルそのものではなく、scratchpad に置いた
+  コピーのパスを渡す（後で plan ファイルを次の Issue に替えても、実装中の subagent が別の plan を拾わない）。
+- 次の Issue の plan は、実装を待つ間に scratchpad で下書きし、Codex の plan レビューも下書きのハッシュで先に回せる。
+  承認のときに下書きを plan ファイルへそのままコピーすれば、ハッシュが一致する。
+- `edit-gate.sh` が見るのは marker が空でないことだけ。`plan-gate.sh` と `plan-approve.sh` は plan ファイルのハッシュを見る。
+  承認の取り直しは、実装中の subagent の編集を止めない。
+- Codex の plan レビューを待つ間に、次の Issue の下調べ（読むだけの subagent）を並行で進めてよい。ただし、初回のレビューから
+  再レビュー（resume）までの間に、別の Codex task を挟まない。
+- `codex-companion.mjs` に `--help` を渡すと、focus の文言として扱われてレビューが実際に走る。オプションの確認に使わない。
 
 ## Issue
 
