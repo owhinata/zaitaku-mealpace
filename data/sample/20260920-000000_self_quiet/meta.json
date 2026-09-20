@@ -1,0 +1,25 @@
+{
+  "subject": "self",
+  "cond": "quiet",
+  "position": "midline-below-thyroid",
+  "band": "elastic-25mm",
+  "firmware_sha": "ca2429c",
+  "sample_rates": {
+    "imu_hz": 104,
+    "audio_hz": 16000,
+    "analog_hz": 0
+  },
+  "sensors": [
+    {
+      "id": "imu",
+      "part": "LSM6DSOX",
+      "iface": "onboard"
+    },
+    {
+      "id": "mic",
+      "part": "MP34DT06JTR",
+      "iface": "onboard-pdm"
+    }
+  ],
+  "notes": "10 s excerpt for format checks"
+}
