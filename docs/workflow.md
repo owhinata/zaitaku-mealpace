@@ -33,6 +33,9 @@ Codex の呼び出しは codex plugin（`/codex:*`）に一本化する。
 - **ゲートは BLOCKING だけ。** BLOCKING は CLAUDE.md の制約違反と評価定義からの逸脱。
   CONCERN は列挙して人が採否を決め、結果を Issue のコメントに一行ずつ残す。
 - 再レビューは2回まで。2回で残った指摘は、3回目を回さずに人に持っていく。
+- 再レビューは新しいセッションを開かず、前回のスレッドを resume する（docs/decisions/0008）。
+  見るのは、前回の指摘が直ったかと、直した箇所が新しい BLOCKING を生んでいないか。
+  初回は fresh。初回から再レビューまでの間に、他の Codex task（`/codex:rescue` など）を挟まない。
 - Codex の生の出力は全文を Issue のコメントに貼る。要約だけを人に届けない。
 - plan のプロンプトは外部サービスに送られる。`data/raw/` の中身と p1 の生データを入れない。
 
@@ -102,7 +105,7 @@ Codex の呼び出しは codex plugin（`/codex:*`）に一本化する。
 - 指摘は BLOCKING（CLAUDE.md の制約違反、評価定義からの逸脱）と CONCERN に分ける。
 - 結果は「判定」Issue のコメントに残す。Codex の生の出力も全文を貼る。
 - ゲートは BLOCKING だけ。BLOCKING が残ったまま関門を通さない。CONCERN は人が採否を決める。
-- 再レビューは2回まで。
+- 再レビューは2回まで。関門の再レビューは fresh で回す（review コマンドに resume が無い）。
 - 通すかどうかを決めるのは人。エージェントは「判定」Issue を閉じない。
 
 ## 言語

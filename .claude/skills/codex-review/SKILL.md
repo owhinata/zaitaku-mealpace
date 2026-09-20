@@ -72,6 +72,22 @@ node "$(ls -d "$HOME"/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-c
 （コマンドは `node` で始めること。先頭に変数代入を置くと `Bash(node:*)` の
 permission ルールに当たらず毎回プロンプトが出る。）
 
+**再レビュー（plan を直した後）は、前回のスレッドを resume する**（docs/decisions/0008）:
+
+```bash
+node "$(ls -d "$HOME"/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs \
+        | sort -V | tail -1)" task --resume --effort medium --prompt-file /abs/path/to/plan-rereview.md
+```
+
+- 再レビューのプロンプトは短くてよい。1行目に新しい `PLAN-SHA`、直した plan の全文、前回の指摘の
+  どれをどう直したか。見る範囲は「前回の BLOCKING / CONCERN が直ったか」と「直した箇所が新しい
+  BLOCKING を生んでいないか」に絞ると明示する。出力形式（`PLAN-SHA` と3面の `VERDICT` 行）は初回と同じ。
+- `--resume` は、この Claude セッションの最新の Codex task を拾う。初回のレビューから再レビューまでの
+  間に、他の task（`/codex:rescue` など）を挟まない。挟んでしまったら `--fresh` で初回の形に戻す。
+- 初回は resume しない（`--resume` を付けない）。
+
+共通:
+
 - `--write` は付けない。付けなければサンドボックスは `read-only`（レビューに書込は不要）。
 - `--effort` は `medium`。時間が問題なら effort を上げ下げするより観点を絞る。
 - `Bash(run_in_background: true)` で起動して待つ。plan review は 120s を超えるので
