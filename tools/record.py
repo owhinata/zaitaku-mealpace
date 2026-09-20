@@ -12,9 +12,12 @@ SUBJECT / COND / POSITION / BAND / DURATION の環境変数を、対応する引
   id 0x01 IMU (float32 x6)  0x02 AUDIO (int16 x N)  0x03 ANALOG (uint16 x N)  0x7F META (JSON)
 """
 from __future__ import annotations
-import argparse, csv, json, os, re, struct, subprocess, sys, threading, time, wave
+import argparse, atexit, codecs, contextlib, csv, json, os, re, signal, struct, subprocess, sys, threading, time, wave
 from datetime import datetime
 from pathlib import Path
+
+if os.name != "nt":
+    import select, termios, tty
 
 import serial
 
@@ -31,23 +34,121 @@ def env_default(name: str, fallback: str) -> str:
     return v if v else fallback
 
 
-def getch_loop(on_key):
-    """POSIX/Windows 両対応の 1 文字入力ループ。"""
-    if os.name == "nt":
-        import msvcrt
-        while True:
-            ch = msvcrt.getwch()
-            on_key(ch)
-    else:
-        import termios, tty
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
+class TtyMode:
+    """端末の設定を保存し、メインのスレッドから戻す（POSIX）。
+
+    入力スレッドは daemon で、プロセス終了時に finally を実行せずに打ち切られる。
+    cbreak の解除をそのスレッドに任せると端末が cbreak のまま残るので、保存と復元は
+    メインで持つ。`restore()` は `enter()` の前でも、何度呼んでもよい。
+    """
+
+    def __init__(self, fd: int):
+        self.fd = fd
+        self.closed = False       # 終了処理が始まった印。入力スレッドはこれを見て抜ける
+        self._old = None          # enter() の前の設定
+        self._lock = threading.Lock()
+
+    def enter(self) -> None:
+        """今の設定を保存して cbreak にする。メインのスレッドで呼ぶ。"""
+        with self._lock:
+            if self.closed or self._old is not None:
+                return
+            self._old = termios.tcgetattr(self.fd)
+            # 既定の TCSAFLUSH は先行入力を捨てるので TCSADRAIN にする。
+            tty.setcbreak(self.fd, termios.TCSADRAIN)
+
+    def restore(self) -> None:
+        """終了処理の印を立てて、保存した設定に戻す。何度呼んでもよい。"""
+        with self._lock:
+            self.closed = True
+            self._to_old()
+
+    def _to_old(self) -> None:
+        if self._old is None:
+            return
         try:
-            tty.setcbreak(fd)
-            while True:
-                on_key(sys.stdin.read(1))
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self._old)
+        except Exception:
+            pass
+
+    @contextlib.contextmanager
+    def cooked(self):
+        """元の設定（行の編集とエコー）に戻して yield し、終了処理が始まっていなければ cbreak に戻す。"""
+        with self._lock:
+            self._to_old()
+        try:
+            yield
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            with self._lock:
+                if not self.closed and self._old is not None:
+                    try:
+                        tty.setcbreak(self.fd, termios.TCSADRAIN)
+                    except Exception:
+                        pass
+
+
+class KeyReader:
+    """POSIX の 1 文字入力ループ。select で待つので、終了の印を見て自分で止まれる。"""
+
+    def __init__(self, fd: int, mode: TtyMode, on_key, on_note):
+        self.fd = fd
+        self.mode = mode
+        self.on_key = on_key
+        self.on_note = on_note
+        self._dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._buf = ""            # 読んだが、まだ処理していない文字
+        self._eof = False
+
+    def _stop(self) -> bool:
+        return self.mode.closed or self._eof
+
+    def _fill(self, timeout: float = 0.1) -> None:
+        """読めるものがあれば読んで _buf に足す。無ければ timeout 秒で戻る。"""
+        try:
+            if not select.select([self.fd], [], [], timeout)[0]:
+                return
+            data = os.read(self.fd, 1024)
+        except (OSError, ValueError):
+            self._eof = True
+            return
+        if not data:
+            self._eof = True
+            return
+        self._buf += self._dec.decode(data)
+
+    def run(self) -> None:
+        while not self._stop():
+            if not self._buf:
+                self._fill()
+                continue
+            ch, self._buf = self._buf[0], self._buf[1:]
+            if ch == "o":
+                self._read_note()
+            else:
+                self.on_key(ch)
+
+    def _read_note(self) -> None:
+        """o の note を1行読む。元の設定の間は、端末が行の編集とエコーを受け持つ。"""
+        with self.mode.cooked():
+            print("note: ", end="", flush=True)
+            while "\n" not in self._buf:
+                if self._stop():
+                    return        # 打ち終える前に終了した。この o は記録しない
+                self._fill()
+            note, _, self._buf = self._buf.partition("\n")   # 改行より後ろは通常のキーに回す
+            self.on_note(note.rstrip("\r"))                  # 時刻は打ち終えた時点（今までと同じ）
+
+
+def getch_loop_nt(on_key):
+    """Windows の 1 文字入力ループ。端末の設定は変えない。"""
+    import msvcrt
+    while True:
+        on_key(msvcrt.getwch())
+
+
+def raise_system_exit(signum, frame):
+    """SIGTERM を SystemExit に変える。main の finally（端末の復元）を通してから終わる。"""
+    raise SystemExit(128 + signum)
 
 
 def git_sha() -> str:
@@ -76,6 +177,8 @@ class Session:
         self.analog = None
         self.n_audio = 0
         self.last_t_ms = 0
+        self._lock = threading.Lock()   # mark()（入力スレッド）と close()（メイン）を守る
+        self._closed = False
         self.meta = {
             "subject": subject, "cond": cond, "position": position, "band": band,
             "firmware_sha": git_sha(),
@@ -109,13 +212,21 @@ class Session:
                 pass
 
     def mark(self, label: str, note: str = ""):
-        self.ev_w.writerow([self.last_t_ms, label, note]); self.ev.flush()
-        print(f"  [{self.last_t_ms} ms] {label} {note}")
+        """マーカーを1行書く。close() の後は何もしない（入力スレッドが遅れて呼ぶことがある）。"""
+        with self._lock:
+            if self._closed:
+                return
+            self.ev_w.writerow([self.last_t_ms, label, note]); self.ev.flush()
+            print(f"  [{self.last_t_ms} ms] {label} {note}")
 
     def close(self):
-        for f in (self.imu, self.ev, self.chunks, self.analog):
-            if f: f.close()
-        self.wav.close()
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            for f in (self.imu, self.ev, self.chunks, self.analog):
+                if f: f.close()
+            self.wav.close()
         (self.dir / "meta.json").write_text(json.dumps(self.meta, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"saved: {self.dir}")
 
@@ -180,20 +291,40 @@ def main():
         if ch in "stcnqb":
             sess.mark(ch)
         elif ch == "o":
+            # POSIX の o は KeyReader が扱う。ここを通るのは Windows の経路だけ。
             sess.mark("o", input("note: "))
 
-    if sys.stdin.isatty():
+    is_tty = sys.stdin.isatty()
+    tty_mode = TtyMode(sys.stdin.fileno()) if is_tty and os.name != "nt" else None
+    if tty_mode is not None:
+        atexit.register(tty_mode.restore)        # 端末を変える前に登録する
+    signal.signal(signal.SIGTERM, raise_system_exit)   # SIGTERM でも下の finally を通る
+
+    if is_tty:
         print("recording... keys: s t c n q b o / Ctrl-C to stop")
-        threading.Thread(target=getch_loop, args=(on_key,), daemon=True).start()
     else:
         print("recording... tty が無いのでマーカー入力は無効")
     if deadline is not None:
         print(f"  --duration {a.duration:g} 秒で自動終了する")
+
+    thread = None
     try:
+        if tty_mode is not None:
+            tty_mode.enter()
+            reader = KeyReader(sys.stdin.fileno(), tty_mode, on_key, lambda note: sess.mark("o", note))
+            thread = threading.Thread(target=reader.run, daemon=True)
+            thread.start()
+        elif is_tty:
+            thread = threading.Thread(target=getch_loop_nt, args=(on_key,), daemon=True)
+            thread.start()
         read_frames(ser, sess.on_frame, stats, deadline)
     except KeyboardInterrupt:
         pass
     finally:
+        if tty_mode is not None:
+            tty_mode.restore()                   # 印を立てて端末を戻す
+            if thread is not None:
+                thread.join(timeout=1.0)         # 止まらなくても終了は妨げない（daemon のまま）
         ser.close(); sess.close()
         print("正常受信フレーム数:")
         for sid in sorted(stats["ok"]):
