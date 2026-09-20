@@ -1,6 +1,6 @@
 # 現在地
 
-更新: 2026-09-19
+更新: 2026-09-20
 
 ## 段階
 
@@ -23,14 +23,14 @@ M0 準備（9/19〜9/21）
 - Codex を実際に呼ぶ plan レビューを #2 で初めて通した（3回、計約41分、CONCERN 10件、BLOCKING 0）。
 - #3: 生の音声波形の線引きを docs/decisions/0005 に記録し、AGENTS.md・docs/workflow.md・codex-review skill を直した。
   CLAUDE.md の該当行も差し替え済み。
-- Edge Impulse プロジェクト未作成。
+- #4: Edge Impulse のプロジェクト `zaitaku-mealpace` を作成（Private、One label per data item、
+  Target は Raspberry Pi RP2040 / RAM 264 KB / ROM 16 MB、docs/log/2026-09-20.md）。データは未投入。
 - ロボセンサー技研への問い合わせ未送付（代替センサ、docs/decisions/0002、#5）。
 
 ## 次にやること
 
 M0 準備（期限 9/21）
 
-- #4 Edge Impulse プロジェクトを作成し、設定を記録する（人）。
 - #5 代替センサ（ロボセンサー技研）の入手性を問い合わせる（人、優先度最低）。
 - #6 【判定】M0 準備（閉じるのは人）。
 
@@ -41,3 +41,5 @@ M1 ロギング・分岐点（期限 9/27）: #7〜#13 と #15（音声チャン
 ## 保留中の判断
 
 - 一口ボタンの扱い（企画書 5章）。M2 検出器（10/11）までに決める。
+- IMU と音の結合の方式（docs/plan.md、docs/log/2026-09-20.md）。M2 検出器（10/11）までに決める。
+- Edge Impulse プロジェクトの公開範囲。今は Private。M2 検出器（10/11）までに決める。
