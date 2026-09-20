@@ -54,5 +54,5 @@ add_custom_target(monitor
 add_custom_target(record
   COMMAND ${CMAKE_COMMAND} -E env PORT=${PORT}
           ${PYTHON3} ${CMAKE_SOURCE_DIR}/tools/record.py
-          --port ${PORT} --out ${CMAKE_SOURCE_DIR}/data/raw
+          --port ${PORT}
   COMMENT "記録（PC 側）。SUBJECT=self COND=water POSITION=midline-below-thyroid DURATION=10")

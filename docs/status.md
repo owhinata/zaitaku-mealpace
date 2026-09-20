@@ -25,6 +25,11 @@ M0 準備（9/19〜9/21）
   CLAUDE.md の該当行も差し替え済み。
 - #4: Edge Impulse のプロジェクト `zaitaku-mealpace` を作成（Private、One label per data item、
   Target は Raspberry Pi RP2040 / RAM 264 KB / ROM 16 MB、docs/log/2026-09-20.md）。データは未投入。
+- #6: 関門のレビュー（Codex、base は初期コミット）を1回回した。公開情報の線引きへの指摘はなし。
+  指摘は1件: `tools/record.py` の `--out` と `.gitignore` の `!data/sample/**` により、p1 の生データを
+  コミットできる場所へ記録できる。対応として `--out` を廃止し、出力先を `data/raw/` に固定した
+  （docs/decisions/0007）。リポジトリ外の cwd から3秒の記録で確認済み。`git add -f` と手での移動は塞いでいない。
+- #6: plan の再レビューは前回の Codex スレッドを resume する（docs/decisions/0008）。初回と関門は fresh、上限2回はそのまま。
 - ロボセンサー技研への問い合わせ未送付（代替センサ、docs/decisions/0002、#5）。
 
 ## 次にやること
@@ -36,10 +41,9 @@ M0 準備（期限 9/21）
 
 M1 ロギング・分岐点（期限 9/27）: #7〜#13 と #15（音声チャンクの `t_ms`）、判定は #14。
 
-#6 の判定で見直すこと: plan レビューが CONCERN だけのときに何回まで回すか（#2 では3回とも CONCERN が出た）。
-
 ## 保留中の判断
 
 - 一口ボタンの扱い（企画書 5章）。M2 検出器（10/11）までに決める。
 - IMU と音の結合の方式（docs/plan.md、docs/log/2026-09-20.md）。M2 検出器（10/11）までに決める。
 - Edge Impulse プロジェクトの公開範囲。今は Private。M2 検出器（10/11）までに決める。
+- `p1` の記録先（リポジトリごと暗号化ディスクに置くか、`p1` だけリポジトリ外を必須にするか）。M3 本人試用（10/12）の前に決める。

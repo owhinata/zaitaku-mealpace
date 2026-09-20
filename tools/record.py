@@ -6,6 +6,7 @@
 
 --duration <秒> を付けると、その秒数で自分から終了する（Ctrl-C と同じ後始末を通る）。
 SUBJECT / COND / POSITION / BAND / DURATION の環境変数を、対応する引数の既定値として読む。
+出力先はリポジトリの data/raw/ 固定。変える引数は置かない（docs/decisions/0007）。
 
 フレーム: [A5 5A][id u8][len u16 LE][t_ms u32 LE][payload][xor u8]
   id 0x01 IMU (float32 x6)  0x02 AUDIO (int16 x N)  0x03 ANALOG (uint16 x N)  0x7F META (JSON)
@@ -21,6 +22,7 @@ SYNC = b"\xa5\x5a"
 ID_IMU, ID_AUDIO, ID_ANALOG, ID_META = 0x01, 0x02, 0x03, 0x7F
 AUDIO_HZ, IMU_HZ = 16000, 104
 STREAM_NAMES = {ID_IMU: "IMU", ID_AUDIO: "AUDIO", ID_ANALOG: "ANALOG", ID_META: "META"}
+RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
 
 
 def env_default(name: str, fallback: str) -> str:
@@ -154,7 +156,6 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", default=os.environ.get("PORT", "/dev/ttyACM0"))
     ap.add_argument("--baud", type=int, default=2000000)
-    ap.add_argument("--out", type=Path, default=Path("data/raw"))
     ap.add_argument("--subject", default=env_default("SUBJECT", "self"))
     ap.add_argument("--cond", default=env_default("COND", "water"))
     ap.add_argument("--position", default=env_default("POSITION", "midline-below-thyroid"))
@@ -165,7 +166,7 @@ def main():
     if a.subject not in ("self", "p1"):
         sys.exit("subject は self か p1")
 
-    sess = Session(a.out, a.subject, a.cond, a.position, a.band)
+    sess = Session(RAW_DIR,a.subject, a.cond, a.position, a.band)
     ser = serial.Serial(a.port, a.baud, timeout=0.05)
     stats = {"ok": {}, "xor_err": 0}
     deadline = time.monotonic() + a.duration if a.duration > 0 else None
