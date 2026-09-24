@@ -1,0 +1,2 @@
+# Edge Impulse の書き出し（C++ library）を置く場所。model_metadata.h にプロジェクト ID と所有者名が入るのでコミットしない。
+src/

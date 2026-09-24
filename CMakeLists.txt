@@ -18,11 +18,20 @@ project(zaitaku_mealpace NONE)
 # その場合は venv を作って渡す:
 #   python3 -m venv .venv
 #   cmake -S . -B build -DPORT=/dev/ttyACM0 -DPYTHON3=$PWD/.venv/bin/python3
+#
+# SKETCH_NAME でビルドするスケッチ（firmware/<SKETCH_NAME>/）を選ぶ。既定は logger。
+# BUILD_FLAGS は arduino-cli の build.extra_flags に渡る（C・C++・リンクの全部に付く）。既定は空。
+# 計測用スケッチ（firmware/bench/、#17）は案ごとに別のビルドディレクトリで:
+#   cmake -S . -B build-bench2 -DSKETCH_NAME=bench -DBUILD_FLAGS="-DBENCH_CASE=2"
+#   cmake --build build-bench2 --target build
+#   案1 は -DBUILD_FLAGS="-DBENCH_CASE=1 -I$PWD/firmware/bench/src -DEI_PORTING_MBED=0"
 
 set(FQBN "arduino:mbed_nano:nanorp2040connect" CACHE STRING "Arduino FQBN")
 set(PORT "/dev/ttyACM0" CACHE STRING "Serial port")
-set(SKETCH "${CMAKE_SOURCE_DIR}/firmware/logger")
-set(BUILD_OUT "${CMAKE_BINARY_DIR}/firmware/logger")
+set(SKETCH_NAME "logger" CACHE STRING "firmware/ の下のスケッチ名")
+set(BUILD_FLAGS "" CACHE STRING "arduino-cli の build.extra_flags に渡す追加フラグ")
+set(SKETCH "${CMAKE_SOURCE_DIR}/firmware/${SKETCH_NAME}")
+set(BUILD_OUT "${CMAKE_BINARY_DIR}/firmware/${SKETCH_NAME}")
 
 find_program(ARDUINO_CLI arduino-cli REQUIRED)
 find_program(PYTHON3 python3 REQUIRED)
@@ -35,7 +44,9 @@ add_custom_target(deps
   COMMENT "ボードコアとライブラリ、Python 依存の導入")
 
 add_custom_target(build
-  COMMAND ${ARDUINO_CLI} compile --fqbn ${FQBN} --output-dir ${BUILD_OUT} ${SKETCH}
+  COMMAND ${ARDUINO_CLI} compile --fqbn ${FQBN}
+          --build-property "build.extra_flags=${BUILD_FLAGS}"
+          --output-dir ${BUILD_OUT} ${SKETCH}
   COMMENT "ファームウェアのビルド")
 
 add_custom_target(upload

@@ -8,6 +8,7 @@ data/**/meta.json
 
 # ビルド
 build/
+build-*/
 firmware/**/build/
 *.bin
 *.uf2
