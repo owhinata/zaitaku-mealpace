@@ -9,6 +9,10 @@ PC 側の解析・評価。ファームウェアが何で書かれていても�
 - `train_eval.py` M1 の分岐点: ロジスティック回帰で学習し、上の3つを使って採点した報告を出す
 - `evaluate_detector.py` M2 の検出器のセッション（`detect.csv`・`events.csv`）を `evaluate.py` の数え方で採点した報告を出す（#23、docs/decisions/0021）
 - `ei_upload.py`  M2 の特徴量ベクトル（1 窓 1 項目）を Edge Impulse に投入する（#21。生の音声・IMU は上げない）
+- `m2_norm_header.py` `m2_norm.json` → `firmware/detector/m2_norm.h`（正規化の定数。#22）
+- `m2_scorer.py`  書き出した C++ ライブラリを PC 上で動かす実行ファイルで窓を採点する scorer（`evaluate_detector.py --scorer` の形。#22）
+- `m2_threshold.py` 検証側（収集日4）をイベント単位に採点し、閾値の表を出して `firmware/detector/m2_threshold.h` に凍結する（#22）
+- `ei_testing_result.py` Edge Impulse の Model testing の窓ごとの結果を API で取り、PC の確率と突き合わせる（#22）
 
 M1 では `features.py` ＋ ロジスティック回帰、M2 から Edge Impulse。
 
@@ -258,21 +262,112 @@ python analysis/evaluate_detector.py data/raw --scorer path/to/m2_scorer.py   # 
   誤検出の塊（塊の最初の窓の中心 − `t_c` が `[−1.0, +5.0]` 秒）、収集日ごと・会話の有無ごと（`o` の note が `conv`）の合算。
 - **`--scorer PATH`**: `score(features: list[list[float]], meta: dict) -> list[float]` を持つ Python ファイルで `feat.csv` を
   再採点し、装置の `positive` との差（装置 1 / PC 0、装置 0 / PC 1、`|prob − prob_pc|` の最大）と PC の陽性で数えた数字を出す。
-  閾値は `meta.json` の `threshold`（上書きの引数は無い）。scorer の中身は #22。
+  閾値は `meta.json` の `threshold`（上書きの引数は無い）。scorer の実物は `m2_scorer.py`（下の「M2 の scorer と閾値」）。
 - 報告は標準出力に Markdown。ファイルは書かない。個々の窓の確率と特徴量の値は出さない。未コミットの変更があってもコミットに
   `-dirty` を付けて止めない（#27 の M2 の数字はコミット済みの状態で走らせる）。
 
 `split.py` は `fw` が `detector` のセッションを M1 の分割（`train` / `eval`）に入れず、戻り値の `detector` に列挙する。
 `fw` が `detector` でないのに `detect.csv` か `feat.csv` があるセッションは止まる。
 
+## M2 の scorer と閾値（`m2_norm_header.py`・`m2_scorer.py`・`m2_threshold.py`・`ei_testing_result.py`）
+
+Issue #22。Edge Impulse から書き出した C++ ライブラリ（`firmware/detector/src/`。zip の中身をそのまま置き、編集しない）を PC 上で動かし、
+検証側（収集日4）をイベント単位に採点して閾値を凍結する。前提は docs/decisions/0019（正規化の定数と閾値を `firmware/detector/` に置く、
+閾値は収集日4 だけで 0014 の形で決めて凍結）・0020（式 `m2-0020`）・0021（`score(features, meta)`、閾値は float32 で比べる）。
+**ここで出す数字は装置上の推論の前の参考値で、M2 の合格線の数字は #27 で出す。**
+
+### 正規化の定数のヘッダ（`m2_norm_header.py`）
+
+```
+python analysis/m2_norm_header.py            # analysis/m2_norm.json → firmware/detector/m2_norm.h
+python analysis/m2_norm_header.py --check    # 一致するかだけを返す
+```
+
+- `M2_FEATURE_SET`（`"m2-0020"`）、`M2_N_FEATURES`（29）、`M2_FEATURE_NAMES`、`M2_NORM_MEAN` / `M2_NORM_STD`（double、`%.17g`。JSON の float64 が
+  そのまま往復する桁数）、`m2_normalize(const float* x, float* z)`（double で `(x − mean) / std` を計算してから float32 に落とす。
+  `features.Standardizer.transform` と同じ順序なので、同じ `x` に対して PC の実行ファイル・装置・EI に投入した値が同じ float32 になる）。
+  `<stdint.h>` 以外を include しない（docs/decisions/0001）。
+- 書いた後に読み戻し、定数が JSON とビット一致することを確かめる。`std` に 0 か有限でない値があれば止まる。出力が既にあって内容が違えば止まる
+  （黙って上書きしない。作り直すときは人が消す）。コメントに書くのは `stats_sessions` の本数・`n_windows`・`commit` だけ（`self` の集計値なので公開してよい）。
+
+### PC 上の実行ファイル（`firmware/detector/host/score_windows.cpp`、`build.sh`）
+
+```
+bash firmware/detector/host/build.sh         # → build-host/score_windows（firmware/detector/src/ に書き出しが要る。無ければ止まる）
+```
+
+- 標準入力の 1 行 1 窓（正規化前の 29 個、`FEATURE_NAMES` の順、空白区切り）を `m2_normalize` → `run_classifier` に掛け、見出し行
+  （`model <project_id> <deploy_version>`、`feature_set`、`n_features`、`labels`、`input_datatype`、`quantized`、`selfcheck`）の後に
+  1 行 1 窓で `LABEL_COUNT` 個の確率（`%.9g`、`labels` の順）を出す。`static_assert` で書き出しの define（29 次元、3 クラス、EI 側の正規化なし）を、
+  起動時に Raw data ブロックが 1 つで `scale_axes == 1` であることを確かめる。「特徴量の後の装置の経路」の PC 版で、#24 の装置も同じ `m2_norm.h` と
+  `run_classifier` を使う。
+- `build.sh` は g++ で EI の `example-standalone-inferencing` の Makefile と同じソースの集合（`tflite-model/`、`dsp/kissfft`、`dsp/dct`、
+  `porting/posix`、`tensorflow/lite/...`）をコンパイルする。CMSIS は x86 では使わないので入れない。CMake のターゲットは足さない。
+
+### scorer（`m2_scorer.py`）
+
+```python
+import m2_scorer
+s = m2_scorer.Scorer()                       # 既定 build-host/score_windows。環境変数 M2_SCORE_BIN で差し替え（テスト用）
+s.model, s.labels, s.n_features, s.swallow_index
+P = s.score_rows(rows)                       # (n, LABEL_COUNT)。1 回の起動で全行を流す。行数が合わなければ止まる
+m2_scorer.score(features, meta)              # evaluate_detector.py --scorer の形。swallow の列を返す
+```
+
+- `Scorer` は起動時に見出しの `selfcheck`（実行ファイルが `SELFCHECK_INPUT` の 29 個を `m2_normalize` した値）を、`m2_norm.json` から作った
+  `Standardizer.transform` の同じ入力の結果とビット一致で比べ、違えば止まる（ヘッダと JSON の食い違い、演算の順序の違いをここで捕まえる）。
+- `score(features, meta)` は `meta["feature_set"]`（`m2-0020`）、`feature_names`、次元、`meta["model"]`（あれば `project_id` と
+  `deploy_version` が実行ファイルの見出しと一致すること。装置と違うライブラリで再採点しない）を検査する。閾値との比較は `evaluate_detector.py` が行う。
+- scorer は正規化しない（実行ファイルの中で `m2_norm.h` が行う）。特徴量・確率をファイルに書かず、標準出力に値を出さない。
+
+### 検証側の採点と閾値の凍結（`m2_threshold.py`）
+
+```
+python analysis/m2_threshold.py data/raw              # 表と参考値（ファイルは書かない）
+python analysis/m2_threshold.py data/raw --freeze     # 加えて firmware/detector/m2_threshold.h を書く（未コミットの変更があれば止まる）
+```
+
+1. `ei_upload.check_split` で `train` = 収集日1〜3 各 7 本、`eval` = 収集日4 の 7 本を検査する。対象は `eval` だけ。収集日1〜3 は `meta.json` 以外を開かない。
+2. `m2_norm.json` の `stats_sessions` に収集日4 が無いこと、`m2_norm.h` が `m2_norm.json` と一致すること（`m2_norm_header.differences`）を検査する。
+3. 7 本それぞれを `features_m2.extract_session` → 実行ファイルに流し、`swallow` の確率を得る。`valid = False` の窓は陽性にしない。
+4. 候補 0.05, 0.10, …, 0.95（`train_eval.THRESHOLDS`）ごとに `evaluate.event_metrics` → `train_eval.sum_metrics` で合算し、表にする。
+5. 規則（`pick_threshold(table, 1.0)`）: 誤検出率が 1.0 回/分以下の候補のうち検出率が最大（同率なら高いほう）。無ければ誤検出率が最小（同率なら高いほう）。
+   3.0 のときは `train_eval.pick_threshold` と同じ結果になる（テストで固定）。候補と規則は引数で変えられない。
+6. 採用した閾値で、セッションごとの表、`evaluate.aggregate`（辞書のキーが `eval` の一覧と一致することを確かめる）の検出率・誤検出率・混同行列（TP / FN / FP）、
+   合格線（85% / 1 回/分）との比較（参考）、参考値（常時陽性、陽性窓の割合、`c` に紐づく誤検出の塊、無効な窓）、窓単位（投入した窓の argmax × ラベルの 3 × 3 と accuracy。
+   EI の Model testing との突き合わせ用）を Markdown で出す。波形・特徴量の値・個々の窓の確率は出さない。
+7. `--freeze` は `train_eval.git_dirty()` なら止まる。`m2_threshold.h` は `static const float M2_THRESHOLD = 0.85f;` の形（値は候補の短い表記。
+   コメントに float32 の 9 桁 `%.9g` と「META の `threshold` にはこの 9 桁の値を書く」）と `M2_THRESHOLD_FP_PER_MIN_LIMIT 1.0`、決めた日・コミット・
+   EI の deploy version。既にあって内容が違えば止まる。順序は「書き出し・ヘッダ・スクリプト・テストをコミット → `--freeze` → `m2_threshold.h` をコミット」。
+   以降、#27 の記録が終わるまで閾値もモデルも変えない。
+
+### EI の Model testing との突き合わせ（`ei_testing_result.py`）
+
+```
+EI_API_KEY=... python analysis/ei_testing_result.py data/raw --project-id <ID>
+```
+
+- `GET https://studio.edgeimpulse.com/v1/api/<projectId>/classify/page?variant=int8&limit=..&offset=..` をページ分割で全件取り、
+  `variant=float32` も参考に取る。**応答はメモリ上で突き合わせ、ファイルにも scratchpad にも書かない。** 標準出力に出すのは集計値だけ。
+- PC 側は `m2_threshold.py` と同じ経路で収集日4 の投入した窓（`valid` かつ境目でない窓）を採点し、`(session, t_ms)` で対応づける。EI の項目数が投入数と
+  一致しなければ止まる。`--project-id` は実行ファイルの見出しと一致しなければ止まる（値は出さない）。閾値は `firmware/detector/m2_threshold.h` から読む。
+- 出す数字: 窓の数、int8 同士の `max |Δp|`（クラスごと）、`|Δp| > 0` / `> 1/256` の窓の数、argmax が違う窓の数、凍結した閾値で `swallow` の陽性・陰性が違う窓の数、
+  3 × 3 の混同行列の一致、参考として float32（EI）と int8（PC）の `max |Δp|`。「一致」は argmax の不一致 0・閾値での不一致 0・`max |Δp| = 0` のときだけ（決定 F1）。
+- 応答の項目名（`result[].sample.name / metadata / label`、`classifications[0].result[0]` のクラス名 → 確率）は EI の API 文書の要約から置いた仮定で、
+  実際の応答で確かめて `parse_item` を直す（コードに注がある）。送受信は `run(argv, fetch=...)` で差し替えられ、テストは偽の応答で動く。
+- API キーは環境変数 `EI_API_KEY`、プロジェクト ID は引数。どちらも標準出力・例外に出さない。
+
 ## テスト
 
 `evaluate.py` と `split.py` の数え方、`features.py` の窓と特徴量、`train_eval.py` の手順、`evaluate_detector.py` の記録の範囲と
 対象の選び方は、合成データのテスト
-（`test_evaluate.py`・`test_split.py`・`test_features.py`・`test_train_eval.py`・`test_evaluate_detector.py`・`test_features_m2.py`・`test_ei_upload.py`）で固定している。
-`test_features.py`・`test_features_m2.py`・`test_ei_upload.py` は numpy、`test_train_eval.py` は numpy と scikit-learn を使う。ほかは標準ライブラリの `unittest` だけで動く。
+（`test_evaluate.py`・`test_split.py`・`test_features.py`・`test_train_eval.py`・`test_evaluate_detector.py`・`test_features_m2.py`・`test_ei_upload.py`・
+`test_m2_norm_header.py`・`test_m2_scorer.py`・`test_m2_threshold.py`・`test_m2_ei_testing_result.py`）で固定している。
+`test_features.py`・`test_features_m2.py`・`test_ei_upload.py`・`test_m2_*.py` は numpy、`test_train_eval.py` は numpy と scikit-learn を使う。
+ほかは標準ライブラリの `unittest` だけで動く。
 合成データは一時フォルダに作り、`data/` は使わない。`test_train_eval.py` は 60 秒の合成セッションを 9 つ作って
-学習を繰り返すので、20 秒ほど掛かる。
+学習を繰り返すので、20 秒ほど掛かる。#22 のテストは実行ファイルを一時フォルダの Python スクリプトで、EI の送受信を偽の応答で差し替え、
+ネットワークに出ず g++ も要らない。
 
 ```
 python -m unittest discover -s analysis -v

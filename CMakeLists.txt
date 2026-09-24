@@ -25,6 +25,7 @@ project(zaitaku_mealpace NONE)
 #   cmake -S . -B build-bench2 -DSKETCH_NAME=bench -DBUILD_FLAGS="-DBENCH_CASE=2"
 #   cmake --build build-bench2 --target build
 #   案1 は -DBUILD_FLAGS="-DBENCH_CASE=1 -I$PWD/firmware/bench/src -DEI_PORTING_MBED=0"
+#   案1 の書き出し（ダミー）は firmware/bench/src/ に展開したときだけ置く。他の案をビルドするときは消す（arduino-cli が src/ を全部コンパイルするため。#22）
 
 set(FQBN "arduino:mbed_nano:nanorp2040connect" CACHE STRING "Arduino FQBN")
 set(PORT "/dev/ttyACM0" CACHE STRING "Serial port")
