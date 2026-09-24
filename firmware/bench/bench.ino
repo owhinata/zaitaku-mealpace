@@ -9,8 +9,9 @@
 // ビルド（案ごとに別ディレクトリ。plan #17「ビルド・書き込み・計測の手順」）:
 //   cmake -S . -B build-bench2 -DSKETCH_NAME=bench -DBUILD_FLAGS="-DBENCH_CASE=2"
 //   cmake --build build-bench2 --target build
-// BENCH_CASE: 0 ハーネスだけ / 1 EI の MFCC と MFE / 2 0012 の音 15 次元 / 3 0012 の IMU 14 次元。
+// BENCH_CASE: 0 ハーネスだけ / 1 EI の MFCC と MFE / 2 音 15 次元（既定は 0012、-DAF_PROFILE=1 で 0020 の M2 の式）/ 3 0012 の IMU 14 次元。
 // 案1 は BUILD_FLAGS に -I<リポジトリ>/firmware/bench/src -DEI_PORTING_MBED=0 も要る。
+// 案2 の M2（#21）: -DBUILD_FLAGS="-DBENCH_CASE=2 -DAF_PROFILE=1"（f′ は -DAF_M2_FRAME_HOP=400 を足す）。
 // -DBENCH_HEAP_TABLE=1 で、コールバック内の mallinfo() の代わりに自前の表でヒープを追う（mallinfo() が止まるときの代替）。
 
 #include <malloc.h>
@@ -252,16 +253,26 @@ static float feat[AF_N_FEATURES];
 static float stage_pre[AF_FRAME_LEN];
 static float stage_power[AF_N_BINS];
 static float stage_dct[AF_N_MFCC];
+#if AF_DECIMATION > 1
+static int16_t window_af[AF_WINDOW_SAMPLES];   // 全窓版と段階の入力（間引き後）
+#endif
+static char stage_name[32];                    // "preemphasis_400" など（String は使わない）
 
 static void run_case() {
   audio_features_init();
+#if AF_DECIMATION > 1
+  audio_stage_decimate(window_buf, WINDOW_SAMPLES, window_af);
+  const int16_t* win = window_af;
+#else
+  const int16_t* win = window_buf;
+#endif
   // 全窓（再利用なし）
   size_t before = heap_now();
   heap_peak = before;
-  audio_features_full(window_buf, feat);   // ウォームアップ
+  audio_features_full(win, feat);   // ウォームアップ
   for (uint32_t i = 0; i < N_REPEAT; i++) {
     uint32_t t0 = micros();
-    audio_features_full(window_buf, feat);
+    audio_features_full(win, feat);
     samples[i] = micros() - t0;
     sink += feat[0];
   }
@@ -286,21 +297,35 @@ static void run_case() {
   peak = heap_peak;
   print_timing("case2", " reuse", samples, N_REPEAT);
   print_heap("case2", " reuse", before, peak);
-  // 段階ごと（見立て用。1 フレーム = 400 サンプル、ゼロ交差率は窓全体）
+  // 段階ごと（見立て用。1 フレーム = AF_FRAME_LEN サンプル、ゼロ交差率は窓全体）
+#if AF_DECIMATION > 1
   for (uint32_t i = 0; i < N_REPEAT + 1; i++) {
     uint32_t t0 = micros();
-    audio_stage_preemphasis(window_buf + AF_FRAME_HOP, AF_FRAME_LEN, true, stage_pre);
+    audio_stage_decimate(window_buf, HOP_SAMPLES, window_af);   // 1 ホップ分の入力 4000 → 2000
+    uint32_t dt = micros() - t0;
+    if (i) samples[i - 1] = dt;
+    sink += window_af[0];
+  }
+  snprintf(stage_name, sizeof(stage_name), " decimate_%lu", (unsigned long)HOP_SAMPLES);
+  print_timing("stage", stage_name, samples, N_REPEAT);
+  audio_stage_decimate(window_buf, WINDOW_SAMPLES, window_af);   // 段階の入力を全窓に戻す
+#endif
+  for (uint32_t i = 0; i < N_REPEAT + 1; i++) {
+    uint32_t t0 = micros();
+    audio_stage_preemphasis(win + AF_FRAME_HOP, AF_FRAME_LEN, !AF_PREEMPH_PER_FRAME, stage_pre);
     uint32_t dt = micros() - t0;
     if (i) samples[i - 1] = dt;
   }
-  print_timing("stage", " preemphasis_400", samples, N_REPEAT);
+  snprintf(stage_name, sizeof(stage_name), " preemphasis_%lu", (unsigned long)AF_FRAME_LEN);
+  print_timing("stage", stage_name, samples, N_REPEAT);
   for (uint32_t i = 0; i < N_REPEAT + 1; i++) {
     uint32_t t0 = micros();
     audio_stage_power(stage_pre, stage_power);
     uint32_t dt = micros() - t0;
     if (i) samples[i - 1] = dt;
   }
-  print_timing("stage", " hamming_fft_power_400", samples, N_REPEAT);
+  snprintf(stage_name, sizeof(stage_name), " hamming_fft_power_%lu", (unsigned long)AF_FRAME_LEN);
+  print_timing("stage", stage_name, samples, N_REPEAT);
   for (uint32_t i = 0; i < N_REPEAT + 1; i++) {
     uint32_t t0 = micros();
     audio_stage_mel_dct(stage_power, stage_dct);
@@ -319,12 +344,13 @@ static void run_case() {
   print_timing("stage", " centroid", samples, N_REPEAT);
   for (uint32_t i = 0; i < N_REPEAT + 1; i++) {
     uint32_t t0 = micros();
-    float z = audio_stage_zcr(window_buf, WINDOW_SAMPLES);
+    float z = audio_stage_zcr(win, AF_WINDOW_SAMPLES);
     uint32_t dt = micros() - t0;
     if (i) samples[i - 1] = dt;
     sink += z;
   }
-  print_timing("stage", " zcr_16000", samples, N_REPEAT);
+  snprintf(stage_name, sizeof(stage_name), " zcr_%lu", (unsigned long)AF_WINDOW_SAMPLES);
+  print_timing("stage", stage_name, samples, N_REPEAT);
 }
 
 #elif BENCH_CASE == 3
@@ -385,6 +411,23 @@ void setup() {
   Serial.print((unsigned long)SystemCoreClock);
   Serial.print(" N=");
   Serial.println((unsigned long)N_REPEAT);
+#if BENCH_CASE == 2
+  // 音の式の切り替え（audio_features.h）。AF_PROFILE 0 = 0012（M1）、1 = 0020（M2）
+  Serial.print("AF_PROFILE=");
+  Serial.print(AF_PROFILE);
+  Serial.print(" AF_AUDIO_HZ=");
+  Serial.print((unsigned long)AF_AUDIO_HZ);
+  Serial.print(" AF_FRAME_LEN=");
+  Serial.print((unsigned long)AF_FRAME_LEN);
+  Serial.print(" AF_FRAME_HOP=");
+  Serial.print((unsigned long)AF_FRAME_HOP);
+  Serial.print(" AF_N_FFT=");
+  Serial.print((unsigned long)AF_N_FFT);
+  Serial.print(" AF_N_FRAMES=");
+  Serial.print((unsigned long)AF_N_FRAMES);
+  Serial.print(" AF_HOP_FRAMES=");
+  Serial.println((unsigned long)AF_HOP_FRAMES);
+#endif
 
   mbed_mem_trace_set_callback(trace_cb);
   synth_rng_seed(&audio_rng, SYNTH_SEED_AUDIO);

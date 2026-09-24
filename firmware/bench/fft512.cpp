@@ -1,25 +1,32 @@
-// 512 点実 FFT（fft512.h）。Arduino 依存なし。ヒープは使わない。
+// 実 FFT（fft512.h。点数は AF_N_FFT）。Arduino 依存なし。ヒープは使わない。
 // 装置のビルドでは案2（BENCH_CASE == 2）のときだけ組み込む。PC の答え合わせ（BENCH_CASE 未定義）では常に組み込む。
 #if !defined(BENCH_CASE) || BENCH_CASE == 2
 
 #include "fft512.h"
 #include <math.h>
 
-static const uint32_t HALF = FFT512_N / 2;   // 256 点の複素 FFT
+static const uint32_t HALF = FFT512_N / 2;   // N/2 点の複素 FFT
 
-static float s_cos[HALF];        // cos(2π k / 512)
-static float s_sin[HALF];        // sin(2π k / 512)
-static uint16_t s_bitrev[HALF];  // 8 ビットの反転
+static float s_cos[HALF];        // cos(2π k / N)
+static float s_sin[HALF];        // sin(2π k / N)
+static uint16_t s_bitrev[HALF];  // log2(N/2) ビットの反転
 static float s_re[HALF];
 static float s_im[HALF];
 
+static uint32_t log2_u32(uint32_t v) {
+  uint32_t b = 0;
+  while ((1u << b) < v) b++;
+  return b;
+}
+
 void fft512_init() {
+  const uint32_t bits = log2_u32(HALF);   // 512 → 8、256 → 7
   for (uint32_t k = 0; k < HALF; k++) {
     double a = 2.0 * M_PI * (double)k / (double)FFT512_N;
     s_cos[k] = (float)cos(a);
     s_sin[k] = (float)sin(a);
     uint32_t r = 0, v = k;
-    for (int b = 0; b < 8; b++) { r = (r << 1) | (v & 1u); v >>= 1; }
+    for (uint32_t b = 0; b < bits; b++) { r = (r << 1) | (v & 1u); v >>= 1; }
     s_bitrev[k] = (uint16_t)r;
   }
 }
@@ -31,7 +38,7 @@ void fft512_power(const float* in, float* power) {
     s_re[j] = in[2 * k];
     s_im[j] = in[2 * k + 1];
   }
-  // 256 点の複素 FFT（DIT）。W_len^j = W_512^(j × 512 / len)
+  // N/2 点の複素 FFT（DIT）。W_len^j = W_N^(j × N / len)
   for (uint32_t len = 2; len <= HALF; len <<= 1) {
     uint32_t half = len >> 1;
     uint32_t step = FFT512_N / len;
@@ -49,7 +56,7 @@ void fft512_power(const float* in, float* power) {
       }
     }
   }
-  // 分離: X_k = Fe + W_512^k Fo、Fe = (Z_k + conj Z_{256-k}) / 2、Fo = -i (Z_k − conj Z_{256-k}) / 2
+  // 分離: X_k = Fe + W_N^k Fo、Fe = (Z_k + conj Z_{N/2-k}) / 2、Fo = -i (Z_k − conj Z_{N/2-k}) / 2
   const float inv_n = 1.0f / (float)FFT512_N;
   {
     float x0 = s_re[0] + s_im[0];

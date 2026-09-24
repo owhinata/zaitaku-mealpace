@@ -1,4 +1,5 @@
 // 案2 の移植（audio_features.h）。Arduino 依存なし。ヒープは使わない。
+// AF_PROFILE 0（既定）は docs/decisions/0012 の式（#17 と同じ計算・同じ値）、AF_PROFILE 1 は docs/decisions/0020 の式。
 // 装置のビルドでは BENCH_CASE == 2 のときだけ組み込む。PC の答え合わせ（BENCH_CASE 未定義）では常に組み込む。
 #if !defined(BENCH_CASE) || BENCH_CASE == 2
 
@@ -17,10 +18,12 @@ static float s_mel_w[2 * AF_N_BINS];   // 各ビンは高々 2 本のフィル�
 static float s_dct[AF_N_MFCC][AF_N_MEL];
 
 // --- 作業領域（固定配列） ---
-static float s_frame[AF_N_FFT];      // Hamming 後、512 にゼロ詰め
+static float s_frame[AF_N_FFT];      // Hamming 後、AF_N_FFT にゼロ詰め
 static float s_power[AF_N_BINS];
 static float s_pre[AF_FRAME_LEN];
+#if !AF_CENTROID_SAME_FFT
 static float s_raw[AF_FRAME_LEN];
+#endif
 static float s_logmel[AF_N_MEL];
 
 static double hz_to_mel(double f) { return 2595.0 * log10(1.0 + f / 700.0); }
@@ -31,7 +34,7 @@ void audio_features_init() {
   for (uint32_t n = 0; n < AF_FRAME_LEN; n++) {
     s_hamming[n] = (float)(0.54 - 0.46 * cos(2.0 * M_PI * (double)n / (double)(AF_FRAME_LEN - 1)));
   }
-  // メル（HTK 式、FFT ビンの周波数で評価、面積の正規化なし）。features.py の _mel_filterbank と同じ
+  // メル（HTK 式、FFT ビンの周波数で評価、面積の正規化なし）。features.py / features_m2.py の _mel_filterbank と同じ
   double mel_lo = hz_to_mel(AF_MEL_FMIN_HZ), mel_hi = hz_to_mel(AF_MEL_FMAX_HZ);
   double hz[AF_N_MEL + 2];
   for (uint32_t i = 0; i < AF_N_MEL + 2; i++) {
@@ -75,6 +78,19 @@ void audio_features_init() {
 }
 
 // --- 段階 ---
+
+void audio_stage_decimate(const int16_t* in, uint32_t n, int16_t* out) {
+#if AF_PROFILE == 1
+  // (in[2i] + in[2i+1]) >> 1 を int32 で（算術シフト）。features_m2._decimate と同じ整数演算
+  const uint32_t m = n / AF_DECIMATION;
+  for (uint32_t i = 0; i < m; i++) {
+    int32_t s = (int32_t)in[2 * i] + (int32_t)in[2 * i + 1];
+    out[i] = (int16_t)(s >> 1);
+  }
+#else
+  memcpy(out, in, n * sizeof(int16_t));
+#endif
+}
 
 void audio_stage_preemphasis(const int16_t* x, uint32_t n, bool has_prev, float* pre) {
   const float inv = 1.0f / AF_AUDIO_SCALE;
@@ -139,12 +155,19 @@ float audio_stage_zcr(const int16_t* x, uint32_t n) {
 
 // 1 フレーム: DCT 13 係数と重心
 static void frame_features(const int16_t* x, bool has_prev, float* dct, float* centroid) {
+#if AF_PREEMPH_PER_FRAME
+  has_prev = false;                                   // フレームごとに独立（pre[0] = x[0]）
+#endif
   audio_stage_preemphasis(x, AF_FRAME_LEN, has_prev, s_pre);
   audio_stage_power(s_pre, s_power);
   audio_stage_mel_dct(s_power, dct);
+#if AF_CENTROID_SAME_FFT
+  *centroid = audio_stage_centroid(s_power);          // 同じ（プリエンファシス後の）パワースペクトルから
+#else
   audio_stage_convert(x, AF_FRAME_LEN, s_raw);        // 重心はプリエンファシス前（2 回目の FFT）
   audio_stage_power(s_raw, s_power);
   *centroid = audio_stage_centroid(s_power);
+#endif
 }
 
 // --- 全窓版 ---
@@ -173,18 +196,18 @@ void audio_reuse_init(AudioReuseState* st) {
 }
 
 bool audio_reuse_push(AudioReuseState* st, const int16_t* slice, float* out) {
-  // リングをずらして新しいスライスを末尾に置く（この時間もホップに含める）
+  // リングをずらし、新しいスライスを（M2 なら間引いて）末尾に置く（この時間もホップに含める）
   memmove(st->ring, st->ring + AF_HOP_SAMPLES, (AF_WINDOW_SAMPLES - AF_HOP_SAMPLES) * sizeof(int16_t));
-  memcpy(st->ring + (AF_WINDOW_SAMPLES - AF_HOP_SAMPLES), slice, AF_HOP_SAMPLES * sizeof(int16_t));
+  audio_stage_decimate(slice, AF_IN_HOP_SAMPLES, st->ring + (AF_WINDOW_SAMPLES - AF_HOP_SAMPLES));
   if (st->filled < AF_WINDOW_SAMPLES) st->filled += AF_HOP_SAMPLES;
   if (st->filled < AF_WINDOW_SAMPLES) return false;
 
   uint32_t first;
   if (!st->primed) {
-    first = 0;                       // 最初の窓は全 98 フレーム
+    first = 0;                       // 最初の窓は全フレーム
     st->primed = true;
   } else {
-    first = AF_N_FRAMES - AF_HOP_FRAMES;   // 73
+    first = AF_N_FRAMES - AF_HOP_FRAMES;   // 73 / 30（f′ 15）
     memmove(st->dct[0], st->dct[AF_HOP_FRAMES], first * AF_N_MFCC * sizeof(float));
     memmove(st->centroid, st->centroid + AF_HOP_FRAMES, first * sizeof(float));
   }
@@ -192,6 +215,7 @@ bool audio_reuse_push(AudioReuseState* st, const int16_t* slice, float* out) {
     uint32_t s = f * AF_FRAME_HOP;
     frame_features(st->ring + s, s > 0, st->dct[f], &st->centroid[f]);
   }
+#if !AF_PREEMPH_PER_FRAME
   if (first > 0) {
     // 窓の先頭フレームは以前に「前のサンプルを持つ位置」で計算されているので、全窓版と同じ pre[0] = x[0] で
     // DCT だけ計算し直す（1 ホップに FFT が 1 回増える。重心はプリエンファシスに依存しないのでそのまま）。
@@ -200,6 +224,7 @@ bool audio_reuse_push(AudioReuseState* st, const int16_t* slice, float* out) {
     audio_stage_power(s_pre, s_power);
     audio_stage_mel_dct(s_power, st->dct[0]);
   }
+#endif
   float acc[AF_N_MFCC];
   float csum = 0.0f;
   for (uint32_t k = 0; k < AF_N_MFCC; k++) acc[k] = 0.0f;
