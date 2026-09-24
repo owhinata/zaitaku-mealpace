@@ -5,7 +5,7 @@
 送信は偽の関数に差し替え、ネットワークに出ない。m2_norm.json は一時フォルダに書く（analysis/ には書かない）。
 """
 from __future__ import annotations
-import contextlib, io, json, tempfile, unittest
+import contextlib, io, json, tempfile, threading, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -55,14 +55,22 @@ unittest.addModuleCleanup(_TMP.cleanup)
 
 
 class FakeSend:
-    """呼び出しを記録し、statuses を先頭から返す。尽きたら (200, 'OK')。"""
-    def __init__(self, statuses=()):
+    """呼び出しを記録し、statuses を先頭から返す。尽きたら (200, 'OK')。fail_names のファイル名は常に失敗する。
+
+    --workers で複数のスレッドから呼ばれるので、記録と statuses の取り出しは Lock で守る。
+    """
+    def __init__(self, statuses=(), fail_names=()):
         self.calls = []
         self.statuses = list(statuses)
+        self.fail_names = set(fail_names)
+        self.lock = threading.Lock()
 
     def __call__(self, url, headers, files):
-        self.calls.append((url, dict(headers), list(files)))
-        return self.statuses.pop(0) if self.statuses else (200, "OK")
+        with self.lock:
+            self.calls.append((url, dict(headers), list(files)))
+            if files[0][0] in self.fail_names:
+                return 503, "unavailable"
+            return self.statuses.pop(0) if self.statuses else (200, "OK")
 
 
 def run(argv, *, send=None, statuses=(), env=None, norm_path=None, sleep=None):
@@ -365,6 +373,63 @@ class TrainingUploadTest(TmpCase):
         self.assertEqual(len(send.calls), total["n_upload"])
         self.assertEqual((res.n_items, res.n_duplicates), (total["n_upload"] - 1, 1))
         self.assertEqual(sleeps, [])
+
+    def test_workers_send_every_item_once_and_match_sequential(self):
+        # 逐次と並列（--workers 4）で、偽の送信が全項目に 1 回ずつ呼ばれ、受け付け数・重複数・一覧が同じになる
+        dup = [(400, "Sample already exists (duplicate)")]
+        res1, out1, send1 = run([str(ROOT), *ARGS_TRAIN], statuses=dup, env={eu.API_KEY_ENV: KEY}, norm_path=self.norm())
+        res4, out4, send4 = run([str(ROOT), *ARGS_TRAIN, "--workers", "4"], statuses=dup, env={eu.API_KEY_ENV: KEY},
+                                norm_path=self.norm())
+        rows1, total1 = table_rows(out1)
+        rows4, total4 = table_rows(out4)
+        self.assertEqual((rows4, total4), (rows1, total1))
+        self.assertEqual(len(send4.calls), total4["n_upload"])
+        self.assertEqual((res4.n_requests, res4.n_items, res4.n_duplicates), (res1.n_requests, res1.n_items, res1.n_duplicates))
+        self.assertEqual((res4.n_items, res4.n_duplicates), (total4["n_upload"] - 1, 1))
+        names1 = sorted(f[0][0] for _, _, f in send1.calls)
+        names4 = sorted(f[0][0] for _, _, f in send4.calls)
+        self.assertEqual(names4, names1)                       # 同じ項目の集合を 1 回ずつ
+        self.assertEqual(len(set(names4)), len(names4))
+        self.assertEqual({h["x-disallow-duplicates"] for _, h, _ in send4.calls}, {"1"})
+        self.assertNotIn(KEY, out4)
+        # 進み具合はセッションごとに 1 行、セッション名順のまま
+        prog1 = [l for l in out1.splitlines() if l.startswith("送信: ")]
+        prog4 = [l for l in out4.splitlines() if l.startswith("送信: ")]
+        self.assertEqual(prog4, prog1)
+        self.assertEqual(len(prog4), 21)
+        # 一覧の本文（コマンドラインの行と、1 回目だけが m2_norm.json を書く行を除く）は同じ
+        strip = lambda t: [l for l in t.splitlines() if not l.startswith(("- コマンドライン", "- 書いた: "))]
+        self.assertEqual(strip(out4), strip(out1))
+
+    def test_workers_four_failures_stop(self):
+        # 収集日1 の 2 本目のセッションの真ん中の項目が常に失敗する → そのセッションで止まり、後のセッションは送らない
+        name = session_name("20260921", 1)
+        exp = expected_uploads(ROOT, [name])
+        t_ms = sorted(exp[name]["labels"])[len(exp[name]["labels"]) // 2]
+        send = FakeSend(fail_names=[f"{name}_{t_ms}.json"])
+        sleeps = []
+        with self.assertRaises(SystemExit) as cm:
+            run([str(ROOT), *ARGS_TRAIN, "--workers", "4"], send=send, env={eu.API_KEY_ENV: KEY}, norm_path=self.norm(),
+                sleep=sleeps.append)
+        msg = str(cm.exception)
+        self.assertIn(name, msg)
+        self.assertIn("HTTP 503", msg)
+        self.assertNotIn(KEY, msg)
+        target = [c for c in send.calls if c[2][0][0] == f"{name}_{t_ms}.json"]
+        self.assertEqual(len(target), eu.MAX_ATTEMPTS)
+        self.assertEqual(len(sleeps), eu.MAX_ATTEMPTS - 1)
+        # 受け付けられた数は偽の送信が 200 を返した回数と一致する（進行中の送信を待ってから数える）
+        accepted = len(send.calls) - eu.MAX_ATTEMPTS
+        self.assertIn(f"全体で受け付けられた項目 {accepted}、", msg)
+        self.assertIn(f"リクエスト {len(send.calls)}。", msg)
+        sessions = {json.loads(h["x-metadata"])["session"] for _, h, _ in send.calls}
+        self.assertEqual(sessions, {session_name("20260921", 0), name})
+        n_first = sum(1 for _, h, _ in send.calls if json.loads(h["x-metadata"])["session"] == session_name("20260921", 0))
+        self.assertIn(f"このセッションで送った項目 {accepted - n_first} / {exp[name]['n_upload']}", msg)
+
+    def test_workers_must_be_positive(self):
+        with self.assertRaises(SystemExit):
+            run([str(ROOT), *ARGS_TRAIN, "--dry-run", "--workers", "0"], env={eu.API_KEY_ENV: KEY}, norm_path=self.norm())
 
 
 class TestingUploadTest(TmpCase):

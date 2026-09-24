@@ -1,8 +1,8 @@
 """M2 の特徴量ベクトル（1 窓 1 項目）を Edge Impulse に投入する（Issue #21、docs/decisions/0019・0020）。
 
 使い方:
-  python analysis/ei_upload.py data/raw --bucket training --days 20260921,20260922,20260923 --validation-day 20260923 [--dry-run]
-  python analysis/ei_upload.py data/raw --bucket testing --days 20260924 [--dry-run]
+  python analysis/ei_upload.py data/raw --bucket training --days 20260921,20260922,20260923 --validation-day 20260923 [--dry-run] [--workers N]
+  python analysis/ei_upload.py data/raw --bucket testing --days 20260924 [--dry-run] [--workers N]
   python analysis/ei_upload.py --probe [--dry-run]
 
 - 投入するのは `features_m2.extract_session` の 29 次元を `features.Standardizer` で正規化した値だけ。生の音声・IMU の窓は上げない。
@@ -15,6 +15,8 @@
 - 転送は標準ライブラリの `urllib` で、1 リクエスト 1 項目（`x-metadata` がリクエスト単位に掛かるため）。失敗は 3 回まで再試行。
   ヘッダは `x-api-key`、`x-label`、`x-metadata`、`x-file-name`（EI が要求する。無いと HTTP 422）、`x-disallow-duplicates`。
   API キーは環境変数 `EI_API_KEY` で渡し、標準出力・例外・ログに出さない。
+- `--workers N`（既定 1 = 逐次）で N 本のスレッドが項目を並列に送る。1 リクエスト 1 項目・ヘッダ・再試行・重複の扱いは同じ。
+  進み具合はセッションの全項目が終わってから 1 行。ある項目が 4 回失敗したら、未着手の項目を取り消し、進行中の送信を待ってから止まる。
 - `--dry-run` は送信もファイルの書き込みもせず、一覧だけを出す。`--probe` は乱数の 9 項目で EI の受け付けを確かめる（実データを使わない）。
 - 標準出力には集計値とセッション名だけを出す。特徴量の値・波形・個々の窓の一覧は出さない。
 """
@@ -22,6 +24,7 @@ from __future__ import annotations
 import argparse, io, json, os, sys, time, uuid
 import urllib.error, urllib.request
 from collections import Counter
+from concurrent.futures import Executor, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -322,37 +325,87 @@ class UploadResult:
     n_duplicates: int = 0          # 既にある項目として弾かれたもの（再実行のとき）
 
 
+ACCEPTED, DUPLICATE, FAILED = "accepted", "duplicate", "failed"
+Outcome = tuple[str, int, int, str]   # (ACCEPTED / DUPLICATE / FAILED, リクエスト数, 最後の status, 最後の本文)
+
+
+def _send_item(url: str, it: Item, api_key: str, send: SendFn, sleep: Callable[[float], None]) -> Outcome:
+    """1 項目を送る。失敗は MAX_ATTEMPTS − 1 回まで再試行する。スレッドから呼ばれる（共有の状態を持たない）。"""
+    # x-file-name は EI の ingestion API が要求する（無いと HTTP 422。probe で判明。plan 7.4 のヘッダ一覧には無い）。
+    # multipart の filename と同じ値
+    headers = {"x-api-key": api_key, "x-label": it.label, "x-metadata": json.dumps(it.metadata),
+               "x-file-name": it.filename, "x-disallow-duplicates": "1"}
+    status, body = 0, ""
+    for attempt in range(MAX_ATTEMPTS):
+        if attempt:
+            sleep(RETRY_WAIT_S[min(attempt - 1, len(RETRY_WAIT_S) - 1)])
+        status, body = send(url, headers, [(it.filename, it.data)])
+        if 200 <= status < 300:
+            return ACCEPTED, attempt + 1, status, body
+        if _is_duplicate(status, body):
+            return DUPLICATE, attempt + 1, status, body
+    return FAILED, MAX_ATTEMPTS, status, body
+
+
+def _send_session(url: str, items: Sequence[Item], api_key: str, send: SendFn, sleep: Callable[[float], None],
+                  ex: Executor | None) -> list[Outcome]:
+    """1 セッションの項目を送り、送った項目の結果を返す（取り消した項目は含まない）。
+
+    逐次（ex が None）は失敗した項目で止まる。並列は全項目を executor に積み、ある項目が失敗したら未着手の項目を取り消し、
+    進行中の送信を待ってから返す（受け付けられた数を正確に数えるため）。
+    """
+    if ex is None:
+        out: list[Outcome] = []
+        for it in items:
+            out.append(_send_item(url, it, api_key, send, sleep))
+            if out[-1][0] == FAILED:
+                break
+        return out
+    futures = [ex.submit(_send_item, url, it, api_key, send, sleep) for it in items]
+    try:
+        for f in as_completed(futures):
+            if f.result()[0] == FAILED:
+                break
+    finally:
+        for f in futures:
+            f.cancel()
+        wait(futures)
+    return [f.result() for f in futures if not f.cancelled()]
+
+
 def upload(items_by_session: Sequence[tuple[str, Sequence[Item]]], bucket: str, api_key: str,
-           send: SendFn = send_urllib, sleep: Callable[[float], None] = time.sleep) -> UploadResult:
-    """1 リクエスト 1 項目で送る。失敗は MAX_ATTEMPTS − 1 回まで再試行し、それでも失敗したら止まる。"""
+           send: SendFn = send_urllib, sleep: Callable[[float], None] = time.sleep, workers: int = 1) -> UploadResult:
+    """1 リクエスト 1 項目で送る。失敗は MAX_ATTEMPTS − 1 回まで再試行し、それでも失敗したら止まる。
+
+    workers > 1 のとき、セッションの項目を workers 本のスレッドで並列に送る。進み具合の 1 行はセッションの全項目が終わってから出す。
+    """
+    if workers < 1:
+        raise ValueError(f"workers は 1 以上: {workers}")
     url = INGESTION_URL.format(bucket=bucket)
     res = UploadResult()
-    for session, items in items_by_session:
-        sent = 0
-        for it in items:
-            # x-file-name は EI の ingestion API が要求する（無いと HTTP 422。probe で判明。plan 7.4 のヘッダ一覧には無い）。
-            # multipart の filename と同じ値
-            headers = {"x-api-key": api_key, "x-label": it.label, "x-metadata": json.dumps(it.metadata),
-                       "x-file-name": it.filename, "x-disallow-duplicates": "1"}
-            status, body = 0, ""
-            for attempt in range(MAX_ATTEMPTS):
-                if attempt:
-                    sleep(RETRY_WAIT_S[min(attempt - 1, len(RETRY_WAIT_S) - 1)])
-                res.n_requests += 1
-                status, body = send(url, headers, [(it.filename, it.data)])
-                if 200 <= status < 300:
+    ex = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
+    try:
+        for session, items in items_by_session:
+            sent, failed = 0, None
+            for kind, n_requests, status, body in _send_session(url, items, api_key, send, sleep, ex):
+                res.n_requests += n_requests
+                if kind == ACCEPTED:
                     res.n_items += 1
                     sent += 1
-                    break
-                if _is_duplicate(status, body):
+                elif kind == DUPLICATE:
                     res.n_duplicates += 1
                     sent += 1
-                    break
-            else:
+                elif failed is None:
+                    failed = (status, body)
+            if failed is not None:
+                status, body = failed
                 raise SystemExit(f"送信に失敗しました（{MAX_ATTEMPTS} 回）。止まった場所: セッション {session}、"
                                  f"このセッションで送った項目 {sent} / {len(items)}、全体で受け付けられた項目 {res.n_items}、"
                                  f"リクエスト {res.n_requests}。最後の応答: HTTP {status} {_redact(body, api_key)[:200]!r}")
-        print(f"送信: {session}: {sent} / {len(items)} 項目")
+            print(f"送信: {session}: {sent} / {len(items)} 項目", flush=True)
+    finally:
+        if ex is not None:
+            ex.shutdown(wait=True)
     return res
 
 
@@ -428,7 +481,11 @@ def _parse(argv: Sequence[str]) -> argparse.Namespace:
     ap.add_argument("--validation-day", help="EI の学習中に validation に回す収集日（統計量から除く）")
     ap.add_argument("--dry-run", action="store_true", help="送信もファイルの書き込みもせず、一覧だけ出す")
     ap.add_argument("--probe", action="store_true", help="乱数の 9 項目で EI の受け付けを確かめる")
-    return ap.parse_args(argv)
+    ap.add_argument("--workers", type=int, default=1, help="並列に送るスレッドの数（既定 1 = 逐次）")
+    a = ap.parse_args(argv)
+    if a.workers < 1:
+        raise SystemExit(f"--workers は 1 以上です: {a.workers}")
+    return a
 
 
 def _api_key(environ: Mapping[str, str], dry_run: bool) -> str:
@@ -460,7 +517,7 @@ def run(argv: Sequence[str], *, send: SendFn = send_urllib, sleep: Callable[[flo
         if a.dry_run:
             print("- dry-run: 送信しない")
             return UploadResult()
-        res = upload(by_session, "training", api_key, send, sleep)
+        res = upload(by_session, "training", api_key, send, sleep, a.workers)
         print(f"- 送信したリクエスト {res.n_requests}、受け付けられた項目 {res.n_items}、重複として弾かれた項目 {res.n_duplicates}")
         return res
 
@@ -523,7 +580,7 @@ def run(argv: Sequence[str], *, send: SendFn = send_urllib, sleep: Callable[[flo
         print(f"- 書いた: {norm_path}")
     by_session = [(s.name, build_items(s, std, iat)) for s in loaded]
     assert sum(len(i) for _, i in by_session) == n_upload
-    res = upload(by_session, a.bucket, api_key, send, sleep)
+    res = upload(by_session, a.bucket, api_key, send, sleep, a.workers)
     print(f"- 送信したリクエスト {res.n_requests}、受け付けられた項目 {res.n_items}、重複として弾かれた項目 {res.n_duplicates}"
           f"（EI の Studio の項目数と照合する）")
     return res

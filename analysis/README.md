@@ -162,6 +162,8 @@ python analysis/ei_upload.py --probe [--dry-run]
   失敗したら、止まった場所（セッション名、そのセッションで送った項目数、全体で受け付けられた項目数）を出して止まる。
   `x-disallow-duplicates` で弾かれた項目（HTTP 400 で本文に duplicate / already exists）は再試行せず数だけ数える（再実行のとき）。
   進み具合はセッションごとに 1 行。送信の関数は `run(argv, send=..., sleep=...)` で差し替えられる（`send(url, headers, files) → (status, body)`）。
+- **`--workers N`**（既定 1 = 逐次）: N 本のスレッドで項目を並列に送る（1 リクエスト 1 項目・ヘッダ・再試行・重複の扱いは同じ）。
+  進み具合の 1 行はセッションの全項目が終わってから。ある項目が 4 回失敗したら、未着手の項目を取り消し、進行中の送信を待ってから止まる。
 - **API キー**: 環境変数 `EI_API_KEY`。無ければ `--dry-run` 以外は止まる。値を標準出力・例外・ログに出さない（応答の本文に含まれていても伏せる）。
 - **`--dry-run`**: 送信も `m2_norm.json` の書き込みもせず、一覧だけを出す。投入の前に人が一覧を見る。
 - **`--probe`**: 乱数（seed 固定）の 29 次元を 9 項目（`swallow` / `cough` / `other` × 3。群 `probe-a` / `probe-b` / `probe-c`、
