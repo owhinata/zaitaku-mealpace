@@ -200,8 +200,17 @@ M0 準備の関門は 9/20 に通過（docs/decisions/0010、`gate-M0`）。
   validation のセッション名は取得できていない（`cough` の 3 本が含まれないことだけ分かる）。学習は Raw data・3 クラス・Auto-weight・cycles 50・lr 0.0005・batch 32 で、
   候補 B（Dense 32 → Dropout 0.1 → Dense 16）を人が選び（validation int8: accuracy 91.2%、`swallow` F1 0.46、再現率 65.6%。再学習の差 0）、版 1「#21 candidate B 2026-09-24」に
   固定した。test set（収集日4）の Model testing は最後の 1 回: accuracy 85.74%（float32）/ 85.28%（int8）、`swallow` の再現率 52.2 / 54.4%（**窓単位の参考値。合格線は
-  イベント単位で #27**）。以後モデル・設定は変えない。**Public は未切り替え**（条件 1 は log に記録、条件 2・切り替え・Private に戻せるかは人が Studio で確かめる）。
-  plan レビューは 3 回（BLOCKING 0、CONCERN 2 → 1 → 0）。
+  イベント単位で #27**）。以後モデル・設定は変えない。**Public に切り替え済み（9/24）**（条件 1 は log に記録。条件 2（プロジェクト名・説明・所有者の表示名）は
+  人が確認した。Private に戻す操作は Dashboard にある。戻していない）。plan レビューは 3 回（BLOCKING 0、CONCERN 2 → 1 → 0）。
+- #22: 版 1「#21 candidate B 2026-09-24」の C++ ライブラリ（Quantized int8、EON Compiler、deploy version 2、Studio 1.95.14）を `firmware/detector/src/` に書き出しのまま
+  置いた（1383 ファイル、編集しない。ラベル順 cough / other / swallow、`scale_axes` 1、EI 側の正規化なし。Public なので ID・所有者名は書き換えない）。PC 上の実行ファイルは
+  `bash firmware/detector/host/build.sh` → `build-host/score_windows`（13 秒、警告 0、CMSIS 不要）。正規化の定数は `firmware/detector/m2_norm.h`（`analysis/m2_norm.json` から生成、
+  double で計算して float32 に落とす。selfcheck ビット一致）。検証側（収集日4、7 本）の参考値: 閾値 0.95 で検出率 58.8%（20 / 34）、誤検出率 0.75 回/分（15 回 / 19.87 分）、
+  TP 20 / FN 14 / FP 15。**85% と 1.0 回/分を同時に満たす閾値は無い**（0.85 で 85.3% / 1.76 回/分。**参考値。M2 の合格線の数字は #27**）。人の決定で 0.95 を
+  `firmware/detector/m2_threshold.h` に凍結（float32 0.949999988。#27 の記録が終わるまで閾値もモデルも変えない）。EI の Model testing（int8、API で 4824 窓）との突き合わせは
+  **差あり**（閾値での陽性・陰性の不一致 0、argmax の不一致 3。API の 5 桁の丸めを合わせると完全一致 4648 / 差あり 176 窓、最大 43/256。入力の量子化は原因でなく、推論エンジンの
+  丸めの違いと推定。許容幅は決めず、装置との一致は #24 で見る）。`firmware/bench/src/`（#17 のダミー）は人が削除。plan レビューは 3 回（BLOCKING 1 → 1 → 0、CONCERN 3 → 2 → 1、
+  残りは E1 の突き合わせで解消）。
 - ロボセンサー技研への問い合わせ未送付（代替センサ、docs/decisions/0002、#5）。
 
 ## 次にやること

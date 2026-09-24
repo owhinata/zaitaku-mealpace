@@ -3,7 +3,7 @@
 使い方:
   EI_API_KEY=... python analysis/ei_testing_result.py data/raw --project-id <ID>
 
-- `GET https://studio.edgeimpulse.com/v1/api/<projectId>/classify/page?variant=int8&limit=..&offset=..`（ヘッダ `x-api-key`）を
+- `GET https://studio.edgeimpulse.com/v1/api/<projectId>/classify/all/result/page?variant=int8&limit=..&offset=..`（ヘッダ `x-api-key`）を
   ページ分割で全件取り、`variant=float32` も参考に取る。**応答はメモリ上で突き合わせ、ファイルにも scratchpad にも書かない**
   （項目ごとの確率は収集日4 の窓ごとの情報。docs/decisions/0021 の FEAT と同じ扱い）。標準出力に出すのは集計値だけ。
 - PC 側は `m2_threshold.py` と同じ経路（`features_m2.extract_session` → 実行ファイル）で収集日4 の 7 本を採点し、投入した窓（`valid` かつ
@@ -16,8 +16,10 @@
 - 送受信の関数は `run(argv, fetch=...)` で差し替えられる（テストは偽の応答で動かす）。
 
 応答の項目名について: 下の `parse_page` / `parse_item` が仮定している項目名（`result`、`sample.name` / `sample.metadata` / `sample.label`、
-`classifications[].result[]`）は EI の API 文書の要約から置いたもので、実際の応答でまだ確かめていない。初回の実行で違っていれば
-`parse_item` を実際の形に直し、項目名を log に書く（plan #22 第 4.4 節・第 16 節）。読めない項目があれば止まる（黙って飛ばさない）。
+`classifications[].result[]`）は EI の API 文書の要約から置いたもので、2026-09-24 の初回の実行で実際の応答と合っていることを確かめた
+（`result[]` の各項目: `sampleId`、`sample`（`filename`、`label`、`metadata`（`session`、`t_ms`、`day`、`subject`、`feature_set`。値は文字列）ほか）、
+`classifications`（1 つ。`result` は 1 つで `{cough, other, swallow}` の辞書、`minimumConfidenceRating`、`expectedLabels`）。上位に `success`、`totalCount`、
+`predictions`）。読めない項目があれば止まる（黙って飛ばさない）。
 """
 from __future__ import annotations
 import argparse, json, os, re, sys
@@ -83,7 +85,9 @@ def page_url(project_id: str, variant: str, limit: int, offset: int, impulse_id:
     q = {"variant": variant, "limit": str(limit), "offset": str(offset)}
     if impulse_id:
         q["impulseId"] = impulse_id
-    return f"{API_BASE}/{project_id}/classify/page?{urllib.parse.urlencode(q)}"
+    # getClassifyJobResultPage。plan 第 4.4 節の要約は `classify/page` だったが、実際の経路は `classify/all/result/page`
+    # （`classify/<sampleId>` と解釈されて HTTP 400 になった。2026-09-24 の初回の実行で確かめた）
+    return f"{API_BASE}/{project_id}/classify/all/result/page?{urllib.parse.urlencode(q)}"
 
 
 # --- 応答の読み方（項目名は仮置き。実際の応答で確かめる） ---
@@ -145,12 +149,12 @@ def fetch_all(fetch: FetchFn, project_id: str, api_key: str, variant: str, limit
         url = page_url(project_id, variant, limit, page * limit, impulse_id)
         status, body = fetch(url, headers)
         if not 200 <= status < 300:
-            raise SystemExit(f"classify/page（{variant}、offset {page * limit}）が HTTP {status}: "
+            raise SystemExit(f"classify/all/result/page（{variant}、offset {page * limit}）が HTTP {status}: "
                              f"{_redact(body, api_key, project_id)[:200]!r}")
         try:
             items = parse_page(body)
         except ValueError as e:
-            raise SystemExit(f"classify/page（{variant}、offset {page * limit}）の応答が読めません（parse_item の項目名を実際の応答に合わせる）: "
+            raise SystemExit(f"classify/all/result/page（{variant}、offset {page * limit}）の応答が読めません（parse_item の項目名を実際の応答に合わせる）: "
                              f"{_redact(str(e), api_key, project_id)}")
         out.extend(items)
         if len(items) < limit:
