@@ -2,11 +2,13 @@
 
 PC 側の解析・評価。ファームウェアが何で書かれていても、`docs/data-schema.md` の形式が入力。
 
-- `features.py`   窓ごとの特徴量（IMU＋音）
+- `features.py`   窓ごとの特徴量（IMU＋音。M1 の式、docs/decisions/0012）
+- `features_m2.py`  窓ごとの特徴量（IMU＋音。M2 の式、docs/decisions/0020。IMU と窓は `features.py` を流用）
 - `evaluate.py`   `docs/evaluation.md` の定義でイベント単位の検出率・誤検出率を出す
 - `split.py`      セッション単位で学習／評価を分ける（窓単位の分割は実装しない）
 - `train_eval.py` M1 の分岐点: ロジスティック回帰で学習し、上の3つを使って採点した報告を出す
-- `to_edge_impulse.py`  events.csv のラベルで WAV/CSV を Edge Impulse に投入する形に整える
+- `evaluate_detector.py` M2 の検出器のセッション（`detect.csv`・`events.csv`）を `evaluate.py` の数え方で採点した報告を出す（#23、docs/decisions/0021）
+- `ei_upload.py`  M2 の特徴量ベクトル（1 窓 1 項目）を Edge Impulse に投入する（#21 で追加予定。生の音声・IMU は上げない）
 
 M1 では `features.py` ＋ ロジスティック回帰、M2 から Edge Impulse。
 
@@ -99,6 +101,41 @@ Z = s.transform(f.X)
 ものではない。記録済みのセッションの変換は要らない（CSV と WAV の値は変わらず、読み方だけが変わる）。
 `AUDIO_CHUNK_T_OFFSET_MS`（既定 0.0）は、換算のあとに足す補正（ms）。系統的なずれが分かったとき用で、0.0 のまま残してある。
 
+## M2 の特徴量（`features_m2.py`）
+
+M2 の検出器（Edge Impulse の分類器）に渡す 29 次元。式の定義と理由は `docs/decisions/0020-m2-audio-features.md`。
+0012 の式のうち音の 15 次元（MFCC 13、スペクトル重心、ゼロ交差率）だけを M2 用に置き換えたもので、IMU 14 次元・
+読み込みと検証・チャンクの時刻の換算・飛び・窓の格子・`valid` の規則は `features.py` の関数を import して使う
+（`features.py` は M1 の定義として残し、変えていない）。依存は numpy と標準ライブラリだけ。
+
+| 項目 | M2（`features_m2.py`） | M1（`features.py`） |
+|---|---|---|
+| 音の周波数 | 8 kHz（16 kHz の隣り合う 2 サンプルの平均 `(a + b) >> 1`。int32 の整数演算、奇数長は最後を捨てる） | 16 kHz |
+| 窓 | 8000 サンプル（開始に最も近い 8 kHz のサンプルから固定長） | 16000 |
+| フレーム | 25 ms（200）/ stride 25 ms（200、重なりなし）。1 窓 40 フレーム、1 ホップ 10 フレーム | 400 / 160、98 フレーム |
+| プリエンファシス | 0.97。フレームごとに独立（各フレームの `pre[0] = x[0]`） | 窓全体に掛けてから切る |
+| FFT・メル | Hamming（200）、`n_fft` 256（129 ビン）、メル 26 本 0〜4000 Hz、DCT-II の先頭 13 | 512、0〜8000 Hz |
+| スペクトル重心 | MFCC と同じ（プリエンファシス後の）パワースペクトルから | プリエンファシス前の別の FFT |
+| ゼロ交差率 | 8000 サンプル ÷ 7999 | 16000 ÷ 15999 |
+
+- 公開する API は `features.py` と同じ形。`extract_session(session_dir) → features.WindowFeatures`（`X` は (n, 29) float32、正規化前）。
+  窓の数・`t_start_s`・IMU 14 次元・`valid` は同じセッションに対して `features.extract_session` と一致する。
+- `FEATURE_NAMES` は `features.FEATURE_NAMES` の再公開（同じ順・同じ名前）。M1 の値と取り違えない目印は
+  `FEATURE_SET = "m2-0020"`（`analysis/m2_norm.json` と検出器のセッションの `meta.json` の `feature_set` に書く）。
+- 正規化は `features.Standardizer` をそのまま使う（`fit` / `transform` は次元数 29 だけを見る）。
+- 表示（`python analysis/features_m2.py <セッションフォルダ>`）はセッション名・式の識別子・窓の数・次元・`valid` の数・最初と最後の
+  `t_start_s` だけ。特徴量の値は表示せず、ファイルにも書かない。
+- 定数（`FEATURE_SET`、`AUDIO_HZ_IN`、`AUDIO_HZ`、`DECIMATION`、`WINDOW_SAMPLES`、`HOP_SAMPLES`、`FRAME_LEN`、`FRAME_HOP`、`PREEMPHASIS`、
+  `N_FFT`、`N_MEL`、`MEL_FMIN_HZ`–`MEL_FMAX_HZ`、`LOG_FLOOR`、`N_MFCC`、`CENTROID_MIN_POWER`）はモジュール冒頭。0020 で固定し、動かさない。
+- 装置側の同じ式は `firmware/bench/`（`-DAF_PROFILE=1`）で、`firmware/bench/host/check_port.py --profile m2` が `features_m2` と比べる。
+
+## Edge Impulse への投入（`ei_upload.py`。#21 で追加予定）
+
+`features_m2.extract_session` で出した 29 次元を `features.Standardizer` で正規化し、1 窓 = 1 項目（`swallow` / `cough` / `other`）として
+Edge Impulse の ingestion API に送る。正規化の定数は fit に使うセッションだけから作って `analysis/m2_norm.json` に書く（`feature_set`、
+`feature_names`、`mean`、`std`、`stats_sessions`、窓の数、コミット。集計値のみ）。生の音声・IMU の窓は上げない。
+API キーは環境変数 `EI_API_KEY` で渡し、コードにも log にも書かない。詳細は #21 の plan と `docs/log/`。
+
 ## 学習と評価（`train_eval.py`）
 
 M1 の分岐点の数字（#13）を出す。手順の定義と理由は `docs/decisions/0014-m1-training-procedure.md`。
@@ -146,10 +183,46 @@ python analysis/train_eval.py data/raw --eval-min <N> --final   # 評価側を�
 追跡しているファイルに未コミットの変更があると、報告のコミットに `-dirty` が付く。`--final` は、その状態では
 採点せずに止まる（先にコミットする）。既定の実行は止まらない。
 
+## 検出器の評価（`evaluate_detector.py`）
+
+M2 の数字（#27）を出す。検出器ファームウェア（#24）で録ったセッションには `imu.csv`・`audio_chunks.csv` が無く、
+`detect.csv`（`t_ms, window_t_ms, positive, prob, led`）・`feat.csv`・`events.csv`・`meta.json` がある（`docs/data-schema.md`）。
+数え方は `evaluate.event_metrics` / `evaluate.aggregate` をそのまま使う。記録の範囲だけを検出器のセッション向けに読み替え、
+docs/decisions/0021 に記録した。`positive` と `events.csv` の `s` だけを使い、`led` と `prob` は評価に使わない。
+依存は標準ライブラリと、`train_eval` 経由の numpy / scikit-learn。
+
+```
+python analysis/evaluate_detector.py data/raw                        # 既定: self の meal で fw が detector のセッション全部
+python analysis/evaluate_detector.py data/raw --sessions A B C        # 明示したセッションだけ（除外を報告に出す）
+python analysis/evaluate_detector.py data/raw --scorer path/to/m2_scorer.py   # feat.csv の再採点と装置の出力の差（#22）
+```
+
+- **対象**: 既定は subject `self`・cond `meal`・`meta.json` の `fw` が `detector` のセッション全部。`meal` なのに `fw` が
+  `detector` でないセッションがあれば止まる（消してから走らせる）。`--sessions` で明示したときはそれだけ（cond は問わず、
+  `meal` 以外は「M2 の数字に使わない」と印を付ける）。root の検出器のセッション全部と採否を報告に出す。評価に使うセッションの
+  `threshold`・`model`・`feature_names` が一致しなければ止まる（同じファームウェアで録ったものだけを合算する）。
+- **記録の範囲**（docs/decisions/0021）: 始まりは `detect.csv` の最初の窓の開始。終わりは `detect.csv` の送信時刻、最後の窓の終端、
+  `feat.csv`（あれば）の送信時刻の最大。両ファイルで `window_t_ms` は狭義に単調増加、`t_ms` は単調非減少、隣との差 1000 ms 以下、
+  送信の遅れ `t_ms − (window_t_ms + 1000)` は 1000 ms 以下（`MAX_SEND_LAG_MS`）。`feat.csv` の窓は `detect.csv` の窓の部分集合。
+  外れたセッションは止まる。範囲より前のマーカーは `event_metrics` がエラーにする。
+- **合算**: 既定の実行は `evaluate.aggregate`（3 セッション未満は止まる）。`--sessions` で 3 セッション未満のときだけ、
+  セッションごとの数字を出し、合算は「出さない」と明記する（#24 の 60 秒の確認用。M2 の数字ではない）。
+- **参考値**: 常時陽性の場合の数字、陽性窓の割合、`positive != (prob >= threshold)` の行数（比較は float32）、`c` に紐づく
+  誤検出の塊（塊の最初の窓の中心 − `t_c` が `[−1.0, +5.0]` 秒）、収集日ごと・会話の有無ごと（`o` の note が `conv`）の合算。
+- **`--scorer PATH`**: `score(features: list[list[float]], meta: dict) -> list[float]` を持つ Python ファイルで `feat.csv` を
+  再採点し、装置の `positive` との差（装置 1 / PC 0、装置 0 / PC 1、`|prob − prob_pc|` の最大）と PC の陽性で数えた数字を出す。
+  閾値は `meta.json` の `threshold`（上書きの引数は無い）。scorer の中身は #22。
+- 報告は標準出力に Markdown。ファイルは書かない。個々の窓の確率と特徴量の値は出さない。未コミットの変更があってもコミットに
+  `-dirty` を付けて止めない（#27 の M2 の数字はコミット済みの状態で走らせる）。
+
+`split.py` は `fw` が `detector` のセッションを M1 の分割（`train` / `eval`）に入れず、戻り値の `detector` に列挙する。
+`fw` が `detector` でないのに `detect.csv` か `feat.csv` があるセッションは止まる。
+
 ## テスト
 
-`evaluate.py` と `split.py` の数え方、`features.py` の窓と特徴量、`train_eval.py` の手順は、合成データのテスト
-（`test_evaluate.py`・`test_split.py`・`test_features.py`・`test_train_eval.py`）で固定している。`test_features.py` は
+`evaluate.py` と `split.py` の数え方、`features.py` の窓と特徴量、`train_eval.py` の手順、`evaluate_detector.py` の記録の範囲と
+対象の選び方は、合成データのテスト
+（`test_evaluate.py`・`test_split.py`・`test_features.py`・`test_train_eval.py`・`test_evaluate_detector.py`）で固定している。`test_features.py` は
 numpy、`test_train_eval.py` は numpy と scikit-learn を使う。ほかは標準ライブラリの `unittest` だけで動く。
 合成データは一時フォルダに作り、`data/` は使わない。`test_train_eval.py` は 60 秒の合成セッションを 9 つ作って
 学習を繰り返すので、20 秒ほど掛かる。

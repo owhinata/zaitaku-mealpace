@@ -1,4 +1,4 @@
-"""M2 の窓ごとの特徴量（IMU＋音、29 次元）。音の式の定義は docs/decisions/0020（段階 1 の素案）。
+"""M2 の窓ごとの特徴量（IMU＋音、29 次元）。音の式の定義は docs/decisions/0020。
 
 docs/decisions/0012 の式（`analysis/features.py`、M1 の定義）のうち、音の 15 次元（MFCC 13・スペクトル重心・
 ゼロ交差率）だけを M2 用に置き換えたもの。IMU 14 次元、読み込みと検証、チャンクの時刻の換算、飛び、窓の格子、
@@ -32,7 +32,7 @@ from evaluate import WINDOW_S, HOP_S   # 窓長とホップは二重に定義し
 from features import (WindowFeatures, Standardizer, FEATURE_NAMES, N_FEATURES, N_IMU_FEATURES,   # noqa: F401
                       AUDIO_SCALE, MIN_IMU_ROW_RATIO)
 
-# --- 定数（docs/decisions/0020。段階 1 の素案。人が式を確定してから固定する） ---
+# --- 定数（docs/decisions/0020 で固定した d′。#21 の段階 1 の実測と交差検証を見てから動かさない） ---
 FEATURE_SET = "m2-0020"           # meta.json の feature_set と m2_norm.json に書く識別子
 AUDIO_HZ_IN = 16000               # 記録形式（docs/data-schema.md）。features._load_audio が検証する
 AUDIO_HZ = 8000                   # 特徴量の計算に使う周波数
