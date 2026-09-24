@@ -107,7 +107,7 @@ data/raw/20261005-121500_self_meal/
   "window_ms": 1000, "hop_ms": 250,
   "threshold": 0.90,
   "model": {"source": "edge-impulse", "project_id": 0, "deploy_version": 0},
-  "feature_set": "0020",
+  "feature_set": "m2-0020",
   "feature_names": ["acc_ptp_x", "..."]
 }
 ```

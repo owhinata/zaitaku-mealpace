@@ -26,6 +26,13 @@ project(zaitaku_mealpace NONE)
 #   cmake --build build-bench2 --target build
 #   案1 は -DBUILD_FLAGS="-DBENCH_CASE=1 -I$PWD/firmware/bench/src -DEI_PORTING_MBED=0"
 #   案1 の書き出し（ダミー）は firmware/bench/src/ に展開したときだけ置く。他の案をビルドするときは消す（arduino-cli が src/ を全部コンパイルするため。#22）
+# 検出器（firmware/detector/、#24）は logger と別のビルドディレクトリで。SKETCH_NAME=detector のときは基底フラグ
+# （DETECTOR_BASE_FLAGS: 書き出しの include、Arduino porting だけにする、0020 の式、PC と同じカーネル、SDK の出力はエラーだけ）
+# が自動で付き、BUILD_FLAGS はその後ろに足される（追加分だけ渡す）:
+#   cmake -S . -B build-detector -DSKETCH_NAME=detector -DPORT=/dev/ttyACM0 -DPYTHON3=$PWD/.venv/bin/python3
+#   cmake --build build-detector --target build && cmake --build build-detector --target upload
+#   計測: -DBUILD_FLAGS="-DDETECTOR_PROFILE=1"、FEAT を送らない: -DBUILD_FLAGS="-DDETECTOR_SEND_FEAT=0"
+#   logger に戻す: build（SKETCH_NAME=logger）で build → upload
 
 set(FQBN "arduino:mbed_nano:nanorp2040connect" CACHE STRING "Arduino FQBN")
 set(PORT "/dev/ttyACM0" CACHE STRING "Serial port")
@@ -33,6 +40,14 @@ set(SKETCH_NAME "logger" CACHE STRING "firmware/ の下のスケッチ名")
 set(BUILD_FLAGS "" CACHE STRING "arduino-cli の build.extra_flags に渡す追加フラグ")
 set(SKETCH "${CMAKE_SOURCE_DIR}/firmware/${SKETCH_NAME}")
 set(BUILD_OUT "${CMAKE_BINARY_DIR}/firmware/${SKETCH_NAME}")
+
+# 検出器の基底フラグ（plan #24 第 11 節）。他のスケッチは BUILD_FLAGS だけ（今までと同じ）
+if(SKETCH_NAME STREQUAL "detector")
+  set(DETECTOR_BASE_FLAGS "-I${CMAKE_SOURCE_DIR}/firmware/detector/src -DEI_PORTING_MBED=0 -DAF_PROFILE=1 -DEI_CLASSIFIER_TFLITE_ENABLE_CMSIS_NN=0 -DEI_LOG_LEVEL=1")
+  set(EXTRA_FLAGS "${DETECTOR_BASE_FLAGS} ${BUILD_FLAGS}")
+else()
+  set(EXTRA_FLAGS "${BUILD_FLAGS}")
+endif()
 
 find_program(ARDUINO_CLI arduino-cli REQUIRED)
 find_program(PYTHON3 python3 REQUIRED)
@@ -46,7 +61,7 @@ add_custom_target(deps
 
 add_custom_target(build
   COMMAND ${ARDUINO_CLI} compile --fqbn ${FQBN}
-          --build-property "build.extra_flags=${BUILD_FLAGS}"
+          --build-property "build.extra_flags=${EXTRA_FLAGS}"
           --output-dir ${BUILD_OUT} ${SKETCH}
   COMMENT "ファームウェアのビルド")
 
