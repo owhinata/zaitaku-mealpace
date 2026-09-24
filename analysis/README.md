@@ -8,7 +8,7 @@ PC 側の解析・評価。ファームウェアが何で書かれていても�
 - `split.py`      セッション単位で学習／評価を分ける（窓単位の分割は実装しない）
 - `train_eval.py` M1 の分岐点: ロジスティック回帰で学習し、上の3つを使って採点した報告を出す
 - `evaluate_detector.py` M2 の検出器のセッション（`detect.csv`・`events.csv`）を `evaluate.py` の数え方で採点した報告を出す（#23、docs/decisions/0021）
-- `ei_upload.py`  M2 の特徴量ベクトル（1 窓 1 項目）を Edge Impulse に投入する（#21 で追加予定。生の音声・IMU は上げない）
+- `ei_upload.py`  M2 の特徴量ベクトル（1 窓 1 項目）を Edge Impulse に投入する（#21。生の音声・IMU は上げない）
 
 M1 では `features.py` ＋ ロジスティック回帰、M2 から Edge Impulse。
 
@@ -129,12 +129,49 @@ M2 の検出器（Edge Impulse の分類器）に渡す 29 次元。式の定義
   `N_FFT`、`N_MEL`、`MEL_FMIN_HZ`–`MEL_FMAX_HZ`、`LOG_FLOOR`、`N_MFCC`、`CENTROID_MIN_POWER`）はモジュール冒頭。0020 で固定し、動かさない。
 - 装置側の同じ式は `firmware/bench/`（`-DAF_PROFILE=1`）で、`firmware/bench/host/check_port.py --profile m2` が `features_m2` と比べる。
 
-## Edge Impulse への投入（`ei_upload.py`。#21 で追加予定）
+## Edge Impulse への投入（`ei_upload.py`）
 
 `features_m2.extract_session` で出した 29 次元を `features.Standardizer` で正規化し、1 窓 = 1 項目（`swallow` / `cough` / `other`）として
-Edge Impulse の ingestion API に送る。正規化の定数は fit に使うセッションだけから作って `analysis/m2_norm.json` に書く（`feature_set`、
-`feature_names`、`mean`、`std`、`stats_sessions`、窓の数、コミット。集計値のみ）。生の音声・IMU の窓は上げない。
-API キーは環境変数 `EI_API_KEY` で渡し、コードにも log にも書かない。詳細は #21 の plan と `docs/log/`。
+Edge Impulse（EI）の ingestion API に送る。生の音声・IMU の窓は上げない。投入するデータ・ラベルの規則・分け方は docs/decisions/0019、
+式と正規化の定数は 0020。依存は numpy と標準ライブラリ（`urllib`）だけで、EI の SDK は使わない。
+
+```
+python analysis/ei_upload.py data/raw --bucket training --days 20260921,20260922,20260923 --validation-day 20260923 [--dry-run]
+python analysis/ei_upload.py data/raw --bucket testing --days 20260924 [--dry-run]
+python analysis/ei_upload.py --probe [--dry-run]
+```
+
+- **分割**: `split.split_sessions(root, 7, "self")` の `train` が収集日 `20260921`・`20260922`・`20260923` の各 7 本、`eval` が `20260924` の
+  7 本ちょうどであることを検査する（外れたら止まる）。`--days` はその収集日の部分集合。`--bucket training` に収集日4 は入れられず、
+  `--bucket testing` は収集日4 だけを受け付ける。subject は `self` 固定（`p1` のセッションは投入しない）。
+- **ラベル**（`window_labels3`）: 全窓を `other` にし、各 `c` について窓の中心が `[t_c − 0.5, t_c + 1.5]` の窓を境目、次に `[t_c, t_c + 1.0]` を
+  `cough` にし、その後で各 `s` について同じ形で境目 → `swallow` を掛ける（`s` の陽性と境目が `c` の規則より優先。近接した 2 つの嚥下では
+  陽性が境目より優先）。`swallow` の窓は `train_eval.window_labels` の陽性と同じ集合。`t`・`n`・`q` は `other`。
+- **投入しない窓**: `valid = False` の窓と境目の窓。除外した数（無効 / 境目）をセッションごとに出す。`other` の間引きはしない。
+- **正規化**: `--bucket training` は fit セッション（`--days` から `--validation-day` を除いたもの）の `valid` な窓の全部で
+  `Standardizer.fit` し、定数を `analysis/m2_norm.json`（`feature_set`、`feature_names`、`mean`、`std`、`stats_sessions`、`n_windows`、
+  `commit`。集計値のみ）に書く。ファイルが既にあって `commit` 以外の内容が違えば止まる（黙って上書きしない。作り直すときは人が消す）。
+  `--bucket testing` はそのファイルを読んで使い（無ければ止まる。`stats_sessions` に収集日4 があれば止まる）、収集日4 から統計量を作らない。
+  投入する値は `transform` の後の float32。
+- **項目の形**: EI のデータ取得の JSON（`protected.alg = "none"`、`interval_ms` 1000、`sensors` は `FEATURE_NAMES` の 29 個、`values` は
+  1 行 29 個）。ファイル名 `<セッション名>_<t_ms>.json`（`t_ms` は窓の開始 `round(t_start_s × 1000)`）。ヘッダは `x-label`、
+  `x-metadata`（`session`・`day`・`t_ms`・`subject`・`feature_set`。値はすべて文字列）、`x-disallow-duplicates: 1`、`x-api-key`。
+- **転送**: `https://ingestion.edgeimpulse.com/api/<training|testing>/data` に multipart/form-data を POST。**1 リクエスト 1 項目**
+  （`x-metadata` がリクエスト単位に掛かるため）。失敗（HTTP 4xx/5xx、接続の失敗）は 3 回まで再試行し（待ち 1・2・4 秒）、それでも
+  失敗したら、止まった場所（セッション名、そのセッションで送った項目数、全体で受け付けられた項目数）を出して止まる。
+  `x-disallow-duplicates` で弾かれた項目（HTTP 400 で本文に duplicate / already exists）は再試行せず数だけ数える（再実行のとき）。
+  進み具合はセッションごとに 1 行。送信の関数は `run(argv, send=..., sleep=...)` で差し替えられる（`send(url, headers, files) → (status, body)`）。
+- **API キー**: 環境変数 `EI_API_KEY`。無ければ `--dry-run` 以外は止まる。値を標準出力・例外・ログに出さない（応答の本文に含まれていても伏せる）。
+- **`--dry-run`**: 送信も `m2_norm.json` の書き込みもせず、一覧だけを出す。投入の前に人が一覧を見る。
+- **`--probe`**: 乱数（seed 固定）の 29 次元を 9 項目（`swallow` / `cough` / `other` × 3。群 `probe-a` / `probe-b` / `probe-c`、
+  `day` = `probe-1` / `probe-2` / `probe-3`、件数 2 / 3 / 4、`t_ms` は群の中で 0, 1000, …。`subject` と `feature_set` は `probe`）を
+  training に送り、EI の受け付け（1 行の項目、`x-metadata`、メタデータの鍵による validation の分割）を確かめる。実データは使わない。
+  送る先は `EI_API_KEY` の指すプロジェクト（#17 のダミー）。
+- **標準出力**（`docs/log/` に貼る）: 実行の条件（コマンドライン、コミット、`feature_set`、numpy の版、dry-run か）、セッションごとの表
+  （収集日、bucket、役割 fit / validation / test、全窓、`valid`、投入、クラスごと、除外）、合計（bucket・役割・収集日・クラスごと）、
+  `stats_sessions` と窓の数、収集日ごとの投入数、送信したリクエスト数と受け付けられた項目数（Studio の項目数と照合する）。
+  `--bucket training` では収集日ごとの投入数が互いに異なることを検査する（同数の日があれば止まる。EI の validation の件数から
+  選ばれた日を読み取るため）。特徴量の値・波形・個々の窓の一覧は出さない。
 
 ## 学習と評価（`train_eval.py`）
 
