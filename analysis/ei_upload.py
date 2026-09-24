@@ -13,6 +13,7 @@
 - 正規化の定数は fit セッション（`--days` から `--validation-day` を除いたもの）の `valid` な窓の全部から作り、
   `analysis/m2_norm.json` に書く（集計値のみ）。`--bucket testing` はそのファイルを読んで使い、収集日4 から統計量を作らない。
 - 転送は標準ライブラリの `urllib` で、1 リクエスト 1 項目（`x-metadata` がリクエスト単位に掛かるため）。失敗は 3 回まで再試行。
+  ヘッダは `x-api-key`、`x-label`、`x-metadata`、`x-file-name`（EI が要求する。無いと HTTP 422）、`x-disallow-duplicates`。
   API キーは環境変数 `EI_API_KEY` で渡し、標準出力・例外・ログに出さない。
 - `--dry-run` は送信もファイルの書き込みもせず、一覧だけを出す。`--probe` は乱数の 9 項目で EI の受け付けを確かめる（実データを使わない）。
 - 標準出力には集計値とセッション名だけを出す。特徴量の値・波形・個々の窓の一覧は出さない。
@@ -329,8 +330,10 @@ def upload(items_by_session: Sequence[tuple[str, Sequence[Item]]], bucket: str, 
     for session, items in items_by_session:
         sent = 0
         for it in items:
+            # x-file-name は EI の ingestion API が要求する（無いと HTTP 422。probe で判明。plan 7.4 のヘッダ一覧には無い）。
+            # multipart の filename と同じ値
             headers = {"x-api-key": api_key, "x-label": it.label, "x-metadata": json.dumps(it.metadata),
-                       "x-disallow-duplicates": "1"}
+                       "x-file-name": it.filename, "x-disallow-duplicates": "1"}
             status, body = 0, ""
             for attempt in range(MAX_ATTEMPTS):
                 if attempt:

@@ -284,6 +284,7 @@ class TrainingUploadTest(TmpCase):
             self.assertEqual(len(files), 1)
             name, data = files[0]
             self.assertEqual(name, f"{meta['session']}_{meta['t_ms']}.json")
+            self.assertEqual(headers["x-file-name"], name)   # EI が要求するヘッダ。multipart の filename と同じ
             t_ms = int(meta["t_ms"])
             self.assertNotIn(t_ms, exp[meta["session"]]["excluded_t_ms"])
             self.assertEqual(headers["x-label"], exp[meta["session"]]["labels"][t_ms])
@@ -449,6 +450,7 @@ class ProbeTest(TmpCase):
         days = [json.loads(h["x-metadata"])["day"] for _, h, _ in send.calls]
         self.assertEqual(sorted(days), ["probe-1"] * 2 + ["probe-2"] * 3 + ["probe-3"] * 4)
         self.assertEqual({h["x-disallow-duplicates"] for _, h, _ in send.calls}, {"1"})
+        self.assertTrue(all(h["x-file-name"] == f[0][0] for _, h, f in send.calls))
         self.assertNotIn(KEY, out)
         with self.assertRaises(SystemExit):
             run([str(ROOT), "--probe"], env={eu.API_KEY_ENV: KEY}, norm_path=self.root / "n.json")

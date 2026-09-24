@@ -155,7 +155,8 @@ python analysis/ei_upload.py --probe [--dry-run]
   投入する値は `transform` の後の float32。
 - **項目の形**: EI のデータ取得の JSON（`protected.alg = "none"`、`interval_ms` 1000、`sensors` は `FEATURE_NAMES` の 29 個、`values` は
   1 行 29 個）。ファイル名 `<セッション名>_<t_ms>.json`（`t_ms` は窓の開始 `round(t_start_s × 1000)`）。ヘッダは `x-label`、
-  `x-metadata`（`session`・`day`・`t_ms`・`subject`・`feature_set`。値はすべて文字列）、`x-disallow-duplicates: 1`、`x-api-key`。
+  `x-metadata`（`session`・`day`・`t_ms`・`subject`・`feature_set`。値はすべて文字列）、`x-file-name`（ファイル名と同じ。EI の ingestion API が
+  要求し、無いと HTTP 422。#21 の probe で判明）、`x-disallow-duplicates: 1`、`x-api-key`。multipart の form field 名は `data`。
 - **転送**: `https://ingestion.edgeimpulse.com/api/<training|testing>/data` に multipart/form-data を POST。**1 リクエスト 1 項目**
   （`x-metadata` がリクエスト単位に掛かるため）。失敗（HTTP 4xx/5xx、接続の失敗）は 3 回まで再試行し（待ち 1・2・4 秒）、それでも
   失敗したら、止まった場所（セッション名、そのセッションで送った項目数、全体で受け付けられた項目数）を出して止まる。
