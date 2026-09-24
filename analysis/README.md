@@ -153,10 +153,16 @@ python analysis/ei_upload.py --probe [--dry-run]
   `commit`。集計値のみ）に書く。ファイルが既にあって `commit` 以外の内容が違えば止まる（黙って上書きしない。作り直すときは人が消す）。
   `--bucket testing` はそのファイルを読んで使い（無ければ止まる。`stats_sessions` に収集日4 があれば止まる）、収集日4 から統計量を作らない。
   投入する値は `transform` の後の float32。
+- **`--reuse-norm`**（既定 off。`--bucket training` 専用）: 一部の収集日だけを入れ直すとき（例 `--days 20260921`）、統計量を作り直さず
+  既存の `m2_norm.json` をそのまま使う。`stats_sessions` が収集日1〜3 の 21 本で `--days` のセッションを含み、`feature_set` と
+  `feature_names` が一致することを確かめ、違えば止まる。ファイルは書き換えない。一覧の「正規化の定数」に「既存の定数を使用」と出す。
+  `--reuse-norm` なしで `--days` が 3 日そろっていないと、`m2_norm.json` があれば従来どおり内容の不一致で止まる。
 - **項目の形**: EI のデータ取得の JSON（`protected.alg = "none"`、`interval_ms` 1000、`sensors` は `FEATURE_NAMES` の 29 個、`values` は
   1 行 29 個）。ファイル名 `<セッション名>_<t_ms>.json`（`t_ms` は窓の開始 `round(t_start_s × 1000)`）。ヘッダは `x-label`、
   `x-metadata`（`session`・`day`・`t_ms`・`subject`・`feature_set`。値はすべて文字列）、`x-file-name`（ファイル名と同じ。EI の ingestion API が
   要求し、無いと HTTP 422。#21 の probe で判明）、`x-disallow-duplicates: 1`、`x-api-key`。multipart の form field 名は `data`。
+  `protected.iat` は決定的（セッション名の先頭 `YYYYMMDD-HHMMSS` を JST の epoch 秒にし `t_ms // 1000` を足す。実行時刻は使わない）なので、
+  再送は同じバイト列になり EI の重複検査で弾かれる。
 - **転送**: `https://ingestion.edgeimpulse.com/api/<training|testing>/data` に multipart/form-data を POST。**1 リクエスト 1 項目**
   （`x-metadata` がリクエスト単位に掛かるため）。失敗（HTTP 4xx/5xx、接続の失敗）は 3 回まで再試行し（待ち 1・2・4 秒）、それでも
   失敗したら、止まった場所（セッション名、そのセッションで送った項目数、全体で受け付けられた項目数）を出して止まる。

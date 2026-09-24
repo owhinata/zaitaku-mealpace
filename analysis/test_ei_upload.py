@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 import contextlib, io, json, tempfile, threading, unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -25,7 +26,7 @@ ARGS_TEST = ["--bucket", "testing", "--days", "20260924"]
 
 
 def session_name(day: str, k: int) -> str:
-    return f"{day}-1000{k}0_self_{CONDS[k]}"
+    return f"{day}-10{k:02d}00_self_{CONDS[k]}"   # HHMMSS が実在する時刻（session_iat が読む）
 
 
 def write_events(d: Path, events) -> None:
@@ -344,6 +345,75 @@ class TrainingUploadTest(TmpCase):
             run([str(ROOT), "--bucket", "training", "--days", "20260921,20260922,20260923", "--validation-day",
                  "20260922", "--dry-run"], env={eu.API_KEY_ENV: KEY}, norm_path=self.norm())
 
+    def test_reuse_norm_one_day_with_existing_constants(self):
+        """--reuse-norm: 収集日1 だけの投入が既存の定数（収集日1〜3 の 21 本）で通り、定数ファイルが変わらない。"""
+        args3 = ["--bucket", "training", "--days", "20260921,20260922,20260923"]   # validation なし → 21 本
+        run([str(ROOT), *args3], env={eu.API_KEY_ENV: KEY}, norm_path=self.norm())
+        before = self.norm().read_bytes()
+        doc = json.loads(before)
+        self.assertEqual(len(doc["stats_sessions"]), 21)
+        args1 = ["--bucket", "training", "--days", "20260921"]
+        with mock.patch.object(features.Standardizer, "fit", side_effect=AssertionError("fit を呼んではいけない")):
+            res, out, send = run([str(ROOT), *args1, "--reuse-norm"], env={eu.API_KEY_ENV: KEY}, norm_path=self.norm())
+        self.assertEqual(self.norm().read_bytes(), before)
+        self.assertNotIn("書いた:", out)
+        rows, total = table_rows(out)
+        self.assertEqual(len(rows), 7)
+        self.assertEqual({r["day"] for r in rows}, {"20260921"})
+        self.assertEqual({r["role"] for r in rows}, {"fit"})
+        self.assertEqual({r["bucket"] for r in rows}, {"training"})
+        self.assertIn("既存の定数を使用（stats_sessions 21 本）", out)
+        self.assertEqual(stats_sessions_in(out), doc["stats_sessions"])
+        self.assertEqual(len(send.calls), total["n_upload"])
+        self.assertEqual((res.n_items, res.n_duplicates), (total["n_upload"], 0))
+        self.assertTrue(all(url == "https://ingestion.edgeimpulse.com/api/training/data" for url, _, _ in send.calls))
+        self.assertEqual({json.loads(h["x-metadata"])["day"] for _, h, _ in send.calls}, {"20260921"})
+        # 正規化はファイルの定数で行われている: 同じ窓を手で正規化した値と一致する
+        std = eu.standardizer_from_norm(doc)
+        name = session_name("20260921", 1)
+        s = eu.load_session(ROOT, name, "training", "fit")
+        z = std.transform(s.feats.X)
+        k = int(np.nonzero(s.upload_mask)[0][0])
+        t_ms = int(round(float(s.feats.t_start_s[k]) * 1000))
+        sent = next(f for _, _, f in send.calls if f[0][0] == f"{name}_{t_ms}.json")
+        np.testing.assert_allclose(json.loads(sent[0][1])["payload"]["values"][0], z[k], rtol=1e-6)
+        # --reuse-norm なしで 1 日だけなら従来どおり内容の不一致で止まる（定数ファイルはそのまま）
+        with self.assertRaises(SystemExit) as cm:
+            run([str(ROOT), *args1, "--dry-run"], env={eu.API_KEY_ENV: KEY}, norm_path=self.norm())
+        self.assertIn("内容が違います", str(cm.exception))
+        self.assertEqual(self.norm().read_bytes(), before)
+
+    def test_reuse_norm_stops_on_bad_file_or_args(self):
+        args1 = ["--bucket", "training", "--days", "20260921", "--reuse-norm", "--dry-run"]
+        # ファイルが無い
+        with self.assertRaises(SystemExit) as cm:
+            run([str(ROOT), *args1], env={eu.API_KEY_ENV: KEY}, norm_path=self.norm())
+        self.assertIn("m2_norm.json", str(cm.exception))
+        # stats_sessions が 14 本（validation を除いて作ったもの）では止まる
+        run([str(ROOT), *ARGS_TRAIN], env={eu.API_KEY_ENV: KEY}, norm_path=self.norm())
+        before = self.norm().read_bytes()
+        self.assertEqual(len(json.loads(before)["stats_sessions"]), 14)
+        with self.assertRaises(SystemExit) as cm:
+            run([str(ROOT), *args1], env={eu.API_KEY_ENV: KEY}, norm_path=self.norm())
+        self.assertIn("21 本", str(cm.exception))
+        self.assertEqual(self.norm().read_bytes(), before)
+        # feature_set が違えば止まる（read_norm）
+        doc = json.loads(before)
+        doc["stats_sessions"] = [session_name(d, k) for d in DAYS[:3] for k in range(7)]
+        doc["feature_set"] = "m2-other"
+        self.norm().write_text(json.dumps(doc), encoding="utf-8")
+        with self.assertRaises(SystemExit) as cm:
+            run([str(ROOT), *args1], env={eu.API_KEY_ENV: KEY}, norm_path=self.norm())
+        self.assertIn("feature_set", str(cm.exception))
+        # --bucket testing / --validation-day とは一緒に使えない
+        doc["feature_set"] = eu.FEATURE_SET
+        self.norm().write_text(json.dumps(doc), encoding="utf-8")
+        with self.assertRaises(SystemExit):
+            run([str(ROOT), *ARGS_TEST, "--reuse-norm", "--dry-run"], env={eu.API_KEY_ENV: KEY}, norm_path=self.norm())
+        with self.assertRaises(SystemExit):
+            run([str(ROOT), "--bucket", "training", "--days", "20260921,20260922", "--validation-day", "20260922",
+                 "--reuse-norm", "--dry-run"], env={eu.API_KEY_ENV: KEY}, norm_path=self.norm())
+
     def test_retry_then_success(self):
         statuses = [(500, "server error"), (0, "connection failed")]   # 最初の項目が 2 回失敗、3 回目に成功
         sleeps = []
@@ -483,7 +553,7 @@ class TestingUploadTest(TmpCase):
 
 class ProbeTest(TmpCase):
     def test_probe_items(self):
-        items = eu.probe_items(iat=0)
+        items = eu.probe_items()
         self.assertEqual(len(items), 9)
         groups = {}
         for it in items:
@@ -500,8 +570,10 @@ class ProbeTest(TmpCase):
                 doc = json.loads(it.data)
                 self.assertEqual(len(doc["payload"]["values"][0]), 29)
         self.assertEqual(len({it.filename for it in items}), 9)
-        # seed 固定で決定的
-        self.assertEqual([i.data for i in eu.probe_items(iat=0)], [i.data for i in items])
+        # seed 固定で決定的。iat は固定値 + t_ms // 1000（実行時刻ではない）
+        self.assertEqual([i.data for i in eu.probe_items()], [i.data for i in items])
+        for it in items:
+            self.assertEqual(json.loads(it.data)["protected"]["iat"], eu.PROBE_IAT_BASE + int(it.metadata["t_ms"]) // 1000)
 
     def test_probe_dry_run_and_send(self):
         _, out, send = run(["--probe", "--dry-run"], env={eu.API_KEY_ENV: KEY}, norm_path=self.root / "n.json")
@@ -535,6 +607,24 @@ class MultipartTest(unittest.TestCase):
             eu.item_json(np.zeros(28), 0)
         with self.assertRaises(ValueError):
             eu.item_json(np.zeros((2, 29)), 0)
+
+    def test_make_item_is_deterministic(self):
+        """同じ項目を 2 回作っても data が byte 単位で一致する（再送を EI の重複検査で弾かせるため。iat に実行時刻を使わない）。"""
+        name, t_ms = "20260921-104059_self_quiet", 2500
+        values = np.arange(29, dtype=np.float32) / 7
+        a = eu.make_item(name, "20260921", t_ms, "swallow", values)
+        with mock.patch("time.time", side_effect=AssertionError("iat に time.time() を使わない")):
+            b = eu.make_item(name, "20260921", t_ms, "swallow", values.copy())
+        self.assertEqual(a.data, b.data)
+        # iat = セッション名の先頭 20260921-104059 を JST（+09:00）で epoch 秒にしたもの + t_ms // 1000
+        expected = int(datetime(2026, 9, 21, 10, 40, 59, tzinfo=timezone(timedelta(hours=9))).timestamp()) + 2
+        self.assertEqual(json.loads(a.data)["protected"]["iat"], expected)
+        self.assertEqual(eu.session_iat(name, t_ms), expected)
+        # 項目ごとに違う（同じセッションの別の窓、別のセッションの同じ窓）
+        self.assertNotEqual(eu.session_iat(name, 3500), expected)
+        self.assertNotEqual(eu.session_iat("20260921-104413_self_water", t_ms), expected)
+        with self.assertRaises(ValueError):
+            eu.session_iat("not-a-session", 0)
 
     def test_redact(self):
         self.assertEqual(eu._redact("key=abc rest", "abc"), f"key=<{eu.API_KEY_ENV}> rest")

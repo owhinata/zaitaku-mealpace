@@ -2,6 +2,7 @@
 
 使い方:
   python analysis/ei_upload.py data/raw --bucket training --days 20260921,20260922,20260923 --validation-day 20260923 [--dry-run] [--workers N]
+  python analysis/ei_upload.py data/raw --bucket training --days 20260921 --reuse-norm [--dry-run] [--workers N]
   python analysis/ei_upload.py data/raw --bucket testing --days 20260924 [--dry-run] [--workers N]
   python analysis/ei_upload.py --probe [--dry-run]
 
@@ -12,9 +13,14 @@
   `valid = False` の窓と境目（UNUSED）の窓は投入しない。`other` の間引きはしない。
 - 正規化の定数は fit セッション（`--days` から `--validation-day` を除いたもの）の `valid` な窓の全部から作り、
   `analysis/m2_norm.json` に書く（集計値のみ）。`--bucket testing` はそのファイルを読んで使い、収集日4 から統計量を作らない。
+- `--reuse-norm`（既定 off。`--bucket training` 専用）は統計量を作り直さず、既存の `m2_norm.json` をそのまま読んで使う
+  （一部の収集日だけを入れ直すとき）。`stats_sessions` が収集日1〜3 の 21 本で `--days` のセッションを含み、`feature_set` と
+  `feature_names` が一致することを確かめ、違えば止まる。ファイルは書き換えない。
 - 転送は標準ライブラリの `urllib` で、1 リクエスト 1 項目（`x-metadata` がリクエスト単位に掛かるため）。失敗は 3 回まで再試行。
   ヘッダは `x-api-key`、`x-label`、`x-metadata`、`x-file-name`（EI が要求する。無いと HTTP 422）、`x-disallow-duplicates`。
   API キーは環境変数 `EI_API_KEY` で渡し、標準出力・例外・ログに出さない。
+- 再送が同じバイト列になるように `iat` は決定的（セッション名の先頭の日時を JST の epoch 秒にし `t_ms // 1000` を足す。実行時刻は使わない）。
+  同じ項目を再送すると EI が `x-disallow-duplicates` で弾く。
 - `--workers N`（既定 1 = 逐次）で N 本のスレッドが項目を並列に送る。1 リクエスト 1 項目・ヘッダ・再試行・重複の扱いは同じ。
   進み具合はセッションの全項目が終わってから 1 行。ある項目が 4 回失敗したら、未着手の項目を取り消し、進行中の送信を待ってから止まる。
 - `--dry-run` は送信もファイルの書き込みもせず、一覧だけを出す。`--probe` は乱数の 9 項目で EI の受け付けを確かめる（実データを使わない）。
@@ -26,6 +32,7 @@ import urllib.error, urllib.request
 from collections import Counter
 from concurrent.futures import Executor, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -62,8 +69,11 @@ MAX_ATTEMPTS = 4                                      # 1 回 + 再試行 3 回
 RETRY_WAIT_S = (1.0, 2.0, 4.0)                        # 再試行の前の待ち時間
 TIMEOUT_S = 60.0
 FORM_FIELD = "data"
+JST = timezone(timedelta(hours=9))                    # セッション名の先頭 YYYYMMDD-HHMMSS の時刻帯
+SESSION_TIME_FORMAT = "%Y%m%d-%H%M%S"
 
 PROBE_SEED = 21
+PROBE_IAT_BASE = 1_000_000_000                        # probe の iat（固定値 + t_ms // 1000）
 PROBE_GROUPS = (("probe-a", "probe-1", 2), ("probe-b", "probe-2", 3), ("probe-c", "probe-3", 4))   # (session, day, 件数)
 PROBE_SUBJECT = "probe"                               # 乱数の項目。self のデータではない
 PROBE_FEATURE_SET = "probe"
@@ -222,6 +232,21 @@ def read_norm(path: Path) -> dict:
     return doc
 
 
+def check_reuse_norm(doc: Mapping, train: Sequence[str], names: Sequence[str], path: Path) -> None:
+    """--reuse-norm: 既存の定数の stats_sessions が収集日1〜3 の 21 本（split の train と同じ集合）で、投入するセッションを含むこと。
+
+    feature_set / feature_names の一致は read_norm が見る。
+    """
+    stats = list(doc["stats_sessions"])
+    n_expected = len(TRAIN_DAYS) * SESSIONS_PER_DAY
+    if sorted(stats) != sorted(train) or len(stats) != n_expected:
+        raise SystemExit(f"{path} の stats_sessions が収集日1〜3 の {n_expected} 本ではありません（{len(stats)} 本、"
+                         f"収集日 {dict(sorted(Counter(_day(n) for n in stats).items()))}）。--reuse-norm は使えません")
+    missing = sorted(set(names) - set(stats))
+    if missing:
+        raise SystemExit(f"{path} の stats_sessions に投入するセッションがありません: {missing}")
+
+
 def standardizer_from_norm(doc: Mapping) -> features.Standardizer:
     return features.Standardizer(mean=np.asarray(doc["mean"], dtype=np.float64),
                                  std=np.asarray(doc["std"], dtype=np.float64),
@@ -250,33 +275,49 @@ def item_json(values: np.ndarray, iat: int) -> bytes:
     return json.dumps(doc, separators=(",", ":")).encode("utf-8")
 
 
-def make_item(session: str, day: str, t_ms: int, label: str, values: np.ndarray, iat: int,
+def session_iat(session: str, t_ms: int) -> int:
+    """項目ごとに決定的な iat。セッション名の先頭 YYYYMMDD-HHMMSS を JST の epoch 秒にし、t_ms // 1000 を足す。
+
+    実行時刻を使わないので、同じ項目を再送しても JSON のバイト列が変わらず、EI の重複検査（内容のハッシュ）で弾かれる。
+    """
+    try:
+        t0 = datetime.strptime(session[:len("YYYYMMDD-HHMMSS")], SESSION_TIME_FORMAT).replace(tzinfo=JST)
+    except ValueError:
+        raise ValueError(f"セッション名の先頭が YYYYMMDD-HHMMSS ではありません: {session!r}")
+    return int(t0.timestamp()) + int(t_ms) // 1000
+
+
+def make_item(session: str, day: str, t_ms: int, label: str, values: np.ndarray, iat: int | None = None,
               subject: str = SUBJECT, feature_set: str = FEATURE_SET) -> Item:
+    """iat を省くと session_iat（決定的）。probe は固定値を渡す。"""
+    if iat is None:
+        iat = session_iat(session, t_ms)
     metadata = {"session": session, "day": day, "t_ms": str(int(t_ms)), "subject": subject, "feature_set": feature_set}
     return Item(session=session, filename=f"{session}_{int(t_ms)}.json", label=label, metadata=metadata,
                 data=item_json(values, iat))
 
 
-def build_items(s: Loaded, std: features.Standardizer, iat: int) -> list[Item]:
+def build_items(s: Loaded, std: features.Standardizer) -> list[Item]:
     """投入する窓（valid かつ UNUSED でない）を正規化して項目にする。"""
     z = std.transform(s.feats.X)
     out = []
     for k in np.nonzero(s.upload_mask)[0]:
         t_ms = int(round(float(s.feats.t_start_s[k]) * 1000))
-        out.append(make_item(s.name, s.day, t_ms, CLASS_NAMES[int(s.labels[k])], z[k], iat))
+        out.append(make_item(s.name, s.day, t_ms, CLASS_NAMES[int(s.labels[k])], z[k]))
     return out
 
 
-def probe_items(iat: int) -> list[Item]:
+def probe_items() -> list[Item]:
     """乱数（seed 固定）の 29 次元を 9 項目。swallow / cough / other × 3。群ごとの件数は 2 / 3 / 4。実データは使わない。"""
     rng = np.random.default_rng(PROBE_SEED)
     labels = [CLASS_NAMES[c] for c in (SWALLOW, COUGH, OTHER)]
     out = []
     for session, day, count in PROBE_GROUPS:
         for k in range(count):
+            t_ms = 1000 * k
             values = rng.standard_normal(N_FEATURES).astype(np.float32)
-            out.append(make_item(session, day, 1000 * k, labels[len(out) % len(labels)], values, iat,
-                                 subject=PROBE_SUBJECT, feature_set=PROBE_FEATURE_SET))
+            out.append(make_item(session, day, t_ms, labels[len(out) % len(labels)], values,
+                                 iat=PROBE_IAT_BASE + t_ms // 1000, subject=PROBE_SUBJECT, feature_set=PROBE_FEATURE_SET))
     assert len(out) == 9 and Counter(i.label for i in out) == {l: 3 for l in labels}
     return out
 
@@ -420,8 +461,9 @@ def _print_header(argv: Sequence[str], dry_run: bool) -> None:
     print(f"- dry-run: {'yes（送信もファイルの書き込みもしない）' if dry_run else 'no'}")
 
 
-def print_listing(summaries: Sequence[SessionSummary], stats_sessions: Sequence[str], n_stats_windows: int) -> dict[str, int]:
-    """セッションごとの表と合計。収集日ごとの投入数を返す。"""
+def print_listing(summaries: Sequence[SessionSummary], stats_sessions: Sequence[str], n_stats_windows: int,
+                  norm_note: str | None = None) -> dict[str, int]:
+    """セッションごとの表と合計。収集日ごとの投入数を返す。norm_note は「正規化の定数」の節の先頭に出す 1 行。"""
     print()
     print("## セッションごと")
     print("| セッション | 収集日 | bucket | 役割 | 全窓 | valid | 投入 | swallow | cough | other | 除外（無効） | 除外（境目） |")
@@ -457,6 +499,8 @@ def print_listing(summaries: Sequence[SessionSummary], stats_sessions: Sequence[
     print(f"- クラスごと: swallow {total.n_swallow}、cough {total.n_cough}、other {total.n_other}")
     print()
     print("## 正規化の定数（stats_sessions）")
+    if norm_note:
+        print(f"- {norm_note}")
     print(f"- セッション {len(stats_sessions)} 本、valid な窓 {n_stats_windows}")
     for n in stats_sessions:
         print(f"  - {n}")
@@ -482,6 +526,8 @@ def _parse(argv: Sequence[str]) -> argparse.Namespace:
     ap.add_argument("--dry-run", action="store_true", help="送信もファイルの書き込みもせず、一覧だけ出す")
     ap.add_argument("--probe", action="store_true", help="乱数の 9 項目で EI の受け付けを確かめる")
     ap.add_argument("--workers", type=int, default=1, help="並列に送るスレッドの数（既定 1 = 逐次）")
+    ap.add_argument("--reuse-norm", action="store_true",
+                    help="--bucket training で統計量を作り直さず、既存の m2_norm.json（収集日1〜3 の 21 本）を使う")
     a = ap.parse_args(argv)
     if a.workers < 1:
         raise SystemExit(f"--workers は 1 以上です: {a.workers}")
@@ -499,14 +545,13 @@ def run(argv: Sequence[str], *, send: SendFn = send_urllib, sleep: Callable[[flo
         environ: Mapping[str, str] | None = None, norm_path: Path = NORM_PATH) -> UploadResult:
     a = _parse(argv)
     environ = os.environ if environ is None else environ
-    iat = int(time.time())
     _print_header(argv, a.dry_run)
 
     if a.probe:
         if a.root is not None or a.bucket or a.days or a.validation_day:
             raise SystemExit("--probe は root / --bucket / --days / --validation-day と一緒に使えません")
         api_key = _api_key(environ, a.dry_run)
-        items = probe_items(iat)
+        items = probe_items()
         print()
         print("## probe の項目（training に送る。実データではない）")
         by_session = [(s, [i for i in items if i.session == s]) for s, _, _ in PROBE_GROUPS]
@@ -533,6 +578,8 @@ def run(argv: Sequence[str], *, send: SendFn = send_urllib, sleep: Callable[[flo
 
     existing = None
     if a.bucket == "testing":
+        if a.reuse_norm:
+            raise SystemExit("--reuse-norm は --bucket training 専用です（testing はいつも m2_norm.json を読む）")
         # 収集日4 から統計量を作らない。m2_norm.json が要る
         if not norm_path.is_file():
             raise SystemExit(f"{norm_path} がありません。先に --bucket training を実行してください")
@@ -540,12 +587,20 @@ def run(argv: Sequence[str], *, send: SendFn = send_urllib, sleep: Callable[[flo
         bad = [n for n in existing["stats_sessions"] if _day(n) in TEST_DAYS]
         if bad:
             raise SystemExit(f"{norm_path} の stats_sessions に収集日4 のセッションがあります: {bad}")
+    elif a.reuse_norm:
+        # 統計量を作り直さず、既存の定数（収集日1〜3 の 21 本）をそのまま使う。ファイルは書き換えない
+        if a.validation_day is not None:
+            raise SystemExit("--reuse-norm と --validation-day は一緒に使えません（既存の定数は収集日1〜3 の全部から作られている）")
+        if not norm_path.is_file():
+            raise SystemExit(f"{norm_path} がありません（--reuse-norm は既存の定数を使う）")
+        existing = read_norm(norm_path)
+        check_reuse_norm(existing, train, [n for n, _ in selected], norm_path)
 
     api_key = _api_key(environ, a.dry_run)
     loaded = [load_session(a.root, name, a.bucket, role) for name, role in selected]
 
     doc = None
-    if a.bucket == "training":
+    if a.bucket == "training" and not a.reuse_norm:
         fit = [s.feats for s in loaded if s.role == "fit"]
         if not fit:
             raise SystemExit("fit セッションがありません（--days の全部が --validation-day）")
@@ -563,7 +618,8 @@ def run(argv: Sequence[str], *, send: SendFn = send_urllib, sleep: Callable[[flo
         n_stats_windows = int(existing["n_windows"])
 
     summaries = [summarize(s) for s in loaded]
-    per_day = print_listing(summaries, std.sessions, n_stats_windows)
+    norm_note = f"既存の定数を使用（stats_sessions {len(std.sessions)} 本）" if a.reuse_norm else None
+    per_day = print_listing(summaries, std.sessions, n_stats_windows, norm_note)
     print(f"- 収集日ごとの投入数: " + ", ".join(f"{d} = {n}" for d, n in sorted(per_day.items())))
     if a.bucket == "training":
         check_day_counts_distinct(per_day)
@@ -578,7 +634,7 @@ def run(argv: Sequence[str], *, send: SendFn = send_urllib, sleep: Callable[[flo
     if doc is not None and not norm_path.is_file():
         norm_path.write_text(json.dumps(doc, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
         print(f"- 書いた: {norm_path}")
-    by_session = [(s.name, build_items(s, std, iat)) for s in loaded]
+    by_session = [(s.name, build_items(s, std)) for s in loaded]
     assert sum(len(i) for _, i in by_session) == n_upload
     res = upload(by_session, a.bucket, api_key, send, sleep, a.workers)
     print(f"- 送信したリクエスト {res.n_requests}、受け付けられた項目 {res.n_items}、重複として弾かれた項目 {res.n_duplicates}"
