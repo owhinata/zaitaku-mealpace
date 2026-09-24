@@ -193,6 +193,15 @@ M0 準備の関門は 9/20 に通過（docs/decisions/0010、`gate-M0`）。
   最後に届いたフレーム（DETECT / FEAT）の送信時刻の遅いほう。送信の遅れは 1.0 秒まで（0011 の読み替え。0021）。`--scorer` で `feat.csv` の再採点と装置の出力の差を出す（scorer の中身は #22）。`analysis/split.py` は
   `fw` が `detector` のセッションを M1 の分割に入れない。テストは合成データで 201 件（`analysis` 172 件、`tools` 29 件）。実機には触っていない。
   plan レビューは 3 回（BLOCKING 2 → 1 → 0、CONCERN 2 → 2 → 0）。
+- #21: M2 の音の式を docs/decisions/0020 に固定し（8 kHz・25 ms フレーム・stride 25 ms。`analysis/features_m2.py`、`FEATURE_SET = "m2-0020"`、実機 1 ホップ IMU 込み 134.3 ms）、
+  `analysis/ei_upload.py` で正規化後の 29 次元の特徴量ベクトルを 1 窓 1 項目で Edge Impulse に投入した（training = 収集日1〜3 の 21 本 14440 項目、swallow 437 /
+  cough 152 / other 13851。testing = 収集日4 の 7 本 4824 項目。生の音声・IMU は上げていない。定数は `analysis/m2_norm.json`、21 本の `valid` な窓 15030）。
+  EI のメタデータの鍵による分割は群を指定できず C-1（validation = 収集日3）は成立しなかったので、人の決定で C-2（鍵 `session`、33%。0019 に追記）。EI が選んだ
+  validation のセッション名は取得できていない（`cough` の 3 本が含まれないことだけ分かる）。学習は Raw data・3 クラス・Auto-weight・cycles 50・lr 0.0005・batch 32 で、
+  候補 B（Dense 32 → Dropout 0.1 → Dense 16）を人が選び（validation int8: accuracy 91.2%、`swallow` F1 0.46、再現率 65.6%。再学習の差 0）、版 1「#21 candidate B 2026-09-24」に
+  固定した。test set（収集日4）の Model testing は最後の 1 回: accuracy 85.74%（float32）/ 85.28%（int8）、`swallow` の再現率 52.2 / 54.4%（**窓単位の参考値。合格線は
+  イベント単位で #27**）。以後モデル・設定は変えない。**Public は未切り替え**（条件 1 は log に記録、条件 2・切り替え・Private に戻せるかは人が Studio で確かめる）。
+  plan レビューは 3 回（BLOCKING 0、CONCERN 2 → 1 → 0）。
 - ロボセンサー技研への問い合わせ未送付（代替センサ、docs/decisions/0002、#5）。
 
 ## 次にやること

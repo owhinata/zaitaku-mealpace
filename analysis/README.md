@@ -136,8 +136,9 @@ Edge Impulse（EI）の ingestion API に送る。生の音声・IMU の窓は�
 式と正規化の定数は 0020。依存は numpy と標準ライブラリ（`urllib`）だけで、EI の SDK は使わない。
 
 ```
-python analysis/ei_upload.py data/raw --bucket training --days 20260921,20260922,20260923 --validation-day 20260923 [--dry-run]
-python analysis/ei_upload.py data/raw --bucket testing --days 20260924 [--dry-run]
+python analysis/ei_upload.py data/raw --bucket training --days 20260921,20260922,20260923 --workers 8 [--dry-run]
+python analysis/ei_upload.py data/raw --bucket training --days 20260921 --reuse-norm --workers 8 [--dry-run]
+python analysis/ei_upload.py data/raw --bucket testing --days 20260924 --workers 8 [--dry-run]
 python analysis/ei_upload.py --probe [--dry-run]
 ```
 
@@ -268,8 +269,8 @@ python analysis/evaluate_detector.py data/raw --scorer path/to/m2_scorer.py   # 
 
 `evaluate.py` と `split.py` の数え方、`features.py` の窓と特徴量、`train_eval.py` の手順、`evaluate_detector.py` の記録の範囲と
 対象の選び方は、合成データのテスト
-（`test_evaluate.py`・`test_split.py`・`test_features.py`・`test_train_eval.py`・`test_evaluate_detector.py`）で固定している。`test_features.py` は
-numpy、`test_train_eval.py` は numpy と scikit-learn を使う。ほかは標準ライブラリの `unittest` だけで動く。
+（`test_evaluate.py`・`test_split.py`・`test_features.py`・`test_train_eval.py`・`test_evaluate_detector.py`・`test_features_m2.py`・`test_ei_upload.py`）で固定している。
+`test_features.py`・`test_features_m2.py`・`test_ei_upload.py` は numpy、`test_train_eval.py` は numpy と scikit-learn を使う。ほかは標準ライブラリの `unittest` だけで動く。
 合成データは一時フォルダに作り、`data/` は使わない。`test_train_eval.py` は 60 秒の合成セッションを 9 つ作って
 学習を繰り返すので、20 秒ほど掛かる。
 
