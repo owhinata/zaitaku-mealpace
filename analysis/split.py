@@ -5,6 +5,9 @@
 
 フォルダ名の形式（docs/data-schema.md）と meta.json の subject を確かめ、合わないものがあれば止まる
 （docs/decisions/0011）。
+meta.json の fw が detector のセッション（検出器で録った M2 のセッション）は M1 の分割（train / eval）に入れず、
+戻り値の detector に列挙する。fw が detector でないのに detect.csv か feat.csv があるセッションは止まる
+（docs/decisions/0021）。fw が無い記録ファームウェアのセッション（docs/decisions/0006）は今までどおり分割に入れる。
 """
 from __future__ import annotations
 import argparse, json, re
@@ -16,8 +19,12 @@ EVAL_MIN_FLOOR = 3   # docs/evaluation.md「評価には 3 セッション以上
 NAME_RE = re.compile(r"^\d{8}-\d{6}_(self|p1)_(water|saliva|talk|cough|neck|quiet|meal)$")
 
 
-def _meta_subject(session: Path) -> str:
-    """meta.json の subject を返す。無い・読めない・self / p1 でないなら止まる。"""
+DETECTOR_FW = "detector"
+DETECTOR_FILES = ("detect.csv", "feat.csv")
+
+
+def _meta(session: Path) -> dict:
+    """meta.json を返す。無い・読めない・オブジェクトでない・subject が self / p1 でないなら止まる。"""
     path = session / "meta.json"
     if not path.is_file():
         raise SystemExit(f"meta.json がありません（中断したセッションは消す）: {session.name}")
@@ -29,7 +36,7 @@ def _meta_subject(session: Path) -> str:
         raise SystemExit(f"meta.json が JSON のオブジェクトではありません: {session.name}")
     if meta.get("subject") not in SUBJECTS:
         raise SystemExit(f"meta.json の subject が self / p1 ではありません: {session.name}")
-    return meta["subject"]
+    return meta
 
 
 def split_sessions(root: Path, eval_min: int = 3, subject: str = "self"):
@@ -37,7 +44,7 @@ def split_sessions(root: Path, eval_min: int = 3, subject: str = "self"):
         raise SystemExit(f"--eval-min は {EVAL_MIN_FLOOR} 以上にしてください: {eval_min}")
     if subject not in SUBJECTS:
         raise SystemExit(f"subject は self / p1 のどちらかです: {subject!r}")
-    sessions = []
+    sessions, detector = [], []
     for p in sorted(root.iterdir()):
         if not p.is_dir():
             continue   # 通常ファイルは無視する
@@ -47,15 +54,26 @@ def split_sessions(root: Path, eval_min: int = 3, subject: str = "self"):
         m = NAME_RE.fullmatch(p.name)
         if m is None:
             raise SystemExit(f"フォルダ名が形式に合いません（消すか直す）: {p.name}")
-        if _meta_subject(p) != m.group(1):
+        meta = _meta(p)
+        if meta["subject"] != m.group(1):
             raise SystemExit(f"フォルダ名と meta.json の subject が違います: {p.name}")
+        if meta.get("fw") == DETECTOR_FW:
+            # 検出器のセッションは M1 の分割に入れない（docs/decisions/0021）
+            if m.group(1) == subject:
+                detector.append(p)
+            continue
+        if any((p / name).is_file() for name in DETECTOR_FILES):
+            # ファイルの有無を見るだけで、中身は開かない
+            raise SystemExit(f"検出器のファイル（detect.csv / feat.csv）があるのに meta.json の fw が {DETECTOR_FW} では"
+                             f"ありません（META が届かなかったセッションは消す）: {p.name}")
         if m.group(1) == subject:
             sessions.append(p)
     if len(sessions) < eval_min + 1:
         raise SystemExit(f"セッションが足りません: {len(sessions)} (評価 {eval_min} + 学習 1 以上が必要)")
     eval_s = sessions[-eval_min:]
     train_s = sessions[:-eval_min]
-    return {"train": [s.name for s in train_s], "eval": [s.name for s in eval_s]}
+    return {"train": [s.name for s in train_s], "eval": [s.name for s in eval_s],
+            "detector": [s.name for s in detector]}
 
 
 if __name__ == "__main__":

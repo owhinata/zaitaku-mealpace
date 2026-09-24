@@ -10,6 +10,10 @@ SUBJECT / COND / POSITION / BAND / DURATION の環境変数を、対応する引
 
 フレーム: [A5 5A][id u8][len u16 LE][t_ms u32 LE][payload][xor u8]
   id 0x01 IMU (float32 x6)  0x02 AUDIO (int16 x N)  0x03 ANALOG (uint16 x N)  0x7F META (JSON)
+  id 0x04 DETECT (window_t_ms u32, prob float32, positive u8, led u8)  → detect.csv（検出器のみ）
+  id 0x05 FEAT (window_t_ms u32, float32 x N。正規化前の特徴量)         → feat.csv（検出器のみ）
+ストリームのファイルは、そのストリームの最初のフレームが届いたときに作る。events.csv と meta.json は常に作る
+（docs/decisions/0021）。
 """
 from __future__ import annotations
 import argparse, atexit, codecs, contextlib, csv, json, os, re, signal, struct, subprocess, sys, threading, time, wave
@@ -23,8 +27,12 @@ import serial
 
 SYNC = b"\xa5\x5a"
 ID_IMU, ID_AUDIO, ID_ANALOG, ID_META = 0x01, 0x02, 0x03, 0x7F
+ID_DETECT, ID_FEAT = 0x04, 0x05
 AUDIO_HZ, IMU_HZ = 16000, 104
-STREAM_NAMES = {ID_IMU: "IMU", ID_AUDIO: "AUDIO", ID_ANALOG: "ANALOG", ID_META: "META"}
+STREAM_NAMES = {ID_IMU: "IMU", ID_AUDIO: "AUDIO", ID_ANALOG: "ANALOG", ID_DETECT: "DETECT", ID_FEAT: "FEAT",
+                ID_META: "META"}
+IMU_PAYLOAD_LEN, DETECT_PAYLOAD_LEN = 24, 10
+FLOAT_FMT = ".9g"   # float32 が往復で一致する桁数（prob は閾値との比較を PC 側で丸めなしに再現するため）
 RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
 
 
@@ -166,15 +174,12 @@ class Session:
         if self.dir.resolve().parent != out.resolve():
             sys.exit(f"セッションフォルダが {out} の直下になりません: {self.dir}")
         self.dir.mkdir(parents=True, exist_ok=False)
-        self.imu = open(self.dir / "imu.csv", "w", newline="", encoding="utf-8")
-        self.imu_w = csv.writer(self.imu); self.imu_w.writerow(["t_ms", "ax", "ay", "az", "gx", "gy", "gz"])
+        # events.csv は常に作る。ストリームのファイルは最初のフレームが届いたときに作る（docs/decisions/0021）。
         self.ev = open(self.dir / "events.csv", "w", newline="", encoding="utf-8")
         self.ev_w = csv.writer(self.ev); self.ev_w.writerow(["t_ms", "label", "note"])
-        self.chunks = open(self.dir / "audio_chunks.csv", "w", newline="", encoding="utf-8")
-        self.chunks_w = csv.writer(self.chunks); self.chunks_w.writerow(["t_ms", "sample_index"])
-        self.wav = wave.open(str(self.dir / "audio.wav"), "wb")
-        self.wav.setnchannels(1); self.wav.setsampwidth(2); self.wav.setframerate(AUDIO_HZ)
-        self.analog = None
+        self.imu = self.chunks = self.wav = self.analog = self.detect = self.feat = None
+        self.n_feat = None            # FEAT の次元数 N。最初の FEAT フレームで決まる
+        self.bad_len = {}             # stream_id → 長さが合わずに書かなかったフレーム数
         self.n_audio = 0
         self.last_t_ms = 0
         self._lock = threading.Lock()   # mark()（入力スレッド）と close()（メイン）を守る
@@ -190,21 +195,67 @@ class Session:
             "notes": "",
         }
 
+    def _open_csv(self, name: str, header: list[str]):
+        f = open(self.dir / name, "w", newline="", encoding="utf-8")
+        w = csv.writer(f); w.writerow(header)
+        return f, w
+
+    def _open_imu(self):
+        self.imu, self.imu_w = self._open_csv("imu.csv", ["t_ms", "ax", "ay", "az", "gx", "gy", "gz"])
+
+    def _open_audio(self):
+        self.chunks, self.chunks_w = self._open_csv("audio_chunks.csv", ["t_ms", "sample_index"])
+        self.wav = wave.open(str(self.dir / "audio.wav"), "wb")
+        self.wav.setnchannels(1); self.wav.setsampwidth(2); self.wav.setframerate(AUDIO_HZ)
+
+    def _open_analog(self, n: int):
+        self.analog, self.analog_w = self._open_csv("analog.csv", ["t_ms"] + [f"ch{i}" for i in range(n)])
+
+    def _open_detect(self):
+        self.detect, self.detect_w = self._open_csv("detect.csv", ["t_ms", "window_t_ms", "positive", "prob", "led"])
+
+    def _open_feat(self, n: int):
+        self.n_feat = n
+        self.feat, self.feat_w = self._open_csv("feat.csv", ["t_ms", "window_t_ms"] + [f"f{i}" for i in range(n)])
+
+    def _count_bad_len(self, sid: int):
+        self.bad_len[sid] = self.bad_len.get(sid, 0) + 1
+
     def on_frame(self, sid: int, t_ms: int, payload: bytes):
-        self.last_t_ms = t_ms
-        if sid == ID_IMU and len(payload) == 24:
+        self.last_t_ms = t_ms     # マーカーの時刻。stream_id を問わず、直前に届いたフレームの送信時刻
+        if sid == ID_IMU:
+            if len(payload) != IMU_PAYLOAD_LEN:
+                self._count_bad_len(sid); return
+            if self.imu is None:
+                self._open_imu()
             self.imu_w.writerow([t_ms] + [f"{v:.4f}" for v in struct.unpack("<6f", payload)])
         elif sid == ID_AUDIO:
+            if self.wav is None:
+                self._open_audio()
             self.chunks_w.writerow([t_ms, self.n_audio])
             self.wav.writeframes(payload)
             self.n_audio += len(payload) // 2
         elif sid == ID_ANALOG:
             if self.analog is None:
-                self.analog = open(self.dir / "analog.csv", "w", newline="", encoding="utf-8")
-                self.analog_w = csv.writer(self.analog)
-                n = len(payload) // 2
-                self.analog_w.writerow(["t_ms"] + [f"ch{i}" for i in range(n)])
+                self._open_analog(len(payload) // 2)
             self.analog_w.writerow([t_ms] + list(struct.unpack(f"<{len(payload)//2}H", payload)))
+        elif sid == ID_DETECT:
+            if len(payload) != DETECT_PAYLOAD_LEN:
+                self._count_bad_len(sid); return
+            window_t_ms, prob, positive, led = struct.unpack("<IfBB", payload)
+            if self.detect is None:
+                self._open_detect()
+            self.detect_w.writerow([t_ms, window_t_ms, positive, f"{prob:{FLOAT_FMT}}", led])
+        elif sid == ID_FEAT:
+            if len(payload) < 8 or (len(payload) - 4) % 4 != 0:
+                self._count_bad_len(sid); return
+            n = (len(payload) - 4) // 4
+            if self.feat is None:
+                self._open_feat(n)
+            elif n != self.n_feat:
+                self._count_bad_len(sid); return
+            values = struct.unpack(f"<I{n}f", payload)
+            self.feat_w.writerow([t_ms, values[0]] + [f"{v:{FLOAT_FMT}}" for v in values[1:]])
         elif sid == ID_META:
             try:
                 self.meta.update(json.loads(payload.decode("utf-8")))
@@ -224,10 +275,13 @@ class Session:
             if self._closed:
                 return
             self._closed = True
-            for f in (self.imu, self.ev, self.chunks, self.analog):
+            for f in (self.imu, self.ev, self.chunks, self.analog, self.detect, self.feat, self.wav):
                 if f: f.close()
-            self.wav.close()
         (self.dir / "meta.json").write_text(json.dumps(self.meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        names = self.meta.get("feature_names")
+        if self.n_feat is not None and isinstance(names, list) and len(names) != self.n_feat:
+            # meta.json は装置の値のまま書く。直さない
+            print(f"警告: meta.json の feature_names は {len(names)} 個ですが、feat.csv の次元数は {self.n_feat} です")
         print(f"saved: {self.dir}")
 
 
@@ -330,6 +384,10 @@ def main():
         for sid in sorted(stats["ok"]):
             print(f"  {STREAM_NAMES.get(sid, f'0x{sid:02X}')}: {stats['ok'][sid]}")
         print(f"XOR 不一致数: {stats['xor_err']}")
+        if sess.bad_len:
+            print("長さが合わないフレーム（書いていない）:")
+            for sid in sorted(sess.bad_len):
+                print(f"  {STREAM_NAMES.get(sid, f'0x{sid:02X}')}: {sess.bad_len[sid]}")
 
 
 if __name__ == "__main__":

@@ -3,7 +3,17 @@
 #include <stdint.h>
 #include <string.h>
 
-enum FrameId : uint8_t { FRAME_IMU = 0x01, FRAME_AUDIO = 0x02, FRAME_ANALOG = 0x03, FRAME_META = 0x7F };
+// ペイロードの並び（すべて LE。ヘッダの t_ms はどのストリームでも送るときの millis()）:
+//   FRAME_IMU    float32 x6（ax ay az gx gy gz）
+//   FRAME_AUDIO  int16 x N
+//   FRAME_ANALOG uint16 x N
+//   FRAME_DETECT 検出器のみ。10 B: window_t_ms u32, prob float32（swallow の確率）, positive u8（0/1）, led u8（0/1/2）
+//   FRAME_FEAT   検出器のみ。4 + 4N B: window_t_ms u32, f0..f(N-1) float32（正規化前の特徴量。順序は META の feature_names）
+//   FRAME_META   UTF-8 JSON
+// 検出器ファームウェアは FRAME_AUDIO を送らない（docs/decisions/0005）。形式の決定は docs/decisions/0021。
+enum FrameId : uint8_t {
+  FRAME_IMU = 0x01, FRAME_AUDIO = 0x02, FRAME_ANALOG = 0x03, FRAME_DETECT = 0x04, FRAME_FEAT = 0x05, FRAME_META = 0x7F
+};
 
 template <typename Out>
 static void frame_send(Out& out, uint8_t id, uint32_t t_ms, const uint8_t* payload, uint16_t len) {

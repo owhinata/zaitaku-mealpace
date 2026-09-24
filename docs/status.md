@@ -185,6 +185,14 @@ M0 準備の関門は 9/20 に通過（docs/decisions/0010、`gate-M0`）。
   学習は 3 クラス（`swallow` / `cough` / `other`）、装置の出力は 2 値で `cough` は陰性に畳む。EI の training は収集日1〜3、test は収集日4、validation はメタデータで
   セッション単位。公開範囲は Public（#21 で投入後に `self` のみ・線引き（所有者の表示名を含む）の確認を log に書いてから切り替え）。C++ ライブラリは書き出しのまま
   コミット（`model_metadata.h` の ID・所有者名は残す。API キーは含まれない）。`docs/evaluation.md`・0012・0014 は変えていない。
+- #23: 検出器の DETECT（`0x04`: 窓の開始 `window_t_ms`、`swallow` の確率 float32、`positive`、`led`）と FEAT（`0x05`: `window_t_ms` ＋ 正規化前の特徴量 float32 × N。
+  N はフレームの長さ、名前は `meta.json` の `feature_names`）の形式を `docs/data-schema.md` と docs/decisions/0021 に固定した。`frame.h` に enum を足しただけで
+  logger は変えていない。`tools/record.py` は `detect.csv`・`feat.csv` を書き、ストリームのファイルは最初のフレームで作る（検出器のセッションに空の `imu.csv` を
+  作らない）。マーカーの `t_ms` は送信時刻のまま。`tools/check_session.py` は `window_t_ms` の飛びで取りこぼしを出す（陽性は数えない）。
+  `analysis/evaluate_detector.py`（新規）は `detect.csv` の `positive` と `s` から 0011 の数え方で数字を出し、記録の範囲は最初の窓の開始〜最後の窓の終端か
+  最後に届いたフレーム（DETECT / FEAT）の送信時刻の遅いほう。送信の遅れは 1.0 秒まで（0011 の読み替え。0021）。`--scorer` で `feat.csv` の再採点と装置の出力の差を出す（scorer の中身は #22）。`analysis/split.py` は
+  `fw` が `detector` のセッションを M1 の分割に入れない。テストは合成データで 201 件（`analysis` 172 件、`tools` 29 件）。実機には触っていない。
+  plan レビューは 3 回（BLOCKING 2 → 1 → 0、CONCERN 2 → 2 → 0）。
 - ロボセンサー技研への問い合わせ未送付（代替センサ、docs/decisions/0002、#5）。
 
 ## 次にやること

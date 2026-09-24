@@ -142,6 +142,67 @@ class SplitTest(unittest.TestCase):
         params = list(inspect.signature(split_sessions).parameters)
         self.assertEqual(params, ["root", "eval_min", "subject"])
 
+    # --- 検出器のセッション（docs/decisions/0021） ---
+
+    def test_sp12_detector_sessions_are_excluded(self):
+        ns = names("self", 4)
+        self.make(ns)
+        det = [f"20261005-12{i:02d}00_self_meal" for i in range(3)]
+        self.make(det, meta={"subject": "self", "fw": "detector"})
+        r = split_sessions(self.root, eval_min=3)
+        self.assertEqual(r["train"], ns[:1])
+        self.assertEqual(r["eval"], ns[1:])
+        self.assertEqual(r["detector"], det)
+        self.assertFalse(set(det) & set(r["train"] + r["eval"]))
+        # eval_min の検査は除外後の数で行う（記録ファームウェアが 3 本 + 検出器 3 本 → 学習側が空）
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for n in ns[:3]:
+                make_session(root, n)
+            for n in det:
+                make_session(root, n, meta={"subject": "self", "fw": "detector"})
+            with self.assertRaises(SystemExit):
+                split_sessions(root, eval_min=3)
+
+    def test_sp12b_detector_files_without_detector_fw_stop(self):
+        ns = names("self", 4)
+        for meta in ({"subject": "self"}, {"subject": "self", "fw": "logger"}):
+            for fname in ("detect.csv", "feat.csv"):
+                with self.subTest(meta=meta, file=fname), tempfile.TemporaryDirectory() as d:
+                    root = Path(d)
+                    self_names = ns[:3] + ["20261005-120000_self_meal"]
+                    for n in self_names[:3]:
+                        make_session(root, n)
+                    make_session(root, self_names[3], meta=meta)
+                    (root / self_names[3] / fname).write_text("t_ms,window_t_ms\n", encoding="utf-8")
+                    with self.assertRaises(SystemExit):
+                        split_sessions(root, eval_min=3)
+
+    def test_sp12c_detector_sessions_do_not_change_sp10(self):
+        conds = ["quiet", "water", "talk", "saliva", "neck", "water", "cough"]
+        days = ["20260922", "20260924", "20260926"]
+        ns = [f"{day}-19{i:02d}00_self_{c}" for day in days for i, c in enumerate(conds)]
+        self.make(ns)
+        det = [f"20261005-12{i:02d}00_self_meal" for i in range(3)]
+        self.make(det, meta={"subject": "self", "fw": "detector"})
+        r = split_sessions(self.root, eval_min=14)
+        self.assertEqual(r["eval"], ns[7:])
+        self.assertEqual(r["train"], ns[:7])
+        self.assertEqual(r["detector"], det)
+
+    def test_sp12d_logger_session_without_fw_is_still_split(self):
+        ns = names("self", 4)
+        self.make(ns[:2])
+        make_session(self.root, ns[2], meta={"subject": "self"})                 # fw が無い（META が届かなかった）
+        make_session(self.root, ns[3], meta={"subject": "self", "fw": "logger"})
+        r = split_sessions(self.root, eval_min=3)
+        self.assertEqual(r["train"], ns[:1])
+        self.assertEqual(r["eval"], ns[1:])
+        self.assertEqual(r["detector"], [])
+        # p1 の検出器のセッションは self の detector に列挙しない
+        make_session(self.root, "20261005-120000_p1_meal", meta={"subject": "p1", "fw": "detector"})
+        self.assertEqual(split_sessions(self.root, eval_min=3)["detector"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
