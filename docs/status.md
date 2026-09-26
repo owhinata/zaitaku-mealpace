@@ -1,6 +1,6 @@
 # 現在地
 
-更新: 2026-09-24
+更新: 2026-09-26
 
 ## 段階
 
@@ -211,6 +211,22 @@ M0 準備の関門は 9/20 に通過（docs/decisions/0010、`gate-M0`）。
   **差あり**（閾値での陽性・陰性の不一致 0、argmax の不一致 3。API の 5 桁の丸めを合わせると完全一致 4648 / 差あり 176 窓、最大 43/256。入力の量子化は原因でなく、推論エンジンの
   丸めの違いと推定。許容幅は決めず、装置との一致は #24 で見る）。`firmware/bench/src/`（#17 のダミー）は人が削除。plan レビューは 3 回（BLOCKING 1 → 1 → 0、CONCERN 3 → 2 → 1、
   残りは E1 の突き合わせで解消）。
+- #24: 検出器ファームウェア `firmware/detector/` を作った（`detector.ino` ＋ `sensors` / `audio_capture` / `imu_capture` / `pipeline` / `classify` / `detector_meta` / `detector_frames`。
+  Arduino / mbed の API は `detector.ino` と `sensors.cpp` だけ、Edge Impulse SDK は `classify.cpp` だけ。bench・logger のソースはシンボリックリンクで参照。コミット `04a84a9`（段階 1）・
+  `f72fbf6`（段階 2〜3）、docs/log/2026-09-26.md）。生の音声は 16 kHz の 2 面（最長 0.5 秒）と 8 kHz のリングにしか無く、送信関数の呼び出しは META・DETECT・FEAT の 3 箇所だけ
+  （grep は log）。`CMakeLists.txt` は `SKETCH_NAME=detector` で基底フラグを自動付与（`build-detector`。logger は `build` のまま）。PC のテスト 230 件（`bash firmware/detector/host/test_detector.sh`）。
+  実機では最初、4 スライス目の全窓計算 1.2 秒で追いつかず窓が出なかったので、`firmware/bench/audio_features.cpp` の再利用版をスライスごとの分割計算に変えた（**plan の「bench を
+  変えない」から外れる**。`check_port.py` はビット一致）。次に IMU の poll スレッド（2 ms・I2C 100 kHz）が 1 ホップを 293 ms にしていたので、切り分け P1〜P6 の後、人の決定で
+  本番の既定を I2C 400 kHz・poll 4 ms・`-Os` にした（`-O2` は利得 2% で採らない）。**1 ホップ 208 ms**（音 188・IMU 12・推論 6・送信 1。壁時計 最大 214 ms）で 250 ms に収まり、
+  docs/decisions/0001 の再検討には当たらない。RAM は静的 161872 B ＋ ヒープ最大 5644 B ＋ スタック（主 32 KB ＋ IMU 2 KB）≒ 200 KB / 264 KB、フラッシュ 159190 B。
+  IMU の基準の周期は「直近 512 行の全差分の平均を公称の 1/1.25〜1.25 倍に収める」に変えた（plan の「飛びでない差分の移動平均」は起動直後に自己固定して約 11 秒窓が出なかった）。
+  60 秒の記録 `20260926-114039_self_water`（装着、水 5 回）: DETECT 206 / FEAT 206 / META 1、XOR 0、飛び 0、逆行 0、DETECT と FEAT の不一致 0。PC の再採点（`--scorer`）との差は
+  装置 1 / PC 0 = 0、装置 0 / PC 1 = 0、`max |prob − prob_pc|` = 0（ビット一致）。**#24 の完了の条件 4 つを満たした。** 参考値（1 セッション。M2 の数字ではない）: 検出 4 / 5、
+  誤検出 0 回。記録は `data/raw/` に残す（M1 の分割にも #27 の既定にも入らない）。マーカーの `t_ms` は押した時刻より 0〜0.25 秒早い側（装着 120 秒、10 回、d1 0.1〜228 ms）で
+  `docs/recording-protocol.md` の前提と合う。**人に諮ること: 送信の遅れの上限 1000 ms（0021）を詰めるか。** 実測は `t_ms − window_t_ms` 1201〜1205 ms（窓の終端から 201〜205 ms）。
+  詰めるなら 0021 に追記して `analysis/evaluate_detector.py` を直す（別の作業、Codex のレビュー）。確かめていないこと: IMU スレッドのスタック高水位（走査が 2044 を返す）、
+  DRDY 割り込み（未実装。要らなかった）、実信号での特徴量の正しさ（bench の合成信号の答え合わせに依る）、窓の数 206 が見込み 236〜238 より少ない理由。
+  **実機には本番の detector が入ったまま。logger は書き戻していない。**
 - ロボセンサー技研への問い合わせ未送付（代替センサ、docs/decisions/0002、#5）。
 
 ## 次にやること
