@@ -16,7 +16,7 @@ plan の素案づくりと Codex の plan レビューの実施も subagent が�
 
 **1つの Issue の流れ**
 
-1. メインが Issue と範囲を決め、plan 担当の subagent（opus、または既定の上位の model）を起動する。
+1. メインが Issue と範囲を決め、plan 担当の subagent（model は `opus` か `sonnet`。下の「subagent の model」）を起動する。
 2. plan 担当の subagent: 下調べ → plan の素案を scratchpad に書く（`plan-<N>.md`）→ 制約領域に触れる plan なら
    `codex-review` skill の手順で Codex の plan レビューを回す（`PLAN-SHA` は scratchpad の plan ファイルのハッシュ）→
    指摘をリポジトリの実物で裏取りする → Codex の出力の全文と裏取りを Issue のコメントに貼る → 報告して止まる。
@@ -27,6 +27,14 @@ plan の素案づくりと Codex の plan レビューの実施も subagent が�
    `bash .claude/hooks/plan-approve.sh <plan ファイル> <Codex の出力>` を実行し、`ExitPlanMode`（人が plan の全文を見て
    承認する）。ハッシュは内容で決まるので、コピーが一字一句同じなら、scratchpad の plan に対する `PLAN-SHA` がそのまま通る。
 5. 実装は別の subagent（または同じ subagent の続き）。確認とコミットはメイン。
+
+**subagent の model**
+
+- subagent は `Agent` の `model` に **`opus` か `sonnet` を必ず指定して**起動する。指定しないと親（メイン）の model を
+  継承し、メインが Fable のときは subagent も Fable で動いて利用上限を使い切る（2026-09-26 に #25・#27 の subagent が
+  429 で止まった）。plan の下書き・レビューの裏取り・実装は opus、下調べや機械的な作業は sonnet。Fable はメインの管理と
+  判断にだけ使う。
+- `fork` は親の model で動くので使わない。
 
 **メインがやること**（メインに残す理由も添える）
 
