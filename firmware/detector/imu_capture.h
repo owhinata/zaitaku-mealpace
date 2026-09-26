@@ -7,9 +7,13 @@
 // 排他: リングは IMU スレッドと主スレッドの両方が触るので、ImuWindowSource の lock / unlock（sensors.cpp が mbed の
 // critical section を渡す。無ければ呼ばない）で囲む。push は呼ぶ側が lock を持って呼ぶ。
 //
-// 基準の周期（docs/decisions/0012 の valid 規則の装置での近似。plan 第 6 節 (b)）: 直近 IC_BASELINE_ROWS 行の
-// 「飛びでない差分」（1.5 × 現在の基準 未満の差分）の移動平均。起動直後は公称 104 Hz の周期で、行が積まれるにつれて実測に寄る。
+// 基準の周期（docs/decisions/0012 の valid 規則の装置での近似。plan 第 6 節 (b)）: 直近 IC_BASELINE_ROWS 行の差分の移動平均
+// （= 経過時間 ÷ 行数）を公称の 1/1.25〜1.25 倍に収めたもの。起動直後は公称 104 Hz の周期で、行が積まれるにつれて実測に寄る。
 // analysis/features.py の _imu_period_ms がセッション全体で出す周期の、装置での近似。
+// plan は「飛びでない差分（1.5 × 現在の基準 未満）だけの移動平均」だったが、装置の t_ms は IMU スレッドの poll（4 ms）で量子化されて
+// 差分が 4〜16 ms に散るため、大きい側だけを除くと平均が下に偏り、基準が下がる → 閾値が下がってさらに除く、の自己固定に入りうる
+// （#24 の 4 回目の実機で起動後 約 11 秒すべての窓が無効だった原因の見立て）。飛びを含めた平均は量子化に偏らず、飛び G ms の影響は
+// G ÷ 511 ms に留まる（飛びそのものは (ii)〜(iv) で窓ごとに弾く）。
 //
 // imu_window_valid（0012 の規則、analysis/features.py の valid と同じ形）:
 //   (0) 行が 2 未満なら無効。
@@ -26,6 +30,7 @@
 static const uint32_t IC_RING_ROWS = 192;                // 104 Hz で約 1.85 秒
 static const uint32_t IC_BASELINE_ROWS = 512;            // 基準の周期の移動平均の長さ
 static const float IC_NOMINAL_PERIOD_MS = 1000.0f / 104.0f;
+static const float IC_BASELINE_CLAMP = 1.25f;                // 基準の周期を公称の 1/1.25〜1.25 倍に収める
 static const float IC_GAP_RATIO = 1.5f;                  // analysis/features.py の GAP_RATIO
 static const float IC_MIN_ROW_RATIO = 0.9f;              // analysis/features.py の MIN_IMU_ROW_RATIO
 static const uint32_t IC_WINDOW_MS = 1000;
@@ -41,7 +46,7 @@ struct ImuCapture {
   uint32_t head;            // 次に書く位置
   uint32_t count;           // 入っている行数（IC_RING_ROWS で飽和）
   uint32_t total;           // 積んだ行の総数
-  uint16_t diffs[IC_BASELINE_ROWS];   // 飛びでない差分 [ms]
+  uint16_t diffs[IC_BASELINE_ROWS];   // 直近の差分 [ms]（飛びも含む。0xFFFF で飽和）
   uint32_t diff_head;
   uint32_t diff_count;
   uint32_t diff_sum;
@@ -69,7 +74,7 @@ struct ImuWindow {
 void imu_capture_init(ImuCapture* cap);
 // 1 行を積む。呼ぶ側が lock を持つ。t_ms は millis()（音声と同じ時計）。
 void imu_capture_push(ImuCapture* cap, uint32_t t_ms, const float acc[3], const float gyro[3]);
-// 基準の周期 [ms]（直近 IC_BASELINE_ROWS 行の飛びでない差分の平均。差分が無ければ公称）。lock を取って読む。
+// 基準の周期 [ms]（直近 IC_BASELINE_ROWS 行の差分の平均を公称の 1/1.25〜1.25 倍に収めたもの。差分が無ければ公称）。lock を取って読む。
 float imu_period_baseline_ms(const ImuWindowSource* src);
 // 窓 [w0, w1) の行を out に写す（時刻順。IMU_MAX_ROWS を超える分は捨てる）。lock を取って写す。
 void imu_window_copy(const ImuWindowSource* src, uint32_t w0_ms, uint32_t w1_ms, ImuWindow* out);

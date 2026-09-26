@@ -6,6 +6,7 @@
 #include <Arduino_LSM6DSOX.h>
 #include <PDM.h>
 #include <chrono>
+#include <math.h>
 #include "platform/mbed_critical.h"
 #include "rtos/Thread.h"
 #include "rtos/ThisThread.h"
@@ -13,18 +14,33 @@
 #ifndef DETECTOR_PROFILE
 #define DETECTOR_PROFILE 0
 #endif
+// DETECTOR_I2C_HZ と DETECTOR_IMU_POLL_MS の既定は sensors.h
+#if DETECTOR_PROFILE
+#ifndef DETECTOR_PROF_NO_IMU
+#define DETECTOR_PROF_NO_IMU 0
+#endif
+#ifndef DETECTOR_PROF_NO_PDM
+#define DETECTOR_PROF_NO_PDM 0
+#endif
+#else
+#if defined(DETECTOR_PROF_NO_IMU) || defined(DETECTOR_PROF_NO_PDM)
+#error "DETECTOR_PROF_NO_IMU / DETECTOR_PROF_NO_PDM は DETECTOR_PROFILE=1 の計測ビルドだけで使う"
+#endif
+#define DETECTOR_PROF_NO_IMU 0
+#define DETECTOR_PROF_NO_PDM 0
+#endif
 
 static const int AUDIO_HZ = 16000;
 static const int AUDIO_CHUNK = 256;               // logger と同じ受け皿（512 B）。PDM.setBufferSize(512)
 static int16_t pdm_buf[AUDIO_CHUNK];              // コールバックの中で読み切り、audio_capture の面に写してすぐ捨てる
 static volatile uint32_t s_pdm_cb_max_us = 0;
 
-static const uint32_t IMU_POLL_MS = 2;
 static const uint32_t IMU_STACK_BYTES = 2048;
 static unsigned char imu_stack[IMU_STACK_BYTES] __attribute__((aligned(8)));
 static rtos::Thread imu_thread(osPriorityAboveNormal, IMU_STACK_BYTES, imu_stack, "imu");
 static ImuCapture s_imu;
 static ImuWindowSource s_imu_src;
+static volatile uint32_t s_imu_polls = 0;
 
 #if DETECTOR_PROFILE
 static const uint32_t STACK_PATTERN = 0x5A5A5A5Au;
@@ -46,6 +62,24 @@ static void on_pdm() {
 #endif
 }
 
+#if DETECTOR_PROF_NO_PDM
+// 計測用の代替入力: 4 ms ごとのタイマ割り込みで固定の合成チャンク（64 サンプル = 128 B）を積む。マイクは使わない。
+#include "drivers/Ticker.h"
+static mbed::Ticker synth_ticker;
+static int16_t synth_chunk[64];
+static void on_synth() {
+#if DETECTOR_PROFILE
+  uint32_t t_in = micros();
+#endif
+  uint32_t t = millis();
+  audio_capture_push_chunk(synth_chunk, sizeof(synth_chunk), t);
+#if DETECTOR_PROFILE
+  uint32_t dt = micros() - t_in;
+  if (dt > s_pdm_cb_max_us) s_pdm_cb_max_us = dt;
+#endif
+}
+#endif
+
 // --- IMU スレッド ---
 static void imu_lock() { core_util_critical_section_enter(); }
 static void imu_unlock() { core_util_critical_section_exit(); }
@@ -53,6 +87,7 @@ static void imu_unlock() { core_util_critical_section_exit(); }
 static void imu_thread_main() {
   float acc[3], gyro[3];
   while (true) {
+    s_imu_polls++;
     if (IMU.accelerationAvailable() && IMU.gyroscopeAvailable()) {
       IMU.readAcceleration(acc[0], acc[1], acc[2]);   // g
       IMU.readGyroscope(gyro[0], gyro[1], gyro[2]);   // deg/s
@@ -61,7 +96,7 @@ static void imu_thread_main() {
       imu_capture_push(&s_imu, t, acc, gyro);
       imu_unlock();
     }
-    rtos::ThisThread::sleep_for(std::chrono::milliseconds(IMU_POLL_MS));
+    rtos::ThisThread::sleep_for(std::chrono::milliseconds(DETECTOR_IMU_POLL_MS));
   }
 }
 
@@ -75,10 +110,20 @@ bool sensors_begin() {
   for (uint32_t i = 0; i + 4 <= IMU_STACK_BYTES; i += 4) *(uint32_t*)(imu_stack + i) = STACK_PATTERN;
 #endif
   if (!IMU.begin()) return false;                 // LSM6DSOX: 104 Hz, ±4 g, ±2000 dps（ライブラリ既定、bypass モード）
+#if DETECTOR_I2C_HZ > 0
+  Wire.setClock(DETECTOR_I2C_HZ);                 // LSM6DSOX は 400 kHz 対応（plan #24 第 16 節 P の 1 段目）
+#endif
+#if !DETECTOR_PROF_NO_IMU
   if (imu_thread.start(imu_thread_main) != osOK) return false;
+#endif
+#if DETECTOR_PROF_NO_PDM
+  for (int i = 0; i < 64; i++) synth_chunk[i] = (int16_t)(8000.0 * sin(2.0 * M_PI * (double)i / 16.0));   // 1 kHz の正弦波
+  synth_ticker.attach(&on_synth, std::chrono::microseconds(4000));
+#else
   PDM.onReceive(on_pdm);
   PDM.setBufferSize(AUDIO_CHUNK * 2);
   if (!PDM.begin(1, AUDIO_HZ)) return false;
+#endif
   return true;
 }
 
@@ -101,15 +146,25 @@ void sensors_stats(SensorStats* out) {
   out->pdm_odd_chunks = a.pdm_odd_chunks;
   out->pdm_gaps = a.pdm_gaps;
   out->pdm_chunks = a.chunks;
+  out->pdm_bytes_last = a.bytes_last;
   out->pdm_cb_max_us = s_pdm_cb_max_us;
+  out->slices_taken = a.slices_taken;
+  out->slices_ready_max = a.ready_max;
   imu_lock();
   out->imu_rows_total = imu_capture_total(&s_imu);
   imu_unlock();
+  out->imu_polls = s_imu_polls;
   out->imu_stack_high_water = 0;
 #if DETECTOR_PROFILE
-  // 下（低いアドレス）から走査して、パターンが壊れた最初の位置から上端までを高水位とする（bench.ino と同じ）
-  uint32_t i = 0;
+  // 下（低いアドレス）から走査して、パターンが壊れた最初の位置から上端までを高水位とする（bench.ino と同じ）。
+  // 先頭の 1 語は RTX がスレッド生成時に Stack Magic Word（rtx_os.h の osRtxStackMagicWord）を書くので飛ばす
+  // （飛ばさないと常に IMU_STACK_BYTES と読める。#24 の 4 回目の実機で stack_imu=2048 だった原因）
+  uint32_t i = 4;
   while (i + 4 <= IMU_STACK_BYTES && *(uint32_t*)(imu_stack + i) == STACK_PATTERN) i += 4;
   out->imu_stack_high_water = IMU_STACK_BYTES - i;
 #endif
+  out->imu_thread = DETECTOR_PROF_NO_IMU ? 0 : 1;
+  out->pdm_real = DETECTOR_PROF_NO_PDM ? 0 : 1;
+  out->i2c_hz = (uint32_t)DETECTOR_I2C_HZ;
+  out->imu_poll_ms = (uint32_t)DETECTOR_IMU_POLL_MS;
 }

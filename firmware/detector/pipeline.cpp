@@ -46,6 +46,10 @@ bool pipeline_prepare(const int16_t* slice16k, uint32_t t0_ms, uint32_t seq, con
   s_stats.hops++;
   r->reason = HOP_OK;
   r->led = 0;
+  r->imu_rows = 0;
+#if DETECTOR_PROFILE
+  r->us_imu_copy = r->us_audio = r->us_imu_feat = r->us_nn = 0;
+#endif
   bool reset = false;
   if (s_have_seq && seq != s_last_seq + 1) {
     // 連番の飛び（捨てたチャンクか PDM の欠落の後）。連続でない音声で窓を作らない
@@ -69,7 +73,8 @@ bool pipeline_prepare(const int16_t* slice16k, uint32_t t0_ms, uint32_t seq, con
 #endif
   if (!filled) {
     r->reason = reset ? HOP_RESET : HOP_NOT_FILLED;
-    s_stats.not_filled++;
+    if (!reset) s_stats.not_filled++;
+    s_stats.last_reason = r->reason;
     return false;
   }
   uint32_t w0 = s_slice_t0[0], w1 = w0 + PIPELINE_WINDOW_MS;
@@ -82,9 +87,11 @@ bool pipeline_prepare(const int16_t* slice16k, uint32_t t0_ms, uint32_t seq, con
   r->us_imu_copy = now_us() - tc;
 #endif
   r->imu_rows = s_rows.n;
+  s_stats.imu_rows_last = s_rows.n;
   if (!imu_window_valid(&s_rows, period)) {
     r->reason = HOP_IMU_SHORT;
     s_stats.imu_short++;
+    s_stats.last_reason = r->reason;
     return false;
   }
 #if DETECTOR_PROFILE
@@ -113,12 +120,14 @@ bool pipeline_hop(const int16_t* slice16k, uint32_t t0_ms, uint32_t seq, const I
   if (!ok) {
     r->reason = HOP_CLASSIFY_ERROR;
     s_stats.classify_errors++;
+    s_stats.last_reason = r->reason;
     return false;
   }
   r->prob = probs[s_swallow_ix];                          // float32
   r->positive = (r->prob >= M2_THRESHOLD) ? 1 : 0;        // float32 同士（m2_threshold.h、docs/decisions/0021）
   r->led = 0;                                             // #25 まで消灯
   s_stats.windows++;
+  s_stats.last_reason = HOP_OK;
   return true;
 }
 

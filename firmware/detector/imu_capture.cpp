@@ -8,7 +8,11 @@ void imu_capture_init(ImuCapture* cap) {
 
 static float baseline_ms(const ImuCapture* cap) {
   if (cap->diff_count == 0) return IC_NOMINAL_PERIOD_MS;
-  return (float)cap->diff_sum / (float)cap->diff_count;
+  float p = (float)cap->diff_sum / (float)cap->diff_count;
+  const float lo = IC_NOMINAL_PERIOD_MS / IC_BASELINE_CLAMP, hi = IC_NOMINAL_PERIOD_MS * IC_BASELINE_CLAMP;
+  if (p < lo) p = lo;
+  if (p > hi) p = hi;
+  return p;
 }
 
 void imu_capture_push(ImuCapture* cap, uint32_t t_ms, const float acc[3], const float gyro[3]) {
@@ -21,17 +25,16 @@ void imu_capture_push(ImuCapture* cap, uint32_t t_ms, const float acc[3], const 
 
   if (cap->have_last) {
     uint32_t d = t_ms - cap->last_t_ms;
-    // 飛びでない差分（1.5 × 現在の基準 未満）だけを移動平均に入れる
-    if ((float)d < IC_GAP_RATIO * baseline_ms(cap) && d <= 0xFFFFu) {
-      if (cap->diff_count == IC_BASELINE_ROWS) {
-        cap->diff_sum -= cap->diffs[cap->diff_head];
-      } else {
-        cap->diff_count++;
-      }
-      cap->diffs[cap->diff_head] = (uint16_t)d;
-      cap->diff_sum += d;
-      cap->diff_head = (cap->diff_head + 1) % IC_BASELINE_ROWS;
+    if (d > 0xFFFFu) d = 0xFFFFu;
+    // 直近 IC_BASELINE_ROWS 個の差分の移動平均（飛びも含める。imu_capture.h のコメント）
+    if (cap->diff_count == IC_BASELINE_ROWS) {
+      cap->diff_sum -= cap->diffs[cap->diff_head];
+    } else {
+      cap->diff_count++;
     }
+    cap->diffs[cap->diff_head] = (uint16_t)d;
+    cap->diff_sum += d;
+    cap->diff_head = (cap->diff_head + 1) % IC_BASELINE_ROWS;
   }
   cap->have_last = true;
   cap->last_t_ms = t_ms;

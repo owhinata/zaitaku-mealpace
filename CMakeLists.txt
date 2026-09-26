@@ -33,6 +33,11 @@ project(zaitaku_mealpace NONE)
 #   cmake --build build-detector --target build && cmake --build build-detector --target upload
 #   計測: -DBUILD_FLAGS="-DDETECTOR_PROFILE=1"、FEAT を送らない: -DBUILD_FLAGS="-DDETECTOR_SEND_FEAT=0"
 #   logger に戻す: build（SKETCH_NAME=logger）で build → upload
+#   1 ホップが 250 ms を超えたときの落とし方（plan #24 第 16 節 P。docs/log 2026-09-26 の切り分け）: I2C 400 kHz と IMU の poll 4 ms は
+#   既定（firmware/detector/sensors.h の DETECTOR_I2C_HZ / DETECTOR_IMU_POLL_MS。本番 1 ホップ 約 208 ms）。それでも超えるときは
+#   -DBUILD_FLAGS="-O2"（利得 約 2%。人が採らないと決めた）→ DRDY 割り込み（未実装）。切り分け用の -DDETECTOR_PROF_NO_IMU=1 /
+#   -DDETECTOR_PROF_NO_PDM=1 は DETECTOR_PROFILE=1 のときだけ通る。
+#   detector のビルドは同時に走らせない（arduino-cli がスケッチのパスでキャッシュを共有し、並列だと壊れる）。
 
 set(FQBN "arduino:mbed_nano:nanorp2040connect" CACHE STRING "Arduino FQBN")
 set(PORT "/dev/ttyACM0" CACHE STRING "Serial port")

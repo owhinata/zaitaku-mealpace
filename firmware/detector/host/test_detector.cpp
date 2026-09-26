@@ -19,6 +19,9 @@
 #include "m2_norm.h"
 #include "m2_threshold.h"
 
+// 検出器の格子（-DAF_PROFILE=1、AF_M2_FRAME_HOP 既定 200）: 1 スライスで計算するのは末尾 10 フレーム（#24 の 3 回目の実機の切り分け）
+static_assert(AF_N_FRAMES == 40 && AF_HOP_FRAMES == 10 && AF_FRAME_HOP == 200, "検出器の格子は 40 フレーム / ホップ 10 フレーム");
+
 static int g_fail = 0;
 static int g_pass = 0;
 #define CHECK(cond) do { if (cond) { g_pass++; } else { g_fail++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
@@ -280,25 +283,54 @@ static void test_imu_window_valid_rules() {
 }
 
 static void test_imu_baseline_and_python_agreement() {
-  // 基準の移動平均が飛びの差分を含めないこと
+  // 基準の移動平均: 直近の差分の平均（飛びも含める）を公称の 1/1.25〜1.25 倍に収める
   imu_capture_init(&g_cap);
   CHECK(near(imu_period_baseline_ms(&g_src), 1000.0 / 104.0, 1e-4));
   push_row(0); push_row(10); push_row(19); push_row(29);   // 差分 10, 9, 10
   CHECK(near(imu_period_baseline_ms(&g_src), 29.0 / 3.0, 1e-5));
-  push_row(60);                                           // 31 ms（≥ 1.5 × 9.67）は入れない
-  CHECK(near(imu_period_baseline_ms(&g_src), 29.0 / 3.0, 1e-5));
-  push_row(70);
-  CHECK(near(imu_period_baseline_ms(&g_src), 39.0 / 4.0, 1e-5));
+  push_row(60);                                           // 31 ms の飛びも平均に入る（60 ÷ 4 = 15 → 上限 12.02 に収まる）
+  CHECK(near(imu_period_baseline_ms(&g_src), 1000.0 / 104.0 * 1.25, 1e-4));
+  for (uint32_t t = 70; t <= 60 + 10 * 100; t += 10) push_row(t);   // 100 行進めば 31 の影響は 0.2 ms 程度
+  CHECK(near(imu_period_baseline_ms(&g_src), (double)(60 + 10 * 100) / (double)(4 + 100), 1e-4));
+  // 4 ms の poll で量子化した差分（8 と 12 が混ざる。平均 9.6。実機 P4 の imu_rows 105〜106 と同じ状態）でも基準は 9.6 に留まり、窓は有効。
+  // 注: 16 ms の差分（poll の遅れが 2 回分重なったとき）は 1.5 × 9.6 = 14.4 以上なので (ii) で飛びになる。poll 4 ms では
+  // 差分の最大は 9.6 + 約 4.5 ≒ 14.1 で閾値の内側だが余裕は小さい（0012 の規則は変えない。実機の imu_short で見る）
+  {
+    imu_capture_init(&g_cap);
+    const uint32_t pat[5] = { 8, 12, 8, 12, 8 };   // 和 48 = 5 × 9.6
+    uint32_t t = 0;
+    for (uint32_t i = 0; i < 400; i++) { push_row(t); t += pat[i % 5]; }
+    CHECK(near(imu_period_baseline_ms(&g_src), 9.6, 0.05));
+    ImuWindow w;
+    imu_window_copy(&g_src, t - 1500, t - 500, &w);
+    CHECK(w.n >= 103 && w.n <= 106);
+    CHECK(imu_window_valid(&w, imu_period_baseline_ms(&g_src)));
+  }
+  // 自己固定の回帰: 起動直後に小さい差分（8, 8, 4）が続いても、その後の 12 ms の差分が平均に入り、基準が 9.6 付近に戻る
+  {
+    imu_capture_init(&g_cap);
+    uint32_t t = 0;
+    const uint32_t early[3] = { 8, 8, 4 };
+    for (uint32_t i = 0; i < 30; i++) { push_row(t); t += early[i % 3]; }
+    CHECK(imu_period_baseline_ms(&g_src) < 8.0f);
+    const uint32_t pat[5] = { 12, 8, 12, 8, 8 };   // 平均 9.6
+    for (uint32_t i = 0; i < 300; i++) { push_row(t); t += pat[i % 5]; }
+    CHECK(near(imu_period_baseline_ms(&g_src), 9.6, 0.3));      // 329 個の平均（初期の 29 個が残る）: 約 9.34
+    for (uint32_t i = 0; i < 300; i++) { push_row(t); t += pat[i % 5]; }
+    CHECK(near(imu_period_baseline_ms(&g_src), 9.6, 0.05));     // 512 個を超えて初期の差分が抜けた後
+  }
 
-  // analysis/features.py の同じ入力での valid と一致すること（期待値は scratchpad の imu_valid_expect.py の出力）
-  struct Case { const char* name; uint32_t drop_lo, drop_hi; bool local12; uint32_t w0; double period_py; uint32_t rows_py; bool valid_py; };
+  // analysis/features.py の同じ入力での valid と一致すること（期待値は scratchpad の imu_valid_expect.py の出力）。
+  // 飛びの無い列では周期も 1e-6 で一致する。飛びのある列では Python は飛びの差分を除き、装置は含めるので、周期は飛びの分
+  // （(29 − 9.5) ÷ 219 ≒ 0.09 ms）だけ違う（period_tol）。valid は必ず一致する
+  struct Case { const char* name; uint32_t drop_lo, drop_hi; bool local12; uint32_t w0; double period_py; double period_tol; uint32_t rows_py; bool valid_py; };
   const Case cases[] = {
-    { "alt_9_10",               0, 0,       false, 1000, 9.497737557, 105, true  },
-    { "alt_gap20_in_window",    1500, 1520, false, 1000, 9.495412844, 103, false },
-    { "alt_gap_straddle_start", 992, 1010,  false, 1000, 9.500000000, 104, false },
-    { "alt_gap_straddle_end",   1990, 2010, false, 1000, 9.495412844, 104, false },
-    { "local_12ms",             0, 0,       true,  1000, 10.537688442, 83, false },
-    { "alt_window_1003",        0, 0,       false, 1003, 9.497737557, 105, true  },
+    { "alt_9_10",               0, 0,       false, 1000, 9.497737557, 1e-6, 105, true  },
+    { "alt_gap20_in_window",    1500, 1520, false, 1000, 9.495412844, 0.15, 103, false },
+    { "alt_gap_straddle_start", 992, 1010,  false, 1000, 9.500000000, 0.15, 104, false },
+    { "alt_gap_straddle_end",   1990, 2010, false, 1000, 9.495412844, 0.15, 104, false },
+    { "local_12ms",             0, 0,       true,  1000, 10.537688442, 1e-6, 83, false },
+    { "alt_window_1003",        0, 0,       false, 1003, 9.497737557, 1e-6, 105, true  },
   };
   for (const Case& c : cases) {
     std::vector<uint32_t> t;
@@ -318,7 +350,7 @@ static void test_imu_baseline_and_python_agreement() {
     ImuWindow w;
     imu_window_copy(&g_src, c.w0, c.w0 + 1000, &w);
     bool v = imu_window_valid(&w, period);
-    bool ok = near(period, c.period_py, 1e-6) && w.n == c.rows_py && v == c.valid_py;
+    bool ok = near(period, c.period_py, c.period_tol) && w.n == c.rows_py && v == c.valid_py;
     if (!ok) printf("  %s: device period=%.9f rows=%u valid=%d / python period=%.9f rows=%u valid=%d\n",
                     c.name, (double)period, (unsigned)w.n, (int)v, c.period_py, (unsigned)c.rows_py, (int)c.valid_py);
     CHECK(ok);
@@ -408,6 +440,25 @@ static void test_pipeline_bookkeeping() {
   CHECK(prep(2750, 11, &r));
   CHECK_EQ(r.window_t_ms, 2000);
 
+  // 帳簿の固定（#24 の実機で IMU の行が 60〜68 だった件の切り分け）: 不揃いな t0 を並べ、連番の飛びで戻した後の 4 スライス目の
+  // window_t_ms が「窓が満ちた瞬間のリングにある 4 スライスのうち最も古いもの（= 戻したスライス）」の t0 になること
+  pipeline_init_stages();
+  imu_reset();
+  CHECK(!prep(100, 0, &r)); CHECK(!prep(351, 1, &r)); CHECK(!prep(600, 2, &r));
+  CHECK(prep(852, 3, &r)); CHECK_EQ(r.window_t_ms, 100);
+  CHECK(prep(1101, 4, &r)); CHECK_EQ(r.window_t_ms, 351);
+  CHECK(!prep(3000, 9, &r)); CHECK_EQ(r.reason, HOP_RESET);                  // 飛び
+  CHECK(!prep(3251, 10, &r)); CHECK_EQ(r.reason, HOP_NOT_FILLED);
+  CHECK(!prep(3500, 11, &r));
+  CHECK_EQ(pipeline_window_end_ms(3750), 4000);
+  CHECK(prep(3750, 12, &r)); CHECK_EQ(r.window_t_ms, 3000);                  // 戻したスライスの t0
+  CHECK(prep(4001, 13, &r)); CHECK_EQ(r.window_t_ms, 3251);
+  // 連続して 2 回飛んだ場合
+  CHECK(!prep(6000, 20, &r)); CHECK_EQ(r.reason, HOP_RESET);
+  CHECK(!prep(7000, 30, &r)); CHECK_EQ(r.reason, HOP_RESET);
+  CHECK(!prep(7250, 31, &r)); CHECK(!prep(7500, 32, &r));
+  CHECK(prep(7750, 33, &r)); CHECK_EQ(r.window_t_ms, 7000);
+
   // pipeline_hop（スタブの classify）: positive は float32 同士の比較
   CHECK(pipeline_init());
   imu_reset();
@@ -430,6 +481,72 @@ static void test_pipeline_bookkeeping() {
   pipeline_stats(&st);
   CHECK_EQ(st.windows, 2);
   CHECK_EQ(st.classify_errors, 1);
+}
+
+// 実機で見えた「IMU の行が 60〜68」の再現: 窓 [w0, w0 + 1000) の取り出しが w0 + 2180 ms まで遅れる（旧 audio_reuse_push が最初の窓で
+// 全フレームを計算して 1177 ms 掛かった）と、192 行のリング（約 1.85 秒）から窓の前半が押し出されて行数が足りなくなる
+static void test_imu_ring_eviction() {
+  imu_reset();
+  imu_advance_to(1000 + 2180);
+  ImuWindow w;
+  imu_window_copy(&g_src, 1000, 2000, &w);
+  CHECK(w.n >= 60 && w.n <= 72);
+  CHECK(!imu_window_valid(&w, imu_period_baseline_ms(&g_src)));
+  // 定常状態（取り出しが w1 + 約 150 ms）なら全行ある
+  imu_reset();
+  imu_advance_to(1000 + 1150);
+  imu_window_copy(&g_src, 1000, 2000, &w);
+  CHECK(w.n >= 104 && w.n <= 107);
+  CHECK(imu_window_valid(&w, imu_period_baseline_ms(&g_src)));
+}
+
+// audio_reuse_push が窓が満ちる前のスライスでもフレームを積み、最初の窓が全窓版と一致し、かつ最初の窓の費用（frame_features の
+// 回数）が定常状態と同じであること（#24: 4 スライス目で 1177 ms 掛かっていた）。frame_features の回数は音の段階の関数からは数え
+// られないので、4 スライス目と 5 スライス目の CPU 時間（clock()）の比で見る
+#include <time.h>
+static int16_t g_audio16k[4 * AC_SLICE_SAMPLES + AC_SLICE_SAMPLES];
+static int16_t g_audio8k[AF_WINDOW_SAMPLES];
+static void test_audio_reuse_incremental() {
+  // 合成: 2 つの正弦波 + 擬似乱数（値の範囲は小さめ）
+  uint32_t x = 12345u;
+  for (uint32_t i = 0; i < sizeof(g_audio16k) / sizeof(g_audio16k[0]); i++) {
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+    double v = 3000.0 * sin(2 * M_PI * 440.0 * i / 16000.0) + 1500.0 * sin(2 * M_PI * 1234.5 * i / 16000.0) + (double)(x % 2001) - 1000.0;
+    g_audio16k[i] = (int16_t)v;
+  }
+  AudioReuseState st;
+  audio_reuse_init(&st);
+  float out[AF_N_FEATURES], full[AF_N_FEATURES];
+  CHECK(!audio_reuse_push(&st, g_audio16k, out));
+  CHECK(!audio_reuse_push(&st, g_audio16k + AC_SLICE_SAMPLES, out));
+  CHECK(!audio_reuse_push(&st, g_audio16k + 2 * AC_SLICE_SAMPLES, out));
+  clock_t c0 = clock();
+  CHECK(audio_reuse_push(&st, g_audio16k + 3 * AC_SLICE_SAMPLES, out));
+  clock_t c1 = clock();
+  audio_stage_decimate(g_audio16k, 4 * AC_SLICE_SAMPLES, g_audio8k);
+  audio_features_full(g_audio8k, full);
+  double max_rel = 0;
+  for (uint32_t k = 0; k < AF_N_FEATURES; k++) {
+    double rel = fabs((double)out[k] - (double)full[k]) / (fabs((double)full[k]) + 1e-6);
+    if (rel > max_rel) max_rel = rel;
+  }
+  printf("  reuse first window vs full: max_rel_err=%.3e\n", max_rel);
+  CHECK(max_rel < 1e-5);
+  // 5 スライス目（定常状態）と 4 スライス目の時間の比。旧実装では 4 スライス目が約 4 倍
+  clock_t c2 = clock();
+  CHECK(audio_reuse_push(&st, g_audio16k + 4 * AC_SLICE_SAMPLES, out));
+  clock_t c3 = clock();
+  double t4 = (double)(c1 - c0), t5 = (double)(c3 - c2);
+  printf("  reuse cpu: 4th slice=%.0f us, 5th slice=%.0f us\n", t4 * 1e6 / CLOCKS_PER_SEC, t5 * 1e6 / CLOCKS_PER_SEC);
+  CHECK(t5 <= 0 || t4 < 2.0 * t5 + (double)CLOCKS_PER_SEC / 1000.0);   // 2 倍未満（+1 ms の余裕）
+  audio_stage_decimate(g_audio16k + AC_SLICE_SAMPLES, 4 * AC_SLICE_SAMPLES, g_audio8k);
+  audio_features_full(g_audio8k, full);
+  max_rel = 0;
+  for (uint32_t k = 0; k < AF_N_FEATURES; k++) {
+    double rel = fabs((double)out[k] - (double)full[k]) / (fabs((double)full[k]) + 1e-6);
+    if (rel > max_rel) max_rel = rel;
+  }
+  CHECK(max_rel < 1e-5);
 }
 
 // ---------- detector_meta ----------
@@ -493,6 +610,8 @@ int main() {
   test_imu_baseline_and_python_agreement();
   test_imu_window_copy();
   test_pipeline_bookkeeping();
+  test_imu_ring_eviction();
+  test_audio_reuse_incremental();
   test_meta();
   test_frames();
   printf("test_detector: %d passed, %d failed\n", g_pass, g_fail);

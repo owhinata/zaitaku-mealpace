@@ -58,6 +58,7 @@ static int writing_face() {
 
 void audio_capture_push_chunk(const int16_t* chunk, uint32_t n_bytes, uint32_t t_ms) {
   s_stats.chunks++;
+  s_stats.bytes_last = n_bytes;
   bool gap = false;
   if (n_bytes != AC_CHUNK_NOMINAL_BYTES) s_stats.pdm_odd_chunks++;
   if (n_bytes == 0) gap = true;
@@ -112,11 +113,15 @@ void audio_capture_push_chunk(const int16_t* chunk, uint32_t n_bytes, uint32_t t
 bool audio_capture_take(const int16_t** slice, uint32_t* t0_ms, uint32_t* seq, uint32_t* ready_t_ms) {
   if (s_in_use >= 0) return false;   // 放していない面がある
   int best = -1;
+  uint32_t n_ready = 0;
   for (uint32_t i = 0; i < AC_N_FACES; i++) {
     if (s_face[i].state != AC_READY) continue;
+    n_ready++;
     if (best < 0 || (int32_t)(s_face[i].seq - s_face[best].seq) < 0) best = (int)i;
   }
   if (best < 0) return false;
+  if (n_ready > s_stats.ready_max) s_stats.ready_max = n_ready;
+  s_stats.slices_taken++;
   AudioFace& face = s_face[best];
   face.state = AC_IN_USE;
   s_in_use = best;

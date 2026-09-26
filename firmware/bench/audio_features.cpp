@@ -199,31 +199,32 @@ bool audio_reuse_push(AudioReuseState* st, const int16_t* slice, float* out) {
   // リングをずらし、新しいスライスを（M2 なら間引いて）末尾に置く（この時間もホップに含める）
   memmove(st->ring, st->ring + AF_HOP_SAMPLES, (AF_WINDOW_SAMPLES - AF_HOP_SAMPLES) * sizeof(int16_t));
   audio_stage_decimate(slice, AF_IN_HOP_SAMPLES, st->ring + (AF_WINDOW_SAMPLES - AF_HOP_SAMPLES));
-  if (st->filled < AF_WINDOW_SAMPLES) st->filled += AF_HOP_SAMPLES;
-  if (st->filled < AF_WINDOW_SAMPLES) return false;
 
-  uint32_t first;
-  if (!st->primed) {
-    first = 0;                       // 最初の窓は全フレーム
-    st->primed = true;
-  } else {
-    first = AF_N_FRAMES - AF_HOP_FRAMES;   // 73 / 30（f′ 15）
-    memmove(st->dct[0], st->dct[AF_HOP_FRAMES], first * AF_N_MFCC * sizeof(float));
-    memmove(st->centroid, st->centroid + AF_HOP_FRAMES, first * sizeof(float));
-  }
+  // 窓が満ちる前のスライスでも、そのスライスで新しく決まる末尾の AF_HOP_FRAMES フレームだけを計算して DCT・重心のリングに
+  // 入れる（#24: 最初の窓で全フレームをまとめて計算すると 1 ホップに窓 1 つ分の時間が掛かり、装置が追いつけない）。
+  // 末尾のフレームは、M2（フレームごとのプリエンファシス）ではその新しいスライスのサンプルだけで決まる。M1 では先頭の 2 フレーム
+  // （73・74）が前のスライスにまたがるが、そのサンプルはリングに残っている（最初のスライスでは 0。そのフレームは窓が満ちる前に
+  // リングの外へ出るので窓には残らない）。窓が満ちた時点のリングは、全フレームをまとめて計算した場合と同じ値になる。
+  const uint32_t first = AF_N_FRAMES - AF_HOP_FRAMES;   // 73 / 30（f′ 15）
+  memmove(st->dct[0], st->dct[AF_HOP_FRAMES], first * AF_N_MFCC * sizeof(float));
+  memmove(st->centroid, st->centroid + AF_HOP_FRAMES, first * sizeof(float));
   for (uint32_t f = first; f < AF_N_FRAMES; f++) {
     uint32_t s = f * AF_FRAME_HOP;
     frame_features(st->ring + s, s > 0, st->dct[f], &st->centroid[f]);
   }
+  if (st->filled < AF_WINDOW_SAMPLES) st->filled += AF_HOP_SAMPLES;
+  if (st->filled < AF_WINDOW_SAMPLES) return false;
+  st->primed = true;
+
 #if !AF_PREEMPH_PER_FRAME
-  if (first > 0) {
-    // 窓の先頭フレームは以前に「前のサンプルを持つ位置」で計算されているので、全窓版と同じ pre[0] = x[0] で
-    // DCT だけ計算し直す（1 ホップに FFT が 1 回増える。重心はプリエンファシスに依存しないのでそのまま）。
-    // 答え合わせで、この差が許容差（相対 1e-3）を超えたため（最大 1.5e-3）。0012 の式は変えていない。
-    audio_stage_preemphasis(st->ring, AF_FRAME_LEN, false, s_pre);
-    audio_stage_power(s_pre, s_power);
-    audio_stage_mel_dct(s_power, st->dct[0]);
-  }
+  // 窓の先頭フレームは以前に「前のサンプルを持つ位置」で計算されているので、全窓版と同じ pre[0] = x[0] で
+  // DCT だけ計算し直す（1 ホップに FFT が 1 回増える。重心はプリエンファシスに依存しないのでそのまま）。
+  // 答え合わせで、この差が許容差（相対 1e-3）を超えたため（最大 1.5e-3）。0012 の式は変えていない。
+  // 最初の窓でも行う（先頭フレームは最初のスライスの位置 75 で計算されたもので、その前のサンプルはリングの 0 だったので
+  // pre[0] = x[0] と同じ値になっているが、同じ経路を通す）。
+  audio_stage_preemphasis(st->ring, AF_FRAME_LEN, false, s_pre);
+  audio_stage_power(s_pre, s_power);
+  audio_stage_mel_dct(s_power, st->dct[0]);
 #endif
   float acc[AF_N_MFCC];
   float csum = 0.0f;

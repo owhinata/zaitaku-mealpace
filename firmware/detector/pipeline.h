@@ -52,12 +52,14 @@ struct HopResult {
 };
 
 struct PipelineStats {
-  uint32_t hops;              // pipeline_hop の呼び出し数
+  uint32_t hops;              // pipeline_prepare の呼び出し数（窓が出なかったものを含む）
   uint32_t windows;           // 出した窓の数
-  uint32_t not_filled;
-  uint32_t resets;            // 連番の飛びで audio_reuse_init に戻した回数
+  uint32_t not_filled;        // 窓が満ちていなくて出さなかった回数（連番の飛びで戻した直後の分は含まない）
+  uint32_t resets;            // 連番の飛びで audio_reuse_init に戻した回数（その呼び出しも窓を出さない）
   uint32_t imu_short;         // IMU の窓が無効で出さなかった窓
   uint32_t classify_errors;
+  uint32_t imu_rows_last;     // 直近に IMU の窓を取り出したときの行数（無効だった窓も含む）
+  uint8_t last_reason;        // 直近の pipeline_hop の HopReason
 };
 
 // 表を作り、帳簿を初期化し、classify_init を呼ぶ。偽なら書き出しの前提が崩れている（setup() で止まる）。

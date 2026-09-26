@@ -43,6 +43,9 @@ struct AudioCaptureStats {
   uint32_t pdm_gaps;         // n_bytes == 0、または millis() の差が 6 ms 以上
   uint32_t slices_started;   // 始めたスライスの数
   uint32_t chunks;           // コールバックの数
+  uint32_t bytes_last;       // 直近のコールバックの n_bytes
+  uint32_t slices_taken;     // audio_capture_take が返したスライスの数
+  uint32_t ready_max;        // take のときに READY だった面の数の最大（0〜2。2 なら主スレッドが 1 ホップ以上遅れている）
 };
 
 void audio_capture_init();

@@ -7,7 +7,7 @@
 //
 // 全窓版（audio_features_full）: AF_WINDOW_SAMPLES サンプル（計算用の周波数、M2 なら間引き後の 8000）の int16 から 15 次元。
 // 再利用版（audio_reuse_*）: 入力の周波数（16 kHz）のスライス AF_IN_HOP_SAMPLES（4000）を受け取り、間引いてリングに入れ、
-//   新しい AF_HOP_FRAMES フレームだけ計算する。
+//   新しい AF_HOP_FRAMES フレームだけ計算する。窓が満ちる前のスライスでも同じ（1 ホップの費用は最初から定常状態と同じ。#24）。
 //   M1 の既知の差: 全窓版はプリエンファシスの最初のサンプルが pre[0] = x[0] だが、再利用版では窓の先頭フレームが
 //   以前に「前のサンプルを持つ位置」で計算されている（400 サンプル中 1 つ）。この差は許容差（相対 1e-3）を
 //   超えた（firmware/bench/host/check_port.py で最大 1.5e-3）ので、ホップごとに先頭フレームの DCT だけ
@@ -80,7 +80,7 @@ struct AudioReuseState {
   float dct[AF_N_FRAMES][AF_N_MFCC];      // フレームごとの DCT 13 係数
   float centroid[AF_N_FRAMES];            // フレームごとの重心
   uint32_t filled;                        // リングに入ったサンプル数（AF_WINDOW_SAMPLES で飽和）
-  bool primed;                            // 全フレームを一度計算したか
+  bool primed;                            // 窓が一度満ちたか
 };
 void audio_reuse_init(AudioReuseState* st);
 // slice は入力の周波数で AF_IN_HOP_SAMPLES サンプル（16 kHz・4000）。窓が満ちるまでは false を返し out は触らない。
