@@ -9,6 +9,7 @@
 // IMU の窓が 0012 の規則で無効なら窓を出さず imu_short を数える（plan 第 6 節 (b)）。
 //
 // 前段（pipeline_prepare: 帳簿・特徴量まで）と後段（正規化・推論）を分けてあり、PC のテストは前段だけを classify 無しで試す。
+// 窓の結果が出たら led_rule_update（docs/decisions/0018。Arduino 依存なし）で LED の状態を r->led に入れる（#25）。
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
@@ -16,6 +17,7 @@
 #include "imu_features.h"
 #include "imu_capture.h"
 #include "m2_norm.h"
+#include "led_rule.h"
 
 #ifndef DETECTOR_PROFILE
 #define DETECTOR_PROFILE 0   // 1 で各段の時間を測る（detector.ino の統計行。-DBUILD_FLAGS="-DDETECTOR_PROFILE=1"）
@@ -42,7 +44,7 @@ struct HopResult {
   uint32_t window_t_ms;
   float prob;                       // swallow の確率（float32）
   uint8_t positive;                 // prob >= M2_THRESHOLD（float32 同士）
-  uint8_t led;                      // #25 まで 0
+  uint8_t led;                      // docs/decisions/0018 の規則（led_rule.h）: 1 黄 / 2 緑。detector.ino が実際の表示（led_out_state）で上書きしてから送る
   uint8_t reason;                   // HopReason
   float features[M2_N_FEATURES];    // 正規化前（FEAT に載せる）
   uint32_t imu_rows;
@@ -64,13 +66,13 @@ struct PipelineStats {
 
 // 表を作り、帳簿を初期化し、classify_init を呼ぶ。偽なら書き出しの前提が崩れている（setup() で止まる）。
 bool pipeline_init();
-// 前段だけの初期化（テスト用。classify_init を呼ばない）。
+// 前段だけの初期化（テスト用。classify_init を呼ばない）。LED の規則の状態（led_rule_init）もここで戻す。
 void pipeline_init_stages();
 // 直前のスライスの t0 から、窓の終端（w0 + 1000）の見込み [ms]。detector.ino が IMU の最後の行を待つのに使う。
 uint32_t pipeline_window_end_ms(uint32_t t0_ms);
 // 前段: 帳簿、audio_reuse_push、IMU の窓、imu_features。真なら r->features に 29 次元（正規化前）と window_t_ms・imu_rows が入る。
 bool pipeline_prepare(const int16_t* slice16k, uint32_t t0_ms, uint32_t seq, const ImuWindowSource* imu, HopResult* r);
-// 1 ホップ全部（前段 → m2_normalize → classify_run → positive）。偽なら窓を出さない（理由は r->reason）。
+// 1 ホップ全部（前段 → m2_normalize → classify_run → positive → led_rule_update）。偽なら窓を出さない（理由は r->reason。LED の規則の状態は進めない）。
 bool pipeline_hop(const int16_t* slice16k, uint32_t t0_ms, uint32_t seq, const ImuWindowSource* imu, HopResult* r);
 void pipeline_stats(PipelineStats* out);
 #if DETECTOR_PROFILE

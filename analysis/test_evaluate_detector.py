@@ -9,6 +9,7 @@ from pathlib import Path
 
 import evaluate
 import evaluate_detector as ed
+import led_rule
 from train_eval import sum_metrics
 
 N_WINDOWS = 240
@@ -36,19 +37,22 @@ def windows(n: int = N_WINDOWS, start_ms: int = 1000) -> list[int]:
 def make_session(root: Path, name: str, *, w: list[int] | None = None, t: list[int] | None = None,
                  positives=(), probs: dict | None = None, feat: bool = True, feat_w: list[int] | None = None,
                  feat_t: list[int] | None = None, f0: dict | None = None, events=(), m: dict | None = None,
-                 detect_rows: list[str] | None = None) -> Path:
-    """合成セッション。positives は陽性にする窓の開始（秒）。probs / f0 は窓の開始（秒）→ 値。"""
+                 detect_rows: list[str] | None = None, led_over: dict | None = None) -> Path:
+    """合成セッション。positives は陽性にする窓の開始（秒）。probs / f0 / led_over は窓の開始（秒）→ 値。
+    led は 0018 の規則（led_rule.led_states）で書く。led_over で行ごとに上書きできる（装置との不一致の合成）。"""
     d = root / name
     d.mkdir()
     w = windows() if w is None else w
     t = [x + 1000 + LAG_MS for x in w] if t is None else t
     pos = {round(p * 1000) for p in positives}
     probs = probs or {}
+    led_over = led_over or {}
     lines = ["t_ms,window_t_ms,positive,prob,led"]
-    for ti, wi in zip(t, w):
-        p = 1 if wi in pos else 0
+    ps = [1 if wi in pos else 0 for wi in w]
+    leds = led_rule.led_states(w, ps) if all(b > a for a, b in zip(w, w[1:])) else [1 + p for p in ps]   # 逆行の合成は規則で書けない
+    for ti, wi, p, led in zip(t, w, ps, leds):
         prob = probs.get(wi / 1000.0, 0.95 if p else 0.05)
-        lines.append(f"{ti},{wi},{p},{prob:.9g},{1 + p}")
+        lines.append(f"{ti},{wi},{p},{prob:.9g},{led_over.get(wi / 1000.0, led)}")
     if detect_rows is not None:
         lines = ["t_ms,window_t_ms,positive,prob,led"] + detect_rows
     (d / "detect.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -233,6 +237,34 @@ class MetricsTest(Base):
         self.assertAlmostEqual(a["false_positives_per_min"], 1.0345, places=4)
         self.assertEqual(ref["positive_ratio"], 1.0)
         self.assertEqual(ref["mismatch"][name(0)], 0)
+
+    def test_d10d_led_recomputed_from_rule(self):
+        # 既定の合成（led を 0018 の規則で書く）は不一致 0。報告に 0 の行が出る
+        for i in range(3):
+            make_session(self.root, name(i), positives=[10.0, 20.0, 20.25], events=[(10000, "s", "")])
+        r = ed.run(self.root)
+        self.assertEqual(r.reference["led_mismatch"], {name(i): {} for i in range(3)})
+        s = r.used[0]
+        self.assertEqual([x.led for x in s.rows if 10000 <= x.window_t_ms <= 12000],
+                         [2, 2, 2, 2, 2, 2, 2, 2, 1])                  # 陽性 10.0 から 8 行が緑、12.0 で黄
+        text = ed.format_report(r)
+        self.assertIn("`led` と docs/decisions/0018 の規則からの再計算（`analysis/led_rule.py`）の不一致の行数（評価には使わない）: 0\n", text)
+
+    def test_d10e_led_mismatch_reported_not_stopped(self):
+        # 1 行だけずらした（緑を 1 行長く出した）形と、書き込みを飛ばした形（黄 → 緑の最初の窓が前の黄のまま）でどちらも 1 行
+        cases = {"ずれ": ({12.0: 2}, {2: 1}), "書き込みを飛ばした": ({10.0: 1}, {1: 1})}
+        for label, (over, values) in cases.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                make_session(root, name(0), positives=[10.0], events=[(10000, "s", "")], led_over=over)
+                r = ed.run(root, sessions=[name(0)])
+                self.assertEqual(r.reference["led_mismatch"], {name(0): values})
+                text = ed.format_report(r)
+                self.assertIn("の不一致の行数（評価には使わない）: 1（不一致の行の `led` の値: "
+                              f"{next(iter(values))}: 1。セッションごと: {name(0)}: 1）", text)
+                # 評価の数字は変わらない
+                base = self.load(make_session(Path(tmp), name(1), positives=[10.0], events=[(10000, "s", "")]))
+                self.assertEqual(r.per_session[name(0)], ed.session_metrics(base))
 
     def test_d10b_threshold_compared_as_float32(self):
         rows = [f"2030,1000,1,{F32_09:.9g},2", f"2280,1250,1,{F32_09_BELOW:.9g},2", "2530,1500,0,0.5,1"]

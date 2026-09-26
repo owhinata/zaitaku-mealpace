@@ -2,7 +2,8 @@
 
 数え方は evaluate.event_metrics / evaluate.aggregate をそのまま使う（docs/decisions/0011）。検出器のセッションには imu.csv と
 audio_chunks.csv が無いので、記録の範囲は detect.csv と feat.csv の時刻から取る（docs/decisions/0021。0011 の読み替え）。
-positive だけを評価に使う。led と prob は使わない（docs/decisions/0018・0019）。
+positive だけを評価に使う。led と prob は使わない（docs/decisions/0018・0019）。led は参考値として、positive と window_t_ms から
+0018 の規則で再計算した値（led_rule.py）との不一致の行数だけを出す（#25。評価の数字には使わない。止めない）。
 
 使い方:
   python analysis/evaluate_detector.py data/raw                        # 既定: self の meal で fw が detector のセッション全部
@@ -18,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-import evaluate, split
+import evaluate, led_rule, split
 from train_eval import git_commit, sum_metrics
 
 # --- 定数 ---
@@ -45,6 +46,7 @@ class DetectRow:
     window_t_ms: int
     positive: int
     prob: float
+    led: int                      # 装置が表示していた状態（0 消灯 / 1 黄 / 2 緑）。評価には使わない
 
 
 @dataclass(frozen=True, eq=False)
@@ -123,7 +125,7 @@ def load_detect(session_dir: Path) -> list:
             _stop(name, f"detect.csv の led が 0 / 1 / 2 ではありません: {led}")
         if not 0.0 <= prob <= 1.0:
             _stop(name, f"detect.csv の prob が [0, 1] の外です: {r[3]}")
-        rows.append(DetectRow(t_ms=t_ms, window_t_ms=window_t_ms, positive=positive, prob=prob))
+        rows.append(DetectRow(t_ms=t_ms, window_t_ms=window_t_ms, positive=positive, prob=prob, led=led))
     _check_times(name, "detect.csv", [r.t_ms for r in rows], [r.window_t_ms for r in rows])
     return rows
 
@@ -316,6 +318,17 @@ def mismatch_count(d: SessionData) -> int:
     return sum(1 for r in d.rows if r.positive != int(f32(r.prob) >= thr))
 
 
+def led_mismatch(d: SessionData) -> dict:
+    """装置の led と、positive と window_t_ms から 0018 の規則で再計算した led（led_rule.py）が違う行。
+    戻り値は装置の led の値 → 行数（不一致の行だけ）。書き込みを飛ばした窓（装置が前の状態を送る）もここに現れる。"""
+    expected = led_rule.led_states([r.window_t_ms for r in d.rows], [r.positive for r in d.rows])
+    out: dict = {}
+    for r, e in zip(d.rows, expected):
+        if r.led != e:
+            out[r.led] = out.get(r.led, 0) + 1
+    return out
+
+
 def reference(data: Sequence[SessionData]) -> dict:
     always = sum_metrics({d.name: session_metrics(d, d.all_windows()) for d in data})
     n_pos = sum(len(d.positive_windows()) for d in data)
@@ -325,6 +338,7 @@ def reference(data: Sequence[SessionData]) -> dict:
         "always_positive": always,
         "positive_windows": n_pos, "windows": n_all, "positive_ratio": n_pos / n_all if n_all else None,
         "mismatch": {d.name: mismatch_count(d) for d in data},
+        "led_mismatch": {d.name: led_mismatch(d) for d in data},
         "cough": {
             "coughs": sum(c["coughs"] for c in cough.values()),
             "fp_runs": sum(c["fp_runs"] for c in cough.values()),
@@ -448,6 +462,19 @@ def _sum_line(m: dict) -> str:
             f"誤検出率 {_per_min(m['false_positives_per_min'])} 回/分（非嚥下 {m['non_swallow_min']:.2f} 分）")
 
 
+def _led_mismatch_line(lm: dict) -> str:
+    n = sum(sum(v.values()) for v in lm.values())
+    line = f"- `led` と docs/decisions/0018 の規則からの再計算（`analysis/led_rule.py`）の不一致の行数（評価には使わない）: {n}"
+    if n == 0:
+        return line
+    values: dict = {}
+    for v in lm.values():
+        for k, c in v.items():
+            values[k] = values.get(k, 0) + c
+    return (line + "（不一致の行の `led` の値: " + ", ".join(f"{k}: {values[k]}" for k in sorted(values))
+            + "。セッションごと: " + ", ".join(f"{name}: {sum(v.values())}" for name, v in lm.items() if v) + "）")
+
+
 def format_report(r: Result) -> str:
     """Markdown の報告。個々の窓の確率と特徴量の値は入れない。"""
     d0 = r.used[0]
@@ -516,6 +543,7 @@ def format_report(r: Result) -> str:
             f"- 陽性窓の割合（陽性窓 ÷ 全窓）: {_rate(ref['positive_ratio'])}（{ref['positive_windows']}/{ref['windows']}）",
             f"- `positive != (prob >= threshold)` の行数（float32 で比較）: {sum(mism.values())}"
             + ("" if sum(mism.values()) == 0 else "（装置の内部の整合が取れていない。" + ", ".join(f"{k}: {v}" for k, v in mism.items() if v) + "）"),
+            _led_mismatch_line(ref["led_mismatch"]),
             f"- `c` に紐づく誤検出の塊（塊の最初の窓の中心 − t_c が [{COUGH_LINK_S[0]:+.1f}, {COUGH_LINK_S[1]:+.1f}] 秒）: "
             f"`c` {cough['coughs']} 回、紐づく塊 {cough['linked_runs']} / 誤検出の塊 {cough['fp_runs']}、"
             f"紐づく塊が 1 つ以上ある `c` の割合 "

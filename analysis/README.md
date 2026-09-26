@@ -8,6 +8,7 @@ PC 側の解析・評価。ファームウェアが何で書かれていても�
 - `split.py`      セッション単位で学習／評価を分ける（窓単位の分割は実装しない）
 - `train_eval.py` M1 の分岐点: ロジスティック回帰で学習し、上の3つを使って採点した報告を出す
 - `evaluate_detector.py` M2 の検出器のセッション（`detect.csv`・`events.csv`）を `evaluate.py` の数え方で採点した報告を出す（#23、docs/decisions/0021）
+- `led_rule.py`   `detect.csv` の `positive` と `window_t_ms` から LED の状態（1 黄 / 2 緑）を docs/decisions/0018 の規則で再計算する（#25。`firmware/detector/led_rule.h` と同じ式。評価には使わない）
 - `ei_upload.py`  M2 の特徴量ベクトル（1 窓 1 項目）を Edge Impulse に投入する（#21。生の音声・IMU は上げない）
 - `m2_norm_header.py` `m2_norm.json` → `firmware/detector/m2_norm.h`（正規化の定数。#22）
 - `m2_scorer.py`  書き出した C++ ライブラリを PC 上で動かす実行ファイルで窓を採点する scorer（`evaluate_detector.py --scorer` の形。#22）
@@ -260,6 +261,8 @@ python analysis/evaluate_detector.py data/raw --scorer path/to/m2_scorer.py   # 
   セッションごとの数字を出し、合算は「出さない」と明記する（#24 の 60 秒の確認用。M2 の数字ではない）。
 - **参考値**: 常時陽性の場合の数字、陽性窓の割合、`positive != (prob >= threshold)` の行数（比較は float32）、`c` に紐づく
   誤検出の塊（塊の最初の窓の中心 − `t_c` が `[−1.0, +5.0]` 秒）、収集日ごと・会話の有無ごと（`o` の note が `conv`）の合算。
+  `led` と、`positive`・`window_t_ms` から 0018 の規則で再計算した値（`led_rule.py`）の不一致の行数（不一致の行の `led` の値と
+  セッションごとの内訳。#25）。装置の `led` は実際に表示していた状態なので、NINA の書き込みを飛ばした窓もここに現れる。評価の数字には使わず、止めない。
 - **`--scorer PATH`**: `score(features: list[list[float]], meta: dict) -> list[float]` を持つ Python ファイルで `feat.csv` を
   再採点し、装置の `positive` との差（装置 1 / PC 0、装置 0 / PC 1、`|prob − prob_pc|` の最大）と PC の陽性で数えた数字を出す。
   閾値は `meta.json` の `threshold`（上書きの引数は無い）。scorer の実物は `m2_scorer.py`（下の「M2 の scorer と閾値」）。
@@ -362,7 +365,8 @@ EI_API_KEY=... python analysis/ei_testing_result.py data/raw --project-id <ID>
 `evaluate.py` と `split.py` の数え方、`features.py` の窓と特徴量、`train_eval.py` の手順、`evaluate_detector.py` の記録の範囲と
 対象の選び方は、合成データのテスト
 （`test_evaluate.py`・`test_split.py`・`test_features.py`・`test_train_eval.py`・`test_evaluate_detector.py`・`test_features_m2.py`・`test_ei_upload.py`・
-`test_m2_norm_header.py`・`test_m2_scorer.py`・`test_m2_threshold.py`・`test_m2_ei_testing_result.py`）で固定している。
+`test_m2_norm_header.py`・`test_m2_scorer.py`・`test_m2_threshold.py`・`test_m2_ei_testing_result.py`・`test_led_rule.py`）で固定している。
+`test_led_rule.py` の入力の表は `firmware/detector/host/test_detector.cpp` の `test_led_rule` と同じ（値を両方に書いてある）。
 `test_features.py`・`test_features_m2.py`・`test_ei_upload.py`・`test_m2_*.py` は numpy、`test_train_eval.py` は numpy と scikit-learn を使う。
 ほかは標準ライブラリの `unittest` だけで動く。
 合成データは一時フォルダに作り、`data/` は使わない。`test_train_eval.py` は 60 秒の合成セッションを 9 つ作って

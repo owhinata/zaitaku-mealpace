@@ -36,7 +36,9 @@ project(zaitaku_mealpace NONE)
 #   1 ホップが 250 ms を超えたときの落とし方（plan #24 第 16 節 P。docs/log 2026-09-26 の切り分け）: I2C 400 kHz と IMU の poll 4 ms は
 #   既定（firmware/detector/sensors.h の DETECTOR_I2C_HZ / DETECTOR_IMU_POLL_MS。本番 1 ホップ 約 208 ms）。それでも超えるときは
 #   -DBUILD_FLAGS="-O2"（利得 約 2%。人が採らないと決めた）→ DRDY 割り込み（未実装）。切り分け用の -DDETECTOR_PROF_NO_IMU=1 /
-#   -DDETECTOR_PROF_NO_PDM=1 は DETECTOR_PROFILE=1 のときだけ通る。
+#   -DDETECTOR_PROF_NO_PDM=1 / -DDETECTOR_PROF_STOP_AFTER_MS=<ms>（その ms 以降スライスを取らず、LED の 1.0 秒の消灯を確かめる。#25）は
+#   DETECTOR_PROFILE=1 のときだけ通る。
+#   LED は基板の RGB（WiFiNINA。deps で入る。#25、docs/decisions/0018。firmware/detector/README.md）。
 #   detector のビルドは同時に走らせない（arduino-cli がスケッチのパスでキャッシュを共有し、並列だと壊れる）。
 
 set(FQBN "arduino:mbed_nano:nanorp2040connect" CACHE STRING "Arduino FQBN")
@@ -61,6 +63,7 @@ add_custom_target(deps
   COMMAND ${ARDUINO_CLI} core update-index
   COMMAND ${ARDUINO_CLI} core install arduino:mbed_nano
   COMMAND ${ARDUINO_CLI} lib install Arduino_LSM6DSOX
+  COMMAND ${ARDUINO_CLI} lib install WiFiNINA
   COMMAND ${PYTHON3} -m pip install -r ${CMAKE_SOURCE_DIR}/tools/requirements.txt
   COMMENT "ボードコアとライブラリ、Python 依存の導入")
 

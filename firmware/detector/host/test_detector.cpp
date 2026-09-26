@@ -1,5 +1,5 @@
 // firmware/detector/host/test_detector.cpp — 検出器の Arduino に依存しないモジュールの PC 上のテスト（Issue #24 plan 第 15 節 1）。
-// 対象: audio_capture、imu_capture、pipeline の帳簿（classify はスタブ）、detector_meta、detector_frames。
+// 対象: audio_capture、imu_capture、pipeline の帳簿（classify はスタブ）、detector_meta、detector_frames、led_rule（#25）。
 // data/ を使わない。Edge Impulse の SDK を要らない。実行: bash firmware/detector/host/test_detector.sh
 //
 // IMU の valid の突き合わせ: 合成の t_ms（gen_alt: 0 から +9, +10 を交互に 2100 未満まで）を analysis/features.py の
@@ -18,6 +18,7 @@
 #include "detector_frames.h"
 #include "m2_norm.h"
 #include "m2_threshold.h"
+#include "led_rule.h"
 
 // 検出器の格子（-DAF_PROFILE=1、AF_M2_FRAME_HOP 既定 200）: 1 スライスで計算するのは末尾 10 フレーム（#24 の 3 回目の実機の切り分け）
 static_assert(AF_N_FRAMES == 40 && AF_HOP_FRAMES == 10 && AF_FRAME_HOP == 200, "検出器の格子は 40 フレーム / ホップ 10 フレーム");
@@ -466,12 +467,13 @@ static void test_pipeline_bookkeeping() {
   for (uint32_t k = 0; k < 3; k++) CHECK(!hop(k * 250, k, &r));
   CHECK(hop(750, 3, &r));
   CHECK_EQ(r.positive, 1);            // 0.95f >= M2_THRESHOLD(0.95f)
-  CHECK_EQ(r.led, 0);
+  CHECK_EQ(r.led, LED_GREEN);         // 陽性窓で緑（docs/decisions/0018。#25）
   CHECK(r.prob == M2_THRESHOLD);
   g_stub_swallow = 0.9499f;
   CHECK(hop(1000, 4, &r));
   CHECK_EQ(r.positive, 0);
   CHECK_EQ(r.window_t_ms, 250);
+  CHECK_EQ(r.led, LED_GREEN);         // 陽性窓（開始 0）から 250 ms: 緑のまま
   // 特徴量の並び: 0..13 が IMU（静止の合成: acc_axis_y が 1 に近い）、14..28 が音
   CHECK(near(r.features[12], 1.0, 1e-3));
   g_stub_ok = false;
@@ -481,6 +483,32 @@ static void test_pipeline_bookkeeping() {
   pipeline_stats(&st);
   CHECK_EQ(st.windows, 2);
   CHECK_EQ(st.classify_errors, 1);
+}
+
+// pipeline_hop の r.led（#25）: 陽性の窓で 2、その窓を含めて 8 窓（結果 8 回分 = 2.0 秒）が 2、9 窓目で 1。
+// 結果が出ない呼び出し（classify のエラー）は規則の状態を進めず、led は 0 のまま
+static void test_pipeline_led() {
+  HopResult r;
+  CHECK(pipeline_init());
+  imu_reset();
+  g_stub_ok = true;
+  g_stub_swallow = 0.0f;
+  for (uint32_t k = 0; k < 3; k++) { CHECK(!hop(k * 250, k, &r)); CHECK_EQ(r.led, 0); }
+  CHECK(hop(750, 3, &r)); CHECK_EQ(r.window_t_ms, 0);   CHECK_EQ(r.positive, 0); CHECK_EQ(r.led, LED_YELLOW);
+  CHECK(hop(1000, 4, &r)); CHECK_EQ(r.led, LED_YELLOW);
+  g_stub_swallow = M2_THRESHOLD;                        // 閾値ちょうどで陽性
+  CHECK(hop(1250, 5, &r)); CHECK_EQ(r.window_t_ms, 500); CHECK_EQ(r.positive, 1); CHECK_EQ(r.led, LED_GREEN);
+  g_stub_swallow = 0.0f;
+  uint32_t seq = 6, t0 = 1500;
+  for (uint32_t k = 1; k <= 7; k++, seq++, t0 += 250) {  // 開始 750〜2250（w_p + 250 〜 w_p + 1750）: 緑
+    CHECK(hop(t0, seq, &r)); CHECK_EQ(r.positive, 0); CHECK_EQ(r.led, LED_GREEN);
+  }
+  CHECK_EQ(r.window_t_ms, 2250);
+  CHECK(hop(t0, seq, &r)); CHECK_EQ(r.window_t_ms, 2500); CHECK_EQ(r.led, LED_YELLOW);   // 9 窓目（w_p + 2000）: 黄
+  seq++; t0 += 250;
+  g_stub_ok = false;
+  CHECK(!hop(t0, seq, &r)); CHECK_EQ(r.reason, HOP_CLASSIFY_ERROR); CHECK_EQ(r.led, 0);
+  g_stub_ok = true;
 }
 
 // 実機で見えた「IMU の行が 60〜68」の再現: 窓 [w0, w0 + 1000) の取り出しが w0 + 2180 ms まで遅れる（旧 audio_reuse_push が最初の窓で
@@ -573,6 +601,87 @@ static void test_meta() {
   CHECK_EQ(detector_meta_build(small, sizeof small, 1, 2), -1);
 }
 
+// ---------- led_rule（docs/decisions/0018。analysis/test_led_rule.py と同じ入力の表。値は両方に書いてある） ----------
+struct LedCase { const char* name; std::vector<uint32_t> w; std::vector<uint8_t> positive; std::vector<uint8_t> led; };
+
+static void run_led_case(const LedCase& c) {
+  LedRule s; led_rule_init(&s);
+  bool ok = c.w.size() == c.positive.size() && c.w.size() == c.led.size();
+  for (size_t i = 0; ok && i < c.w.size(); i++) {
+    uint8_t got = led_rule_update(&s, c.w[i], c.positive[i]);
+    if (got != c.led[i]) { printf("  led_rule %s: row %zu w=%u got %u want %u\n", c.name, i, (unsigned)c.w[i], (unsigned)got, (unsigned)c.led[i]); ok = false; }
+  }
+  CHECK(ok);
+}
+
+static void test_led_rule() {
+  const LedCase cases[] = {
+    // 1. 起動直後: 陽性なし → 黄
+    { "1_start", { 1000, 1250, 1500 }, { 0, 0, 0 }, { 1, 1, 1 } },
+    // 2. 1 窓の陽性: 2000〜3750 の 8 行が緑、4000 が黄（結果 8 回分 = 2.0 秒）
+    { "2_single", { 2000, 2250, 2500, 2750, 3000, 3250, 3500, 3750, 4000 },
+                  { 1, 0, 0, 0, 0, 0, 0, 0, 0 },
+                  { 2, 2, 2, 2, 2, 2, 2, 2, 1 } },
+    // 3. 2 窓連続: 2000〜4000 の 9 行が緑（(k − 1) × 0.25 + 2.0 秒）、4250 が黄
+    { "3_two_in_a_row", { 2000, 2250, 2500, 2750, 3000, 3250, 3500, 3750, 4000, 4250 },
+                        { 1, 1, 0, 0, 0, 0, 0, 0, 0, 0 },
+                        { 2, 2, 2, 2, 2, 2, 2, 2, 2, 1 } },
+    // 4. 陽性が離れて 2 回（2000 と 3000）: 2000〜4750 が緑、5000 が黄
+    { "4_two_apart", { 2000, 2250, 2500, 2750, 3000, 3250, 3500, 3750, 4000, 4250, 4500, 4750, 5000 },
+                     { 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0 },
+                     { 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1 } },
+    // 5. 窓の飛び: 2000 陽性、次が 3750（差 1750 ちょうど）→ 緑、次が 3800（差 1800）→ 黄
+    { "5_gap", { 2000, 3750, 3800 }, { 1, 0, 0 }, { 2, 2, 1 } },
+    // 6. 陽性が続く 18 窓（2000〜6250）: 緑は最後の陽性（6250）から 8 行（〜8000）、8250 が黄
+    { "6_run18", { 2000, 2250, 2500, 2750, 3000, 3250, 3500, 3750, 4000, 4250, 4500, 4750, 5000,
+                   5250, 5500, 5750, 6000, 6250, 6500, 6750, 7000, 7250, 7500, 7750, 8000, 8250 },
+                 { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0 },
+                 { 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1 } },
+  };
+  for (const LedCase& c : cases) run_led_case(c);
+  // LED_OFF は返さない
+  LedRule s; led_rule_init(&s);
+  CHECK_EQ(led_rule_update(&s, 0, 0), LED_YELLOW);
+  // 陽性の後の陰性が続いても w_p は消えない（後で陽性が無ければ黄のまま）
+  CHECK_EQ(led_rule_update(&s, 250, 1), LED_GREEN);
+  CHECK_EQ(led_rule_update(&s, 2250, 0), LED_YELLOW);
+  CHECK_EQ(s.has_positive, 1); CHECK_EQ(s.last_positive_w_ms, 250);
+}
+
+static void test_led_off_due() {
+  CHECK(!led_off_due(1999, 1000));                     // 999 ms
+  CHECK(led_off_due(2000, 1000));                      // 1000 ms
+  CHECK(led_off_due(5000, 1000));
+  CHECK(!led_off_due(1000, 1000));
+  CHECK(led_off_due(1000u, 0xFFFFFF00u));              // millis() の一周をまたぐ（差 1256 ms）
+  CHECK(!led_off_due(500u, 0xFFFFFF00u));              // 同（差 756 ms）
+}
+
+static void test_led_shown_after() {
+  // 表 2 の入力で規則の出力を目標にし、2000（黄 → 緑）の窓だけ NINA の準備ができていない形。直前は黄を表示していたとする
+  const uint32_t w[] = { 2000, 2250, 2500, 2750, 3000, 3250, 3500, 3750, 4000 };
+  const uint8_t pos[] = { 1, 0, 0, 0, 0, 0, 0, 0, 0 };
+  const uint8_t shown_want[] = { 1, 2, 2, 2, 2, 2, 2, 2, 1 };   // DETECT に載る状態: 2000 は前の黄のまま、2250 で緑
+  LedRule s; led_rule_init(&s);
+  uint8_t shown = LED_YELLOW;
+  bool ok = true;
+  for (int i = 0; i < 9; i++) {
+    uint8_t target = led_rule_update(&s, w[i], pos[i]);
+    shown = led_shown_after(shown, target, w[i] != 2000);
+    if (shown != shown_want[i]) { printf("  led_shown_after: w=%u shown %u want %u\n", (unsigned)w[i], (unsigned)shown, (unsigned)shown_want[i]); ok = false; }
+  }
+  CHECK(ok);
+  // 消灯から黄への書き込みを飛ばすと 0 のまま、次に準備ができて 1
+  CHECK_EQ(led_shown_after(LED_OFF, LED_YELLOW, false), LED_OFF);
+  CHECK_EQ(led_shown_after(LED_OFF, LED_YELLOW, true), LED_YELLOW);
+  // 目標が今と同じなら準備ができていなくても変わらない
+  CHECK_EQ(led_shown_after(LED_GREEN, LED_GREEN, false), LED_GREEN);
+  CHECK_EQ(led_shown_after(LED_YELLOW, LED_YELLOW, false), LED_YELLOW);
+  // 消灯（タイムアウト）の書き込みも同じ: 飛ばせば前の色のまま
+  CHECK_EQ(led_shown_after(LED_GREEN, LED_OFF, false), LED_GREEN);
+  CHECK_EQ(led_shown_after(LED_GREEN, LED_OFF, true), LED_OFF);
+}
+
 // ---------- detector_frames ----------
 static void test_frames() {
   HopResult r;
@@ -610,10 +719,14 @@ int main() {
   test_imu_baseline_and_python_agreement();
   test_imu_window_copy();
   test_pipeline_bookkeeping();
+  test_pipeline_led();
   test_imu_ring_eviction();
   test_audio_reuse_incremental();
   test_meta();
   test_frames();
+  test_led_rule();
+  test_led_off_due();
+  test_led_shown_after();
   printf("test_detector: %d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

@@ -3,6 +3,7 @@
 # 使い方（リポジトリの root から）: bash firmware/detector/host/test_detector.sh
 # g++ 1 本。data/ を使わない。Edge Impulse の SDK（firmware/detector/src/）を要らない（classify はテストの中のスタブ）。
 # audio_features / fft512 / imu_features は firmware/detector/ のリンク（→ firmware/bench/）を通して使う。
+# led_rule（#25）は足し、led_out.cpp は足さない（WiFiNINA。Arduino 依存）。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -14,7 +15,7 @@ CXX="${CXX:-g++}"
 mkdir -p "$OUT_DIR"
 "$CXX" -std=gnu++14 -O1 -Wall -Wextra -DAF_PROFILE=1 -I "$DET" \
     "$DET/host/test_detector.cpp" \
-    "$DET/audio_capture.cpp" "$DET/imu_capture.cpp" "$DET/pipeline.cpp" "$DET/detector_meta.cpp" \
+    "$DET/audio_capture.cpp" "$DET/imu_capture.cpp" "$DET/pipeline.cpp" "$DET/detector_meta.cpp" "$DET/led_rule.cpp" \
     "$DET/audio_features.cpp" "$DET/fft512.cpp" "$DET/imu_features.cpp" \
     -o "$OUT" -lm
 "$OUT"

@@ -12,6 +12,7 @@ static bool s_have_seq;
 static int s_swallow_ix = -1;
 static PipelineStats s_stats;
 static ImuWindow s_rows;                         // IMU の窓（固定配列。ヒープを使わない）
+static LedRule s_led;                            // LED の規則の状態（最後の陽性窓の開始。docs/decisions/0018）
 
 #if DETECTOR_PROFILE
 static uint32_t (*s_micros)(void) = nullptr;
@@ -27,6 +28,7 @@ void pipeline_init_stages() {
   s_last_seq = 0;
   memset(s_slice_t0, 0, sizeof(s_slice_t0));
   memset(&s_stats, 0, sizeof(s_stats));
+  led_rule_init(&s_led);
 }
 
 bool pipeline_init() {
@@ -45,7 +47,7 @@ uint32_t pipeline_window_end_ms(uint32_t t0_ms) {
 bool pipeline_prepare(const int16_t* slice16k, uint32_t t0_ms, uint32_t seq, const ImuWindowSource* imu, HopResult* r) {
   s_stats.hops++;
   r->reason = HOP_OK;
-  r->led = 0;
+  r->led = 0;                                  // 結果が出ない呼び出しの初期値
   r->imu_rows = 0;
 #if DETECTOR_PROFILE
   r->us_imu_copy = r->us_audio = r->us_imu_feat = r->us_nn = 0;
@@ -125,7 +127,7 @@ bool pipeline_hop(const int16_t* slice16k, uint32_t t0_ms, uint32_t seq, const I
   }
   r->prob = probs[s_swallow_ix];                          // float32
   r->positive = (r->prob >= M2_THRESHOLD) ? 1 : 0;        // float32 同士（m2_threshold.h、docs/decisions/0021）
-  r->led = 0;                                             // #25 まで消灯
+  r->led = led_rule_update(&s_led, r->window_t_ms, r->positive);   // 0018 の規則（1 黄 / 2 緑）
   s_stats.windows++;
   s_stats.last_reason = HOP_OK;
   return true;
