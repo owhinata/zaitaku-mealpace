@@ -7,7 +7,8 @@ Nano RP2040 Connect で動く M2 の検出器（Issue #24・#25）。IMU（104 H
 結果は DETECT と FEAT のフレームで USB シリアルに送る（形式は docs/decisions/0021、`docs/data-schema.md`）。
 生の音声波形は保存も送信もしない（docs/decisions/0005・0019・0020・0021。16 kHz の波形は取り込みの 2 面にしか無く、特徴量に変えた後に上書きされる）。
 
-基板の RGB LED を緑・黄で点け、介助者に嚥下の「目安」を示す（docs/decisions/0018）。LED は表示だけで、ベッド・車椅子・ブザーなどの制御は付けない。
+基板の RGB LED を緑・黄で点ける（docs/decisions/0018）。ただし基板の LED は喉に当てる面にあり、装着すると見えない（0018 の切り替え条件 (a)、#25）。
+介助者に見せる表示は表示器（別の基板、`firmware/indicator/`。PC 経由で DETECT の `led` を受ける。#29）で行う。LED は表示だけで、ベッド・車椅子・ブザーなどの制御は付けない。
 LED の状態は評価に使わない。
 
 ## 表示の意味
@@ -27,7 +28,7 @@ LED の状態は評価に使わない。
 
 ## 装置に貼る表示
 
-ケースの介助者側。本人の正面から見えにくい向きに貼る。
+表示器（`firmware/indicator/`）の介助者側に貼る。本人の正面から見えにくい向きにする。検出器の基板には貼らない（喉元で見えないため）。
 
 ```
 嚥下の目安（判定ではありません）
@@ -71,10 +72,13 @@ README は表示とカードの文面をそのまま載せる場所で、決ま�
 - DETECT の `led` は 0 消灯 / 1 黄 / 2 緑（`docs/data-schema.md`）で、実際に表示している状態（`led_out_state()`）。行に出るのは通常 1 / 2
   （消灯の時点は行に残らない。書き込みを飛ばした窓は前の状態のままで、0 のこともある）。PC 側の再計算との不一致は
   `analysis/evaluate_detector.py` の参考値に行数として出る。LED は評価に使わない。
+- 表示器が実際に何を表示したかは、検出器からも PC の記録からも分からない（`firmware/indicator/README.md`）。
 - 外付けに切り替える条件（docs/decisions/0018。どれか 1 つで、RP2040 の GPIO に直結した緑・黄の 2 灯へ。規則と文言は同じ）:
   (a) バンドやケースで隠れて、介助者側から見えない。
   (b) NINA への書き込みで `t_ms` の飛びが作業上の基準（1%）を超える、または 1 ホップの処理が 250 ms に収まらなくなる。
   (c) WiFiNINA を入れたビルドが通らない、または NINA のファームウェアの版で動かない。
+- (a) に当たった（#25）。切り替え先は GPIO 直結の 2 灯ではなく表示器（別基板の RGB LED、PC 経由、後に BLE）に変えた（人の決定、0018 の追記）。
+  規則と文言は同じ。
 
 ## ビルドと書き込み
 
@@ -97,6 +101,7 @@ cmake --build build-detector --target build && cmake --build build-detector --ta
 ## 記録と確認
 
 - 記録: USB を挿し直してから `.venv/bin/python tools/record.py --cond water --duration 90`（docs/decisions/0006）。
+- 表示器を使うとき: `--port` と `--indicator` に `/dev/serial/by-id/` のパス（`firmware/indicator/README.md`「ポートの見分け方」）。
 - 取りこぼしと送信の遅れ: `.venv/bin/python tools/check_session.py data/raw/<セッション>`。
 - `positive` の再採点と `led` の不一致: `.venv/bin/python analysis/evaluate_detector.py data/raw --sessions <セッション> --scorer analysis/m2_scorer.py`
   （参考値の「`led` と docs/decisions/0018 の規則からの再計算の不一致の行数」）。
@@ -104,5 +109,5 @@ cmake --build build-detector --target build && cmake --build build-detector --ta
 
 ## 確かめたこと・確かめていないこと
 
-`docs/log/` の #24 の節（2026-09-26）と #25 の節（実機の確認の後に書く）を参照。#25 で実機で確かめるのは、極性、黄の見え方、
+`docs/log/` の #24 の節（2026-09-26）と #25 の節、#29 の節を参照。#25 で実機で確かめるのは、極性、黄の見え方、
 1 回の書き込みの時間、`t_ms` の飛びへの影響、止めたときの消灯、嚥下に対する緑の遅れ、咳・首の動きでの緑、バンドとケースで隠れるか。

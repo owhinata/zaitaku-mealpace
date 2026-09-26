@@ -40,6 +40,12 @@ project(zaitaku_mealpace NONE)
 #   DETECTOR_PROFILE=1 のときだけ通る。
 #   LED は基板の RGB（WiFiNINA。deps で入る。#25、docs/decisions/0018。firmware/detector/README.md）。
 #   detector のビルドは同時に走らせない（arduino-cli がスケッチのパスでキャッシュを共有し、並列だと壊れる）。
+# 表示器（firmware/indicator/、#29）は別の基板。ビルドディレクトリも別にし、書き込みは表示器の基板だけを挿した状態か、
+# /dev/serial/by-id/ のパスで（検出器に書き込まないため）。基底フラグは付かない（EI を使わない）。WiFiNINA は deps で入る:
+#   cmake -S . -B build-indicator -DSKETCH_NAME=indicator -DPORT=/dev/serial/by-id/<表示器> -DPYTHON3=$PWD/.venv/bin/python3
+#   cmake --build build-indicator --target build && cmake --build build-indicator --target upload
+#   遅れの計測: -DBUILD_FLAGS="-DINDICATOR_PROFILE=1"（受けるたびに 1 バイト返す）。led_out.* と led_rule.h は firmware/detector/ へのリンク。
+#   detector と indicator のビルドは同時に走らせない（リンク先のソースを共有する）。
 
 set(FQBN "arduino:mbed_nano:nanorp2040connect" CACHE STRING "Arduino FQBN")
 set(PORT "/dev/ttyACM0" CACHE STRING "Serial port")
