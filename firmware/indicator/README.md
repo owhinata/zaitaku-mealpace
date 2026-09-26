@@ -70,10 +70,11 @@ LED は表示だけで、ベッド・車椅子・ブザーなどの制御は付�
 
 ## ビルドと書き込み
 
-`CMakeLists.txt` の表示器の節のとおり。書き込むときは表示器の基板だけを挿すか、`/dev/serial/by-id/` のパスを `-DPORT` に渡す（検出器に書き込まないため）。
+`CMakeLists.txt` の表示器の節のとおり。書き込むときは表示器の基板だけを挿すか、`ls -l /dev/serial/by-id/` で表示器の実体（`/dev/ttyACMx`）を確かめて `-DPORT` に渡す（検出器に書き込まないため）。
+`-DPORT` に by-id のリンクを渡すと、1200 bps のタッチの後にポートを見失って書き込みに失敗する（9/26 の実測）。記録と計測の `--port` / `--indicator` には by-id のパスを渡してよい。
 
 ```
-cmake -S . -B build-indicator -DSKETCH_NAME=indicator -DPORT=/dev/serial/by-id/<表示器> -DPYTHON3=$PWD/.venv/bin/python3
+cmake -S . -B build-indicator -DSKETCH_NAME=indicator -DPORT=/dev/ttyACM1 -DPYTHON3=$PWD/.venv/bin/python3
 cmake --build build-indicator --target build && cmake --build build-indicator --target upload
 ```
 
