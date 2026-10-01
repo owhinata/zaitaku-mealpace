@@ -1,5 +1,5 @@
 // led_rule.h — docs/decisions/0018 の LED の規則（Issue #25）。Arduino 依存なし（PC のテストでもビルドする）。
-// 値は DETECT の led と同じ（docs/data-schema.md: 0 消灯 / 1 黄 / 2 緑）。LED は嚥下の目安であり、評価には使わない。
+// 値は DETECT の led と同じ（docs/data-schema.md: 0 消灯 / 1 まだ確認していない目安 / 2 確認した目安。この基板の LED では 1 = 黄、2 = 緑）。LED は嚥下の目安であり、評価には使わない。
 // PC 側の再計算 analysis/led_rule.py と同じ式（firmware/detector/README.md）。
 //
 // 緑: 現在の窓（開始 w）を含めて、開始が [w − 1.75, w] にある陽性窓が 1 つ以上ある。黄: 窓の結果が出ていて緑の条件を満たさない。

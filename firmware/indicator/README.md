@@ -1,28 +1,48 @@
-# firmware/indicator/ — 表示器（LED の目安）
+# firmware/indicator/ — 表示器（LED マトリクスの目安）
 
-もう 1 枚の Nano RP2040 Connect の基板の RGB LED で、嚥下の「目安」を介助者に示す（Issue #29、docs/decisions/0018 の追記）。
+Arduino UNO R4 WiFi の 12×8 LED マトリクスで、嚥下の「目安」を形で介助者に示す（Issue #29・#32、docs/decisions/0018 の追記）。
 検出器（`firmware/detector/`）の基板の LED は喉に当てる面にあり、装着すると見えないため（0018 の切り替え条件 (a)、#25）、表示を別の基板に移した。
 表示器は PC から USB シリアルで状態を受ける。PC（`tools/record.py --indicator`）は、検出器から受けた DETECT の `led` を 1 バイトずつそのまま送る。
-規則（緑・黄の条件）は検出器が持ち、PC と表示器は計算しない。表示器が受けるのは状態の 1 バイトだけで、音声・特徴量・確率は受けない。
+規則（状態 1・2 の条件）は検出器が持ち、PC と表示器は計算しない。表示器が受けるのは状態の 1 バイトだけで、音声・特徴量・確率は受けない。
 LED は表示だけで、ベッド・車椅子・ブザーなどの制御は付けない。LED の状態は評価に使わない。
 
 ## 表示の意味
 
 表と条件は docs/decisions/0018（`firmware/detector/README.md`「表示の意味」と同じ）。表示器は検出器の表示を、PC を通る分だけ遅れて表示する。
+形は人が実機で見比べて決めた（0018 の追記、10/1）。
 
 | 表示 | 意味（介助者向け） |
 |---|---|
-| 緑 | 嚥下を確認した目安 |
-| 黄 | 嚥下をまだ確認していない目安 |
+| 微笑む顔 | 嚥下を確認した目安 |
+| 流れる波線（動画） | 嚥下をまだ確認していない目安 |
 | 消灯 | 動作していない |
+
+```
+流れる波線（6 フレーム。行 3〜5 だけ。他の行は消灯。左へ流れる）
+ 0: .##....##...   1: ##....##....   2: #....##....#   3: ....##....##   4: ...##....##.   5: ..##....##..
+    #..#..#..#..      ..#..#..#..#      .#..#..#..#.      #..#..#..#..      ..#..#..#..#      .#..#..#..#.
+    ....##....##      ...##....##.      ..##....##..      .##....##...      ##....##....      #....##....#
+
+微笑む顔
+............
+............
+...##..##...
+...##..##...
+............
+..#......#..
+...######...
+............
+```
 
 - 消灯になるのは、起動直後（PC から最初の状態が届くまで）と、状態が 1.0 秒以上届かないとき（検出器が止まった、`record.py` が止まった、どちらかの USB が抜けた）。
   表示器の `millis()` で測る。
-- 緑と黄は常時点灯。赤・点滅・明るさの段階・音は無い。
+- 顔は静止画。波線は 200 ms ごとに 1 列ずつ左へ流れ、1.2 秒で一巡する。どのフレームも点く数は同じで、点滅しない。時間が経っても速さも形も変わらない。
+  明るさは固定。赤はマトリクスの発光色で、意味は無い。音・文字・数字は無い。
+- 起動失敗（マトリクスのタイマが取れない）は `LED_BUILTIN`（D13、「L」の LED）の 200 ms 点滅。マトリクスは消灯のまま。
 
 ## 置き方
 
-- 表示器は食卓の介助者側に置き、LED を介助者に向ける。本人の正面から見えにくい向きにする（企画書 10章「表示は介助者側に向ける」、0018「文言」）。
+- 表示器は食卓の介助者側に置き、マトリクスの面を介助者に向ける。本人の正面から見えにくい向きにする（企画書 10章「表示は介助者側に向ける」、0018「文言」）。
 - 下の「装置に貼る表示」は表示器（のケースか台）の介助者側に貼る。カードは介助者に渡す。検出器の基板には貼らない（喉元で見えないため）。
 - 表示器の USB ケーブルは PC につなぐ。検出器とは別のポートになる（下の「ポートの見分け方」）。
 
@@ -30,19 +50,22 @@ LED は表示だけで、ベッド・車椅子・ブザーなどの制御は付�
 
 ```
 嚥下の目安（判定ではありません）
-緑: 嚥下を確認した目安（約 2 秒）
-黄: まだ確認していない目安
+微笑む顔: 嚥下を確認した目安（約 2 秒）
+流れる波線: まだ確認していない目安
+赤い色に意味はありません
 ```
 
 ## 介助者に渡すカード
 
 ```
-この光は嚥下の目安です。判定や指示ではありません。
-緑: 喉の動きと音から嚥下らしいと見た目安。約 2 秒で黄に戻ります。
-黄: まだ確認していない目安。時間が経っても色は変わりません。
+この表示は嚥下の目安です。判定や指示ではありません。
+微笑む顔: 喉の動きと音から嚥下らしいと見た目安。約 2 秒で波線に戻ります。
+流れる波線: まだ確認していない目安。時間が経っても形や速さは変わりません。
 消灯: 動いていません。
+赤い色に意味はありません（基板の光の色です）。
+顔は嚥下の目安で、食べ方のよしあしを表すものではありません。
 次の一口をいつにするかは、介助者が決めます。
-咳や首の動きの直後に緑が点くことがあります。
+咳や首の動きの直後に顔が出ることがあります。
 誤嚥（気管に入ること）が起きたかどうかは、この装置では分かりません。
 ```
 
@@ -60,18 +83,23 @@ LED は表示だけで、ベッド・車椅子・ブザーなどの制御は付�
 
 | ファイル | 役割 | Arduino / ライブラリの API |
 |---|---|---|
-| `indicator.ino` | `setup()`（`led_out_begin()`）、`loop()`（受けたバイトを読み、目標を決めて `led_out_set`） | `Serial`、`millis` |
-| `indicator_rx.h/.cpp` | 受けたバイト列から表示の目標を決める（0〜2 以外を捨てる、最後の有効なバイト、1.0 秒で消灯） | 無し（PC のテストでビルドする） |
-| `led_out.h/.cpp` | リンク → `../detector/led_out.*`。基板の RGB LED（NINA 経由）への書き込み。黄 = 赤＋緑。変化したときだけ書く | `WiFiNINA.h`、`NinaPin` 版の `pinMode` / `digitalWrite`。このファイルだけ |
+| `indicator.ino` | `setup()`（`Serial.begin(115200)`、`matrix_out_begin()`、`indicator_rx_init`）、`loop()`（受けたバイトを読み、目標を決めて `matrix_out_show`） | `Serial`、`millis` |
+| `indicator_rx.h/.cpp` | 受けたバイト列から表示の目標を決める（0〜2 以外を捨てる、最後の有効なバイト、1.0 秒で消灯。#29 のまま） | 無し（PC のテストでビルドする） |
+| `shape_seq.h/.cpp` | 目標の状態と時刻から、出すフレームの番号を決める（動画の位相、状態が変わったら最初から） | 無し（PC のテストでビルドする） |
+| `shapes.h` | 図形の表（`FRAMES`、`FRAME_MS`、状態ごとの最初のフレームと枚数）。生成物 | 無し |
+| `matrix_out.h/.cpp` | マトリクスの初期化と、フレームが変わったときだけの書き込み。起動失敗の `LED_BUILTIN` の点滅 | `Arduino_LED_Matrix.h`（`ArduinoLEDMatrix`、`begin`、`renderBitmap`）、`pinMode`・`digitalWrite`（`LED_BUILTIN`）。このファイルだけ |
 | `led_rule.h` | リンク → `../detector/led_rule.h`。状態の値（`LED_OFF` / `LED_YELLOW` / `LED_GREEN`）と `led_off_due`（1.0 秒） | 無し |
-| `host/test_indicator.cpp`・`test_indicator.sh` | `indicator_rx` の PC 上のテスト | 無し（PC の g++） |
+| `shapes/gen_shapes.py` | 図形の元（ASCII）と `shapes.h` の生成、`--check` | （PC の Python。標準ライブラリだけ） |
+| `host/test_indicator.cpp`・`test_indicator.sh` | `indicator_rx` と `shape_seq` と `shapes.h` の PC 上のテスト | 無し（PC の g++） |
 
-`led_out.cpp` と `led_rule.h` のコメントは検出器を主語にしている（検出器のファームウェアを変えないため直していない）。表示器では「DETECT の led」を「表示器が表示している状態」と読む。
+`led_rule.h` のコメントは検出器を主語にしている（検出器のファームウェアを変えないため直していない）。表示器では「DETECT の led」を「表示器が表示している状態」と読む。
+状態の値の名前（`LED_YELLOW` / `LED_GREEN`）は検出器と共有するので変えず、表示器では「状態 1 / 2」と読む。図形の名前は形で付ける（`SHAPE_WAVE` / `SHAPE_SMILE`）。
 
 ## ビルドと書き込み
 
-`CMakeLists.txt` の表示器の節のとおり。書き込むときは表示器の基板だけを挿すか、`ls -l /dev/serial/by-id/` で表示器の実体（`/dev/ttyACMx`）を確かめて `-DPORT` に渡す（検出器に書き込まないため）。
-`-DPORT` に by-id のリンクを渡すと、1200 bps のタッチの後にポートを見失って書き込みに失敗する（9/26 の実測）。記録と計測の `--port` / `--indicator` には by-id のパスを渡してよい。
+`CMakeLists.txt` の表示器の節のとおり。`SKETCH_NAME=indicator` のとき FQBN は自動で `arduino:renesas_uno:unor4wifi` になる（ボードコアは `deps` で入る）。
+書き込むときは `ls -l /dev/serial/by-id/` で表示器（名前に `UNO_WiFi_R4`）の実体（`/dev/ttyACMx`）を確かめて `-DPORT` に渡す（検出器に書き込まないため）。
+`-DPORT` に by-id のパスを渡すと、bossac に `serial/by-id/...` が渡って書き込みに失敗する（10/1 の下調べ）。1200 bps のタッチの後もポート名は変わらない。
 
 ```
 cmake -S . -B build-indicator -DSKETCH_NAME=indicator -DPORT=/dev/ttyACM1 -DPYTHON3=$PWD/.venv/bin/python3
@@ -79,11 +107,19 @@ cmake --build build-indicator --target build && cmake --build build-indicator --
 ```
 
 - 遅れの計測のビルド: `-DBUILD_FLAGS="-DINDICATOR_PROFILE=1"`（受けた塊ごとに表示している状態を 1 バイト返す）。記録には本番のビルド（`BUILD_FLAGS` 空）を使う。
-- PC 上のテスト: `bash firmware/indicator/host/test_indicator.sh`。
+- PC 上のテスト: `bash firmware/indicator/host/test_indicator.sh`（`shapes.h` が元と一致するかも見る）。
+- 図形を変えるときは、`shapes/gen_shapes.py` の元を直して `python3 firmware/indicator/shapes/gen_shapes.py` で `shapes.h` を作り直す。
+  形は人の決定なので、0018 に追記してから変える。`shapes.h` を直接書き換えない。
+- detector と indicator のビルドは同時に走らせない（`led_rule.h` のリンク先を共有する）。
 
 ## ポートの見分け方
 
-- 2 枚とも同じ製品なので、`/dev/ttyACM0` と `1` は挿した順で決まり、検出器を挿し直す（META のため）と番号が入れ替わることがある。
-  `ls -l /dev/serial/by-id/` のパス（基板ごとに違う番号を含む）で指定する。どちらがどちらかは、1 枚ずつ挿して `ls -l /dev/serial/by-id/` を見て控える。
-- 記録: 検出器の USB を挿し直してから `.venv/bin/python tools/record.py --port /dev/serial/by-id/<検出器> --indicator /dev/serial/by-id/<表示器> --cond water --duration 90`。
+- 検出器（Nano RP2040 Connect）と表示器（UNO R4 WiFi）は、`ls -l /dev/serial/by-id/` の名前が製品名で違う（表示器は `…UNO_WiFi_R4…`）。
+  `/dev/ttyACM0` と `1` は挿した順で決まり、検出器を挿し直す（META のため）と番号が入れ替わることがある。
+- 記録と計測の `--port` / `--indicator` には by-id のパスを渡してよい:
+  検出器の USB を挿し直してから `.venv/bin/python tools/record.py --port /dev/serial/by-id/<検出器> --indicator /dev/serial/by-id/<表示器> --cond water --duration 90`。
   表示器は挿し直さなくてよい（META を送らない）。
+
+## Nano RP2040 Connect の表示器（#29）
+
+#29 の RGB LED 版は `8680504` に残る（git の履歴）。今は使わない。

@@ -40,17 +40,25 @@ project(zaitaku_mealpace NONE)
 #   DETECTOR_PROFILE=1 のときだけ通る。
 #   LED は基板の RGB（WiFiNINA。deps で入る。#25、docs/decisions/0018。firmware/detector/README.md）。
 #   detector のビルドは同時に走らせない（arduino-cli がスケッチのパスでキャッシュを共有し、並列だと壊れる）。
-# 表示器（firmware/indicator/、#29）は別の基板。ビルドディレクトリも別にし、書き込みは表示器の基板だけを挿した状態で行うか、
-# ls -l /dev/serial/by-id/ で表示器の実体（/dev/ttyACMx）を確かめて -DPORT に渡す（検出器に書き込まないため。by-id のリンクを
-# -DPORT に渡すと 1200 bps のタッチの後にポートを見失って失敗する。9/26 の実測）。基底フラグは付かない（EI を使わない）。WiFiNINA は deps で入る:
+# 表示器（firmware/indicator/、#29・#32）は Arduino UNO R4 WiFi（LED マトリクス）。SKETCH_NAME=indicator のとき FQBN は自動で
+# arduino:renesas_uno:unor4wifi になる（ボードコアは deps で入る）。ビルドディレクトリは別にする。基底フラグは付かない（EI を使わない）:
 #   cmake -S . -B build-indicator -DSKETCH_NAME=indicator -DPORT=/dev/ttyACM1 -DPYTHON3=$PWD/.venv/bin/python3
 #   cmake --build build-indicator --target build && cmake --build build-indicator --target upload
-#   遅れの計測: -DBUILD_FLAGS="-DINDICATOR_PROFILE=1"（受けるたびに 1 バイト返す）。led_out.* と led_rule.h は firmware/detector/ へのリンク。
+# 書き込みの -DPORT は実体の /dev/ttyACMx を渡す。by-id のパスを渡すと bossac に serial/by-id/... が渡って失敗する（10/1 の下調べ）。
+# 1200 bps のタッチの後もポート名は変わらない。ls -l /dev/serial/by-id/ で表示器（名前に UNO_WiFi_R4）の実体を確かめてから渡す（検出器に書き込まないため）。
+#   遅れの計測: -DBUILD_FLAGS="-DINDICATOR_PROFILE=1"（受けるたびに 1 バイト返す）。led_rule.h は firmware/detector/ へのリンク。
 #   detector と indicator のビルドは同時に走らせない（リンク先のソースを共有する）。
 
-set(FQBN "arduino:mbed_nano:nanorp2040connect" CACHE STRING "Arduino FQBN")
-set(PORT "/dev/ttyACM0" CACHE STRING "Serial port")
 set(SKETCH_NAME "logger" CACHE STRING "firmware/ の下のスケッチ名")
+# FQBN はスケッチ名で決める（人が渡す値は無い）。表示器（indicator）だけが UNO R4 WiFi、他は Nano RP2040 Connect。
+# 普通の変数なので、前の configure で CACHE に残った FQBN（#29 までの build-indicator には Nano の値が残っている）は使わない。
+if(SKETCH_NAME STREQUAL "indicator")
+  set(FQBN "arduino:renesas_uno:unor4wifi")
+else()
+  set(FQBN "arduino:mbed_nano:nanorp2040connect")
+endif()
+message(STATUS "SKETCH_NAME=${SKETCH_NAME} FQBN=${FQBN}")
+set(PORT "/dev/ttyACM0" CACHE STRING "Serial port")
 set(BUILD_FLAGS "" CACHE STRING "arduino-cli の build.extra_flags に渡す追加フラグ")
 set(SKETCH "${CMAKE_SOURCE_DIR}/firmware/${SKETCH_NAME}")
 set(BUILD_OUT "${CMAKE_BINARY_DIR}/firmware/${SKETCH_NAME}")
@@ -69,6 +77,7 @@ find_program(PYTHON3 python3 REQUIRED)
 add_custom_target(deps
   COMMAND ${ARDUINO_CLI} core update-index
   COMMAND ${ARDUINO_CLI} core install arduino:mbed_nano
+  COMMAND ${ARDUINO_CLI} core install arduino:renesas_uno
   COMMAND ${ARDUINO_CLI} lib install Arduino_LSM6DSOX
   COMMAND ${ARDUINO_CLI} lib install WiFiNINA
   COMMAND ${PYTHON3} -m pip install -r ${CMAKE_SOURCE_DIR}/tools/requirements.txt

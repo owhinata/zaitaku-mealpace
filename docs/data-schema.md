@@ -61,7 +61,7 @@ data/raw/20261005-121500_self_meal/
 - `t_ms`: フレームの送信時刻（ヘッダの `t_ms`。装置の `millis()`）。`window_t_ms`: 窓 `[window_t_ms, window_t_ms + 1000)` の開始
 - `positive`: `1` = `prob` が凍結した閾値（`meta.json` の `threshold`）以上、`0` = 陰性。装置の 2 値の出力そのもの
 - `prob`: `swallow` の確率（0〜1。float32 を 9 桁の有効数字で書く）。装置が閾値と比べた値そのもので、PC 側で `positive == (prob >= threshold)` を丸めなしに確かめられる。咳のクラスの確率は載せない（docs/decisions/0019）
-- `led`: `0` 消灯 / `1` 黄 / `2` 緑（docs/decisions/0018）。この窓の結果を反映した後の状態。LED は嚥下の目安であり、評価には使わない
+- `led`: `0` 消灯 / `1` まだ確認していない目安 / `2` 確認した目安（docs/decisions/0018。検出器の基板の LED では `1` = 黄・`2` = 緑、表示器（`firmware/indicator/`）では `1` = 流れる波線・`2` = 微笑む顔）。この窓の結果を反映した後の状態。LED は嚥下の目安であり、評価には使わない
 - 評価（`analysis/evaluate_detector.py`）は `positive` と `events.csv` の `s` だけを使う。記録の範囲（`detect.csv` と `feat.csv` の時刻から取る。送信の遅れの上限 1.0 秒）は docs/decisions/0021
 
 ## feat.csv（検出器のみ。`self` のセッションで有効にする。`p1` で使うかは別途決める）

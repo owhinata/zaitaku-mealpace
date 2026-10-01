@@ -46,7 +46,7 @@ class DetectRow:
     window_t_ms: int
     positive: int
     prob: float
-    led: int                      # 装置が表示していた状態（0 消灯 / 1 黄 / 2 緑）。評価には使わない
+    led: int                      # 検出器が表示していた状態（0 消灯 / 1 まだ確認していない目安 / 2 確認した目安）。評価には使わない
 
 
 @dataclass(frozen=True, eq=False)

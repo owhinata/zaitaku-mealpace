@@ -1,7 +1,7 @@
 """detect.csv の positive と window_t_ms から LED の状態を再計算する（docs/decisions/0018、#25）。
 
 装置の firmware/detector/led_rule.h / led_rule.cpp と同じ式: 最後の陽性窓の開始 w_p を保持し、現在の窓の開始 w との差が
-GREEN_HOLD_MS 以下なら緑（2）、それ以外は黄（1）。陽性のたびに w_p を取り直す。消灯（0）は窓の結果が 1.0 秒出ないときで、
+GREEN_HOLD_MS 以下なら緑（2 = 確認した目安）、それ以外は黄（1 = まだ確認していない目安）。陽性のたびに w_p を取り直す。消灯（0）は窓の結果が 1.0 秒出ないときで、
 その時点は detect.csv の行に残らないので、ここでは出さない。LED は嚥下の目安であり、評価には使わない。
 純粋関数。analysis/ の他のモジュールを import しない。
 """

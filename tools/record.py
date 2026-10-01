@@ -15,7 +15,7 @@ SUBJECT / COND / POSITION / BAND / DURATION の環境変数を、対応する引
 ストリームのファイルは、そのストリームの最初のフレームが届いたときに作る。events.csv と meta.json は常に作る
 （docs/decisions/0021）。
 
---indicator <port> を付けると、DETECT を受けるたびに led（0 消灯 / 1 黄 / 2 緑）の 1 バイトだけを表示器
+--indicator <port> を付けると、DETECT を受けるたびに led（0 消灯 / 1 まだ確認していない目安 / 2 確認した目安）の 1 バイトだけを表示器
 （firmware/indicator/、Issue #29、docs/decisions/0018 の追記）へ送る。時刻・確率・特徴量は送らない。
 記録を始める前に表示器のポートが開けなければ、記録を始めない（セッションのフォルダを作らない）。
 記録を始めた後に送れなくなっても（USB が抜けたなど）記録は止めない（終了時に失敗の回数を表示する）。
@@ -41,7 +41,7 @@ STREAM_NAMES = {ID_IMU: "IMU", ID_AUDIO: "AUDIO", ID_ANALOG: "ANALOG", ID_DETECT
 IMU_PAYLOAD_LEN, DETECT_PAYLOAD_LEN = 24, 10
 FLOAT_FMT = ".9g"   # float32 が往復で一致する桁数（prob は閾値との比較を PC 側で丸めなしに再現するため）
 RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
-INDICATOR_BAUD = 115200            # 表示器のポート。USB CDC では値は使われない。1200 は使わない（ブートローダに入る）
+INDICATOR_BAUD = 115200            # 表示器のポート。表示器（UNO R4 WiFi）の Serial はブリッジ経由の UART で値が効くので、indicator.ino の Serial.begin(115200) と揃える。1200 は使わない（ブートローダに入る）
 INDICATOR_WRITE_TIMEOUT_S = 0.02   # 表示器が詰まったとき、送信のスレッドの 1 回の書き込みが止まる時間の上限
 
 
