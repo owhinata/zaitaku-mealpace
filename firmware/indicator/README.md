@@ -115,10 +115,10 @@ cmake --build build-indicator --target build && cmake --build build-indicator --
 ## ポートの見分け方
 
 - 検出器（Nano RP2040 Connect）と表示器（UNO R4 WiFi）は、`ls -l /dev/serial/by-id/` の名前が製品名で違う（表示器は `…UNO_WiFi_R4…`）。
-  `/dev/ttyACM0` と `1` は挿した順で決まり、検出器を挿し直す（META のため）と番号が入れ替わることがある。
+  `/dev/ttyACM0` と `1` は挿した順で決まり、挿し直すと番号が入れ替わることがある。
 - 記録と計測の `--port` / `--indicator` には by-id のパスを渡してよい:
-  検出器の USB を挿し直してから `.venv/bin/python tools/record.py --port /dev/serial/by-id/<検出器> --indicator /dev/serial/by-id/<表示器> --cond water --duration 90`。
-  表示器は挿し直さなくてよい（META を送らない）。
+  `.venv/bin/python tools/record.py --port /dev/serial/by-id/<検出器> --indicator /dev/serial/by-id/<表示器> --cond water --duration 90`。
+  `record.py` が開始時に合図を送って検出器から META を受けるので、どちらの基板も挿し直さなくてよい（#33、docs/decisions/0006 の追記）。
 
 ## Nano RP2040 Connect の表示器（#29）
 
