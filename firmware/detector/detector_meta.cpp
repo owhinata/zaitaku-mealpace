@@ -34,3 +34,7 @@ int detector_meta_build(char* buf, size_t cap, uint32_t project_id, uint32_t dep
   if (!put(buf, cap, &len, "]}")) return -1;
   return (int)len;
 }
+
+bool detector_meta_is_request(int c) {
+  return c == (int)DETECTOR_META_REQUEST;
+}

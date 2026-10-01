@@ -1,5 +1,5 @@
 // firmware/detector/host/test_detector.cpp — 検出器の Arduino に依存しないモジュールの PC 上のテスト（Issue #24 plan 第 15 節 1）。
-// 対象: audio_capture、imu_capture、pipeline の帳簿（classify はスタブ）、detector_meta、detector_frames、led_rule（#25）。
+// 対象: audio_capture、imu_capture、pipeline の帳簿（classify はスタブ）、detector_meta（合図のバイトの見分けは #33）、detector_frames、led_rule（#25）。
 // data/ を使わない。Edge Impulse の SDK を要らない。実行: bash firmware/detector/host/test_detector.sh
 //
 // IMU の valid の突き合わせ: 合成の t_ms（gen_alt: 0 から +9, +10 を交互に 2100 未満まで）を analysis/features.py の
@@ -601,6 +601,19 @@ static void test_meta() {
   CHECK_EQ(detector_meta_build(small, sizeof small, 1, 2), -1);
 }
 
+// 合図のバイト（Issue #33）: 'M' だけが真。表示器の値 0/1/2、小文字、他の文字、受けていない −1、上位ビットの立ったバイトは偽
+static void test_meta_request() {
+  CHECK_EQ(DETECTOR_META_REQUEST, 0x4D);
+  CHECK(detector_meta_is_request('M'));
+  CHECK(!detector_meta_is_request('m'));
+  CHECK(!detector_meta_is_request(0));
+  CHECK(!detector_meta_is_request(1));
+  CHECK(!detector_meta_is_request(2));
+  CHECK(!detector_meta_is_request('A'));
+  CHECK(!detector_meta_is_request(-1));
+  CHECK(!detector_meta_is_request(0xCD));
+}
+
 // ---------- led_rule（docs/decisions/0018。analysis/test_led_rule.py と同じ入力の表。値は両方に書いてある） ----------
 struct LedCase { const char* name; std::vector<uint32_t> w; std::vector<uint8_t> positive; std::vector<uint8_t> led; };
 
@@ -723,6 +736,7 @@ int main() {
   test_imu_ring_eviction();
   test_audio_reuse_incremental();
   test_meta();
+  test_meta_request();
   test_frames();
   test_led_rule();
   test_led_off_due();

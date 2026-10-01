@@ -22,6 +22,7 @@
   申告値）。次元数の確定は音の式の記録（#21）。
 - 検出器の META フレームは `fw`（`detector`）、`imu_hz`、`audio_hz`、`window_ms`、`hop_ms`、`threshold`、`model`（EI のプロジェクト ID と deploy version）、
   `feature_set`（音の式の記録の番号）、`feature_names` を持つ。`record.py` は今までどおりトップレベルに merge する（0006）。
+  検出器は PC からの合図（1 バイト `M`）で同じ META を送り直せる（0006 の追記、#33）。
 - 検出器は `0x02` AUDIO を送らない（0005）。FEAT は変換後の特徴量で、0005 が禁じる「生の音声波形の保存・送信」に当たらない。ただし生の計測データとして扱い、
   `data/raw/` の外に出さず、コミットしない。`self` のセッションで有効にし、`p1` で使うかは別に決める。
 

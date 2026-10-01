@@ -5,16 +5,20 @@
 //
 // 生の音声波形は保存も送信もしない（CLAUDE.md、docs/decisions/0005）: 16 kHz の波形は audio_capture の 2 面（最長 0.5 秒）にしか
 // 無く、pipeline が audio_reuse_push に渡して間引いた後は次のスライスで上書きされる。音声のフレーム（frame.h の AUDIO の ID）を
-// 送る経路は無い（送信関数の呼び出しは下の META・DETECT・FEAT の 3 箇所だけ）。
-// 装置が出す文字列は META（1 回）、DETECTOR_PROFILE の統計行（数字と見出しだけ）、SDK のエラー文だけ。
+// 送る経路は無い（送信関数の呼び出しは下の 4 箇所だけ: META が setup() と合図への応答の 2 箇所、DETECT、FEAT。送るフレームの種類は 3 つ）。
+// 装置が出す文字列は META（起動時 1 回と、合図 'M' を受けたとき）、DETECTOR_PROFILE の統計行（数字と見出しだけ）、SDK のエラー文だけ。
 // サンプル・特徴量・確率を文字列で出すコードは書かない。
+//
+// 合図（Issue #33、docs/decisions/0006 の追記）: loop() の先頭で 20 ms ごとに受信を確かめ、1 バイト 'M'（DETECTOR_META_REQUEST）を受けたら
+// setup() で作った同じ META（meta_buf、s_meta_len。setup() の後は書き換えない）を 1 回送り直す。tools/record.py は始めるときに 'M' を送り、
+// META を受けてから記録を始める。受けたバイトは合図かどうかを見て捨てる（送り返さない、保存しない）。
 //
 // LED は docs/decisions/0018 の規則で緑・黄を点ける（嚥下の目安。規則は led_rule、書き込みは led_out。README.md）。
 // 窓の結果が 1.0 秒出なければ loop() の millis() のタイムアウトで消灯する。DETECT の led は実際に表示している状態（led_out_state）。
 // 閾値は m2_threshold.h の M2_THRESHOLD（float32 同士で比べる）。
 //
 // Arduino / mbed の API を呼ぶのはこのファイルと sensors.cpp、led_out.cpp（基板の RGB LED）だけ（docs/decisions/0001）。
-// このファイルで使うのは Serial、millis、micros、LED_BUILTIN、delay と、DETECTOR_PROFILE のときの mbed のメモリトレースと
+// このファイルで使うのは Serial（begin・write・available・read）、millis、micros、LED_BUILTIN、delay と、DETECTOR_PROFILE のときの mbed のメモリトレースと
 // RTX のスレッド構造体（bench.ino と同じ流儀）。
 //
 // ビルド（CMakeLists.txt。SKETCH_NAME=detector で基底フラグ -I firmware/detector/src -DEI_PORTING_MBED=0 -DAF_PROFILE=1
@@ -23,7 +27,8 @@
 //   cmake --build build-detector --target build && cmake --build build-detector --target upload
 //   計測: -DBUILD_FLAGS="-DDETECTOR_PROFILE=1"（40 ホップごとに統計行）、FEAT を送らない: -DBUILD_FLAGS="-DDETECTOR_SEND_FEAT=0"
 //   logger に戻す: build（SKETCH_NAME=logger）で build → upload
-// 記録: USB を挿し直してから .venv/bin/python tools/record.py --cond water --duration 60（docs/decisions/0006）。
+// 記録: .venv/bin/python tools/record.py --cond water --duration 60（record.py が合図を送り META を受けてから始める。
+//   挿し直しは要らない。docs/decisions/0006）。
 //
 // DETECTOR_SEND_FEAT（既定 1）: FEAT を送るか。self の記録は送る。p1 の扱いは別に決める（docs/decisions/0021）。
 // DETECTOR_PROFILE（既定 0）: 1 で本番と同じ経路を動かしながら各段の時間・ヒープ・スタックを測り、10 秒ごとに統計行を 1 行出す
@@ -65,8 +70,12 @@
 #endif
 
 static const uint32_t IMU_SETTLE_MS = 5;   // スライスが READY になってから IMU の最後の行を待つ余裕
-static char meta_buf[DETECTOR_META_CAP];
+static char meta_buf[DETECTOR_META_CAP];   // setup() で作り、その後は書き換えない（合図への応答も同じバッファを送る）
+static int s_meta_len = 0;                 // meta_buf の長さ（detector_meta_build の戻り値）
 static uint32_t s_last_result_ms = 0;      // 直近に窓の結果が出た millis()（1.0 秒の消灯のタイムアウト）
+static const uint32_t META_POLL_MS = 20;   // 合図の受信を確かめる間隔（loop() の空回りで毎回 Serial.available() を呼ばない）
+static const int META_POLL_MAX_BYTES = 64; // 1 回の確認で読む最大のバイト数
+static uint32_t s_meta_poll_ms = 0;        // 前回の確認の millis()
 
 // ---------- 計測（DETECTOR_PROFILE = 1 のときだけ。出すのは数字と見出しだけ） ----------
 #if DETECTOR_PROFILE
@@ -117,6 +126,8 @@ static uint32_t prof_wait_max_ms = 0;     // この期間の w1 + 5 の待ちの
 static uint32_t prof_rows_min = 0xFFFFFFFFu, prof_rows_max = 0;   // この期間の IMU の窓の行数（無効だった窓も含む）
 static uint32_t prof_last_emit_ms = 0;
 static uint32_t prof_led_begin_ms = 0;    // setup() の led_out_begin の所要 [ms]
+static uint32_t prof_meta_resends = 0;    // 累計: 合図で META を送り直した回数（#33）
+static uint32_t prof_meta_send_max = 0;   // 累計: 合図による META の frame_send 1 回の所要の最大 [µs]（#33）
 static char prof_line[1024];
 
 static void sort_u32(uint32_t* a, uint32_t n) {
@@ -149,6 +160,8 @@ static int put_ms(char* buf, size_t cap, const char* name, ProfSeries* s, uint32
 //   imu_rows_total（10 秒で約 1040 増えるはず）・imu_polls）。total_max・wall_max が 250 ms を超えていれば追いついていない。
 //   total・wall には LED の書き込みの時間が入る（send には入らない）。led_max は状態変更 1 回分、led_write_max は digitalWrite 1 回分。
 //   led_skipped が増え続ければ NINA の準備ができていない（その窓の DETECT の led は前の状態のまま）。
+//   合図（#33）: 累計: meta_resends（合図で META を送り直した回数）meta_send_max [µs]（合図による META の frame_send 1 回の所要の最大）。
+//   再送は loop() の先頭でホップの計測の外にあるので total には入らない。READY の後に再送が入ると wall にだけ出る（wall_max と並べて見る）。
 static void prof_emit() {
   SensorStats ss; sensors_stats(&ss);
   PipelineStats ps; pipeline_stats(&ps);
@@ -172,7 +185,8 @@ static void prof_emit() {
                " last_reason=%u imu_rows_last=%lu classify_err_last=%ld"
                " slices_taken=%lu slices_ready_max=%lu dropped_chunks=%lu pdm_odd_chunks=%lu pdm_gaps=%lu pdm_chunks_total=%lu pdm_bytes_last=%lu"
                " pdm_cb_max=%lu imu_rows_total=%lu imu_polls=%lu heap_peak=%lu stack_main=%lu stack_imu=%lu"
-               " led_write_max=%lu led_writes=%lu led_skipped=%lu led_state=%u led_begin_ms=%lu\n",
+               " led_write_max=%lu led_writes=%lu led_skipped=%lu led_state=%u led_begin_ms=%lu"
+               " meta_resends=%lu meta_send_max=%lu\n",
                (unsigned long)prof_wait_max_ms,
                (unsigned long)(prof_rows_min == 0xFFFFFFFFu ? 0 : prof_rows_min), (unsigned long)prof_rows_max,
                (unsigned long)ps.hops, (unsigned long)ps.windows, (unsigned long)ps.not_filled, (unsigned long)ps.resets,
@@ -183,7 +197,8 @@ static void prof_emit() {
                (unsigned long)ss.pdm_cb_max_us, (unsigned long)ss.imu_rows_total, (unsigned long)ss.imu_polls,
                (unsigned long)heap_peak, (unsigned long)stack_high_water(), (unsigned long)ss.imu_stack_high_water,
                (unsigned long)led_out_write_max_us(), (unsigned long)led_out_writes(), (unsigned long)led_out_skipped(),
-               (unsigned)led_out_state(), (unsigned long)prof_led_begin_ms);
+               (unsigned)led_out_state(), (unsigned long)prof_led_begin_ms,
+               (unsigned long)prof_meta_resends, (unsigned long)prof_meta_send_max);
   if (k > 0) len += k;
   if (len >= sizeof prof_line) len = sizeof prof_line - 1;
   Serial.write((const uint8_t*)prof_line, len);   // 数字と見出しだけ（サンプル・特徴量・確率は出さない）
@@ -219,6 +234,30 @@ static void prof_tick() {
 }
 #endif  // DETECTOR_PROFILE
 
+// ---------- 合図（#33） ----------
+
+// 20 ms ごとに受信を確かめ、合図 'M' があれば META を 1 回送り直す（loop() の先頭から毎回呼ぶ）。
+// 1 回の確認で読むのは最大 META_POLL_MAX_BYTES。合図が何個あっても送るのは 1 回。他のバイトは捨てる。
+static void meta_poll() {
+  uint32_t now = millis();
+  if ((uint32_t)(now - s_meta_poll_ms) < META_POLL_MS) return;
+  s_meta_poll_ms = now;
+  bool request = false;
+  for (int i = 0; i < META_POLL_MAX_BYTES && Serial.available() > 0; i++) {
+    if (detector_meta_is_request(Serial.read())) request = true;
+  }
+  if (!request) return;
+#if DETECTOR_PROFILE
+  uint32_t t0 = micros_u32();
+#endif
+  frame_send(Serial, FRAME_META, millis(), (const uint8_t*)meta_buf, (uint16_t)s_meta_len);
+#if DETECTOR_PROFILE
+  uint32_t us = micros_u32() - t0;
+  prof_meta_resends++;
+  if (us > prof_meta_send_max) prof_meta_send_max = us;
+#endif
+}
+
 // ---------- 入口 ----------
 
 static void fail_blink() {
@@ -237,8 +276,8 @@ void setup() {
 #endif
   // 表と推論の前提を先に整え（数十 ms）、それからセンサを始める（起動直後のスライスを捨てないため）
   if (!pipeline_init()) fail_blink();
-  int n = detector_meta_build(meta_buf, sizeof meta_buf, classify_project_id(), classify_deploy_version());
-  if (n < 0) fail_blink();
+  s_meta_len = detector_meta_build(meta_buf, sizeof meta_buf, classify_project_id(), classify_deploy_version());
+  if (s_meta_len < 0) fail_blink();
   // RGB LED（NINA）の初期化は約 760 ms 止まるので、PDM の取り込みが始まる前に済ませる。最初の窓の結果までは消灯のまま
 #if DETECTOR_PROFILE
   uint32_t t_led0 = millis();
@@ -248,7 +287,8 @@ void setup() {
   prof_led_begin_ms = millis() - t_led0;
 #endif
   if (!sensors_begin()) fail_blink();
-  frame_send(Serial, FRAME_META, millis(), (const uint8_t*)meta_buf, (uint16_t)n);
+  frame_send(Serial, FRAME_META, millis(), (const uint8_t*)meta_buf, (uint16_t)s_meta_len);   // 起動時の 1 回（挿し直した場合の互換）
+  s_meta_poll_ms = millis();
 #if DETECTOR_PROFILE
   stack_fill();
   prof_last_emit_ms = millis();
@@ -261,6 +301,7 @@ void loop() {
 #if DETECTOR_PROFILE
   prof_tick();
 #endif
+  meta_poll();   // 合図 'M' を受けていれば META を送り直す（20 ms ごと。#33）
 #if DETECTOR_PROF_STOP_AFTER_MS > 0
   if ((uint32_t)millis() >= (uint32_t)DETECTOR_PROF_STOP_AFTER_MS) return;   // 計測ビルドだけ: スライスを取らない（消灯の確認）
 #endif

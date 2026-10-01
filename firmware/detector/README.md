@@ -5,6 +5,7 @@
 Nano RP2040 Connect で動く M2 の検出器（Issue #24・#25）。IMU（104 Hz）と PDM マイク（16 kHz）を読み、0.25 秒ごとに
 1.0 秒窓の特徴量 29 次元（docs/decisions/0020）を計算し、Edge Impulse の書き出し（`src/`、int8）で推論して、陽性・陰性の 2 値を出す。
 結果は DETECT と FEAT のフレームで USB シリアルに送る（形式は docs/decisions/0021、`docs/data-schema.md`）。
+META は起動時に 1 回送り、`loop()` の先頭で 20 ms ごとに受信を確かめて、PC から合図 `'M'` を受けたら同じ META を送り直す（他のバイトは捨てる。#33、docs/decisions/0006 の追記）。
 生の音声波形は保存も送信もしない（docs/decisions/0005・0019・0020・0021。16 kHz の波形は取り込みの 2 面にしか無く、特徴量に変えた後に上書きされる）。
 
 基板の RGB LED を緑・黄で点ける（docs/decisions/0018）。ただし基板の LED は喉に当てる面にあり、装着すると見えない（0018 の切り替え条件 (a)、#25）。
@@ -104,7 +105,8 @@ cmake --build build-detector --target build && cmake --build build-detector --ta
 
 ## 記録と確認
 
-- 記録: USB を挿し直してから `.venv/bin/python tools/record.py --cond water --duration 90`（docs/decisions/0006）。
+- 記録: `.venv/bin/python tools/record.py --cond water --duration 90`
+  （`record.py` が合図を送り META を受けてから始める。挿し直しは要らない。docs/decisions/0006）。
 - 表示器を使うとき: `--port` と `--indicator` に `/dev/serial/by-id/` のパス（`firmware/indicator/README.md`「ポートの見分け方」）。
 - 取りこぼしと送信の遅れ: `.venv/bin/python tools/check_session.py data/raw/<セッション>`。
 - `positive` の再採点と `led` の不一致: `.venv/bin/python analysis/evaluate_detector.py data/raw --sessions <セッション> --scorer analysis/m2_scorer.py`

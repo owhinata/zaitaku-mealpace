@@ -4,9 +4,12 @@
 pty は使わない。record.Session と record.read_frames を直接呼ぶ。フレームは firmware/logger/frame.h と同じ規則で
 build_frame が作る。出力先は tempfile で、data/raw/ は読み書きしない。
 r10〜r17 は表示器への転送（--indicator、Issue #29）。表示器のシリアルは偽物（FakeWriter など）で、実機を使わない。
+r18〜r24 は開始時の合図と META の待ち（Issue #33）。record.main() を偽物の検出器（FakeDetector）で通す。record.serial.Serial と
+record.RAW_DIR（tempfile）と sys.argv・sys.stdin（tty でない）を差し替え、record.META_WAIT_S を短くする。
 """
 from __future__ import annotations
-import contextlib, csv, io, json, os, serial, struct, tempfile, threading, time, unittest, wave
+import contextlib, csv, io, json, os, serial, signal, struct, sys, tempfile, threading, time, unittest, wave
+from unittest import mock
 from pathlib import Path
 
 import record
@@ -94,6 +97,60 @@ class BlockingWriter(FakeWriter):
         self.entered.set()
         self.release.wait()
         return super().write(data)
+
+
+class FakeDetector:
+    """検出器の代わり（#33）。pre は合図の前から届いていたバイト（1 回の read() で返す）。合図 `M` を書かれた後は
+    chunks を 1 回の read() に 1 つずつ返し、尽きたら少し待って空を返す。write_error / write_result で合図の失敗を真似る。"""
+
+    def __init__(self, chunks=(), pre: bytes = b"", write_error=None, write_result=None):
+        self.pre = pre
+        self.chunks = list(chunks)
+        self.write_error = write_error
+        self.write_result = write_result
+        self.written = bytearray()
+        self.requested = False
+        self.closed = False
+        self.kwargs = {}
+
+    def write(self, data: bytes) -> int:
+        if self.write_error is not None:
+            raise self.write_error
+        self.written += data
+        if data == record.META_REQUEST:
+            self.requested = True
+        return len(data) if self.write_result is None else self.write_result
+
+    def read(self, n: int) -> bytes:
+        if self.pre:
+            d, self.pre = self.pre, b""
+            return d
+        if self.requested and self.chunks:
+            return self.chunks.pop(0)
+        time.sleep(0.005)
+        return b""
+
+    def close(self):
+        self.closed = True
+
+
+DET_PORT, IND_PORT = "/fake/detector", "/fake/indicator"
+
+
+def meta_bytes(**kw) -> bytes:
+    return json.dumps(kw).encode("utf-8")
+
+
+DET_META = {"fw": "detector", "threshold": 0.95, "model": {"source": "edge-impulse", "project_id": 1, "deploy_version": 2},
+            "feature_set": "m2-0020", "feature_names": [f"x{i}" for i in range(N_FEAT)]}
+
+
+def det(w: int, led: int = 1) -> bytes:
+    return build_frame(record.ID_DETECT, w + 1205, detect_payload(w, 0.5, 0, led))
+
+
+def feat(w: int) -> bytes:
+    return build_frame(record.ID_FEAT, w + 1206, feat_payload(w, [float(w)] * N_FEAT))
 
 
 def wait_until(pred, timeout: float = 1.0) -> bool:
@@ -404,6 +461,276 @@ class IndicatorForwarderTest(unittest.TestCase):
             bw.release.set()                                   # スレッドを終わらせる
             fwd2._thread.join(timeout=1.0)
         self.assertFalse(fwd2._thread.is_alive())
+
+
+class MetaStartTest(unittest.TestCase):
+    """開始時の合図と META の待ち（Issue #33 plan 2.3、4.1 r18〜r24）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.raw = Path(self._tmp.name)
+        old_term = signal.getsignal(signal.SIGTERM)
+        self.addCleanup(signal.signal, signal.SIGTERM, old_term)   # main() が SIGTERM の扱いを変えるので戻す
+
+    def run_main(self, detector: FakeDetector, *args: str, indicator: FakeWriter | None = None,
+                 wait_s: float = 0.3) -> tuple[int, str]:
+        """record.main() を偽物で通す。(終了コード, 標準出力と標準エラー) を返す。"""
+        def fake_serial(port, baud, **kw):
+            if port == DET_PORT:
+                detector.kwargs = kw
+                return detector
+            if port == IND_PORT and indicator is not None:
+                return indicator
+            raise serial.SerialException(f"fake: {port} が無い")
+
+        argv = ["record.py", "--port", DET_PORT, *args]
+        if indicator is not None:
+            argv += ["--indicator", IND_PORT]
+        out = io.StringIO()
+        code = 0
+        with mock.patch.object(record.serial, "Serial", fake_serial), mock.patch.object(record, "RAW_DIR", self.raw), \
+                mock.patch.object(record, "META_WAIT_S", wait_s), mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(sys, "stdin", io.StringIO()), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            try:
+                record.main()
+            except SystemExit as e:
+                if e.code is None:
+                    code = 0
+                elif isinstance(e.code, int):
+                    code = e.code
+                else:
+                    print(e.code)
+                    code = 1
+        return code, out.getvalue()
+
+    def sessions(self) -> list[Path]:
+        return sorted(p for p in self.raw.iterdir() if p.is_dir())
+
+    def one_session(self) -> Path:
+        dirs = self.sessions()
+        self.assertEqual(len(dirs), 1, dirs)
+        return dirs[0]
+
+    def test_r18_request_once_skip_before_meta_carry_over_after(self):
+        for with_ind in (False, True):
+            with self.subTest(indicator=with_ind):
+                for p in self.sessions():
+                    for f in p.iterdir():
+                        f.unlink()
+                    p.rmdir()
+                # META の前に DETECT・FEAT（記録の開始前）。META と同じ read() の後ろに DETECT(led 2)
+                d = FakeDetector([det(1000, 1) + feat(1000) + build_frame(record.ID_META, 100, meta_bytes(**DET_META)) + det(1250, 2)])
+                ind = FakeWriter() if with_ind else None
+                code, out = self.run_main(d, "--duration", "0.2", indicator=ind)
+                self.assertEqual(code, 0, out)
+                self.assertEqual(bytes(d.written), b"M")                 # 合図はちょうど 1 回
+                self.assertEqual(d.kwargs.get("write_timeout"), record.DETECTOR_WRITE_TIMEOUT_S)
+                self.assertIn("META を受けました（fw=detector）", out)
+                sd = self.one_session()
+                rows = read_csv(sd / "detect.csv")
+                self.assertEqual([r[1] for r in rows[1:]], ["1250"])      # META の前の 1000 は書かない
+                self.assertFalse((sd / "feat.csv").exists())
+                self.assertIn("  META: 1", out)
+                self.assertIn("  DETECT: 1", out)
+                self.assertNotIn("FEAT", out)                             # 開始前の FEAT は数えない
+                if with_ind:
+                    self.assertEqual(bytes(ind.written), b"\x02")      # 引き継いだ DETECT の led が表示器へ（C4）
+                    self.assertTrue(ind.closed)
+                    self.assertNotIn(b"M", bytes(ind.written))
+
+    def test_r18b_wait_meta_returns_meta_and_leaves_rest(self):
+        d = FakeDetector([det(1000) + build_frame(record.ID_META, 100, meta_bytes(**DET_META)) + det(1250)[:7]])
+        d.requested = True
+        stats = {"ok": {}, "xor_err": 0}
+        buf = bytearray()
+        got = record.wait_meta(d, 0.3, "water", stats, buf)
+        self.assertIsNotNone(got)
+        t_ms, payload, meta = got
+        self.assertEqual((t_ms, meta["fw"]), (100, "detector"))
+        self.assertEqual(json.loads(payload), DET_META)
+        self.assertEqual(stats, {"ok": {record.ID_META: 1}, "xor_err": 0})
+        self.assertEqual(bytes(buf), det(1250)[:7])                     # 途中のフレームは次の段へ
+
+    def test_r19_no_meta_stops_without_folder(self):
+        cases = {"detect only": [det(1000) + feat(1000), det(1250)], "nothing": []}
+        for name, chunks in cases.items():
+            for with_ind in (False, True):
+                with self.subTest(name, indicator=with_ind):
+                    d = FakeDetector(chunks)
+                    ind = FakeWriter() if with_ind else None
+                    code, out = self.run_main(d, "--duration", "0.2", indicator=ind, wait_s=0.15)
+                    self.assertEqual(code, 1, out)
+                    self.assertIn("META が 0.15 秒以内に届きませんでした。記録を始めません", out)
+                    self.assertIn("logger", out)
+                    self.assertNotIn("recording...", out)
+                    self.assertEqual(self.sessions(), [])
+                    self.assertTrue(d.closed)
+                    if with_ind:
+                        self.assertTrue(ind.closed)
+                        self.assertEqual(bytes(ind.written), b"")
+
+    def test_r20_two_metas_same_meta_json(self):
+        m = build_frame(record.ID_META, 100, meta_bytes(**DET_META))
+        m2 = build_frame(record.ID_META, 900, meta_bytes(**DET_META))
+        code, out = self.run_main(FakeDetector([m, m2 + det(1000)]), "--duration", "0.2")
+        self.assertEqual(code, 0, out)
+        two = json.loads((self.one_session() / "meta.json").read_text(encoding="utf-8"))
+        self.assertIn("  META: 2", out)
+        for p in self.sessions():
+            for f in p.iterdir():
+                f.unlink()
+            p.rmdir()
+        code, out = self.run_main(FakeDetector([m + det(1000)]), "--duration", "0.2")
+        self.assertEqual(code, 0, out)
+        one = json.loads((self.one_session() / "meta.json").read_text(encoding="utf-8"))
+        self.assertIn("  META: 1", out)
+        for k in ("fw", "threshold", "model", "feature_names"):
+            self.assertEqual(two[k], DET_META[k])
+        two.pop("firmware_sha"); one.pop("firmware_sha")
+        self.assertEqual(two, one)
+
+    def test_r21_request_write_fails_stops(self):
+        cases = {"exception": dict(write_error=serial.SerialTimeoutException("fake: write timeout")),
+                 "oserror": dict(write_error=OSError("fake: gone")),
+                 "zero bytes": dict(write_result=0)}
+        for name, kw in cases.items():
+            with self.subTest(name):
+                d = FakeDetector([build_frame(record.ID_META, 100, meta_bytes(**DET_META))], **kw)
+                code, out = self.run_main(d, "--duration", "0.2")
+                self.assertEqual(code, 1, out)
+                self.assertIn("検出器に合図を書けません", out)
+                self.assertEqual(self.sessions(), [])
+                self.assertTrue(d.closed)
+        # 検出器のポートが開けない
+        code, out = self.run_main(FakeDetector(), "--port", "/fake/none", "--duration", "0.2")
+        self.assertEqual(code, 1, out)
+        self.assertIn("検出器のポートを開けません", out)
+        self.assertEqual(self.sessions(), [])
+
+    def test_r22_unusable_meta_keeps_waiting(self):
+        bad_xor = bytearray(build_frame(record.ID_META, 100, meta_bytes(**DET_META)))
+        bad_xor[-1] ^= 0xFF
+        bad = {
+            "xor": bytes(bad_xor),
+            "not json": build_frame(record.ID_META, 100, b"{fw: detector"),
+            "not utf-8": build_frame(record.ID_META, 100, b"\xff\xfe"),
+            "list": build_frame(record.ID_META, 100, b'["fw", "detector"]'),
+            "no fw": build_frame(record.ID_META, 100, meta_bytes(threshold=0.9)),
+            "fw null": build_frame(record.ID_META, 100, meta_bytes(fw=None)),
+            "fw number": build_frame(record.ID_META, 100, meta_bytes(fw=1)),
+            "fw empty": build_frame(record.ID_META, 100, meta_bytes(fw="")),
+        }
+        for name, frame in bad.items():
+            with self.subTest(name):
+                d = FakeDetector([frame + det(1000)])
+                code, out = self.run_main(d, "--duration", "0.2", wait_s=0.15)
+                self.assertEqual(code, 1, out)
+                self.assertIn("META が 0.15 秒以内に届きませんでした", out)
+                self.assertEqual(self.sessions(), [])
+        # 届かない扱いの META の後に使える META が来れば、そこから始まる
+        d = FakeDetector([bad["fw null"] + det(900), build_frame(record.ID_META, 200, meta_bytes(**DET_META)) + det(1000)])
+        code, out = self.run_main(d, "--duration", "0.2")
+        self.assertEqual(code, 0, out)
+        self.assertEqual([r[1] for r in read_csv(self.one_session() / "detect.csv")[1:]], ["1000"])
+        self.assertIn("  META: 1", out)
+
+    def test_r22b_detector_meta_keys_and_meal(self):
+        for key in ("threshold", "model", "feature_names"):
+            with self.subTest(missing=key):
+                m = {k: v for k, v in DET_META.items() if k != key}
+                code, out = self.run_main(FakeDetector([build_frame(record.ID_META, 100, meta_bytes(**m))]), "--duration", "0.2")
+                self.assertEqual(code, 1, out)
+                self.assertIn(f"検出器の META に {key} がありません。記録を始めません", out)
+                self.assertEqual(self.sessions(), [])
+        for name, m in {"threshold bool": dict(DET_META, threshold=True), "model list": dict(DET_META, model=[]),
+                        "feature_names empty": dict(DET_META, feature_names=[])}.items():
+            with self.subTest(name):
+                code, out = self.run_main(FakeDetector([build_frame(record.ID_META, 100, meta_bytes(**m))]), "--duration", "0.2")
+                self.assertEqual(code, 1, out)
+                self.assertIn("検出器の META に", out)
+                self.assertEqual(self.sessions(), [])
+        logger_meta = build_frame(record.ID_META, 50, meta_bytes(fw="logger", imu_hz=104))
+        # logger の META は --cond meal 以外ならそのまま受ける（3 つのキーを要求しない）
+        code, out = self.run_main(FakeDetector([logger_meta]), "--cond", "water", "--duration", "0.2")
+        self.assertEqual(code, 0, out)
+        self.assertIn("META を受けました（fw=logger）", out)
+        got = json.loads((self.one_session() / "meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(got["fw"], "logger")
+        self.assertNotIn("threshold", got)
+        self.assertEqual(got["cond"], "water")
+        for p in self.sessions():
+            for f in p.iterdir():
+                f.unlink()
+            p.rmdir()
+        # --cond meal は fw が detector でなければ止まる
+        code, out = self.run_main(FakeDetector([logger_meta]), "--cond", "meal", "--duration", "0.2")
+        self.assertEqual(code, 1, out)
+        self.assertIn("meal は検出器で録ります（fw=logger）。記録を始めません", out)
+        self.assertEqual(self.sessions(), [])
+        # --cond meal で検出器の META がそろっていれば始まる
+        code, out = self.run_main(FakeDetector([build_frame(record.ID_META, 100, meta_bytes(**DET_META)) + det(1000)]),
+                                  "--cond", "meal", "--duration", "0.2")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads((self.one_session() / "meta.json").read_text(encoding="utf-8"))["cond"], "meal")
+
+    def test_r23_main_end_to_end_with_and_without_indicator(self):
+        stream = [det(500) + feat(500),
+                  build_frame(record.ID_META, 100, meta_bytes(**DET_META)),
+                  det(1000) + feat(1000), det(1250, 2) + feat(1250)]
+        dirs = []
+        for with_ind in (False, True):
+            ind = FakeWriter() if with_ind else None
+            code, out = self.run_main(FakeDetector(list(stream)), "--duration", "0.2", indicator=ind)
+            self.assertEqual(code, 0, out)
+            new = [p for p in self.sessions() if p not in dirs]
+            self.assertEqual(len(new), 1)
+            sd = new[0]
+            dirs.append(sd)
+            got = json.loads((sd / "meta.json").read_text(encoding="utf-8"))
+            for k in ("fw", "threshold", "model", "feature_names"):
+                self.assertEqual(got[k], DET_META[k])
+            self.assertEqual([r[1] for r in read_csv(sd / "detect.csv")[1:]], ["1000", "1250"])
+            self.assertEqual([r[1] for r in read_csv(sd / "feat.csv")[1:]], ["1000", "1250"])
+            self.assertIn("XOR 不一致数: 0", out)
+            if with_ind:
+                self.assertTrue(wait_until(lambda: len(ind.written) >= 1))
+                self.assertTrue(set(bytes(ind.written)) <= {1, 2})
+            time.sleep(1.05)                     # 2 つ目のセッションのフォルダ名（秒の刻み）を変える
+        a, b = dirs
+        self.assertEqual({p.name for p in a.iterdir()}, {p.name for p in b.iterdir()})
+        for name in ("detect.csv", "feat.csv", "events.csv"):
+            self.assertEqual(read_csv(a / name), read_csv(b / name), name)
+
+    def test_r24_boundary_splits(self):
+        meta = build_frame(record.ID_META, 100, meta_bytes(**DET_META))
+        before = det(1000) + feat(1000)
+        after = det(1250) + feat(1250) + det(1500) + feat(1500)
+        whole = before + meta + after
+        m0 = len(before)
+        m1 = m0 + len(meta)
+        splits = {
+            "one read": [whole],
+            "inside META": [whole[:m0 + len(meta) // 2], whole[m0 + len(meta) // 2:]],
+            "between META and DETECT(w1)": [whole[:m1], whole[m1:]],
+            "inside DETECT(w1)": [whole[:m1 + 12], whole[m1 + 12:]],
+        }
+        for name, chunks in splits.items():
+            with self.subTest(name):
+                for p in self.sessions():
+                    for f in p.iterdir():
+                        f.unlink()
+                    p.rmdir()
+                code, out = self.run_main(FakeDetector(chunks), "--duration", "0.5")
+                self.assertEqual(code, 0, out)
+                sd = self.one_session()
+                d_rows = read_csv(sd / "detect.csv")[1:]
+                f_rows = read_csv(sd / "feat.csv")[1:]
+                self.assertEqual([r[1] for r in d_rows], ["1250", "1500"])
+                self.assertEqual([r[1] for r in f_rows], ["1250", "1500"])
+                self.assertEqual(d_rows[0][1], f_rows[0][1])
+                self.assertIn("XOR 不一致数: 0", out)
 
 
 if __name__ == "__main__":

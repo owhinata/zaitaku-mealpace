@@ -21,6 +21,18 @@ SUBJECT / COND / POSITION / BAND / DURATION の環境変数を、対応する引
 記録を始めた後に送れなくなっても（USB が抜けたなど）記録は止めない（終了時に失敗の回数を表示する）。
 送信は別のスレッドで行い、フレームの読み取りとマーカーは表示器への書き込みを待たない。送った記録はファイルに残さず、
 書くファイル・列・出力先は --indicator の有無で変わらない。
+
+開始の手順（Issue #33、docs/decisions/0006 の追記）: 検出器のポートを開いたら合図 1 バイト `M`（META_REQUEST）を 1 回書き、
+最長 META_WAIT_S 秒、次の条件を満たす META（0x7F）を待つ。受けてからセッションのフォルダを作り、記録を始める。
+  - XOR が合い、ペイロードが UTF-8 の JSON の辞書で、fw が空でない文字列。満たさない META は届かない扱いで待ち続ける。
+  - fw が "detector" なら threshold（数値）・model（辞書）・feature_names（空でないリスト）がそろっている。欠けていれば止まる。
+  - --cond meal なら fw が "detector"。違えば止まる（meal は検出器で録る）。
+待つ間に届いた META 以外のフレームは記録の開始前のもので、書かない・数えない。META の後ろに同じ読み取りで届いたバイトは
+記録に引き継ぐ。次のときは記録を始めずに終了コード 1 で止まり、フォルダを作らない: 検出器のポートが開けない、合図が書けない、
+META が META_WAIT_S 秒以内に届かない、上の条件で止まる、待つ間に Ctrl-C。
+記録ファームウェア（firmware/logger/）は合図に応えないので、logger で録るときは記録の前に USB を挿し直す（起動時の META を受けるため）。
+meta.json に合図で受けたことは書かない（形式とキーは変わらない）。挿し直した直後は起動時の META と合図への META の 2 つが届きうる
+（同じ内容で merge されるので meta.json は同じ。終了時の表示が META: 2 になる）。
 """
 from __future__ import annotations
 import argparse, atexit, codecs, contextlib, csv, json, os, re, signal, struct, subprocess, sys, threading, time, wave
@@ -43,6 +55,9 @@ FLOAT_FMT = ".9g"   # float32 が往復で一致する桁数（prob は閾値と
 RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
 INDICATOR_BAUD = 115200            # 表示器のポート。表示器（UNO R4 WiFi）の Serial はブリッジ経由の UART で値が効くので、indicator.ino の Serial.begin(115200) と揃える。1200 は使わない（ブートローダに入る）
 INDICATOR_WRITE_TIMEOUT_S = 0.02   # 表示器が詰まったとき、送信のスレッドの 1 回の書き込みが止まる時間の上限
+META_REQUEST = b"M"                # 検出器に META を送り直させる合図（firmware/detector/detector_meta.h の DETECTOR_META_REQUEST、#33）
+META_WAIT_S = 5.0                  # 合図の後に META を待つ最長の秒数。届かなければ記録を始めない
+DETECTOR_WRITE_TIMEOUT_S = 1.0     # 検出器のポートへの合図の書き込みが止まる時間の上限
 
 
 def env_default(name: str, fallback: str) -> str:
@@ -294,39 +309,124 @@ class Session:
         print(f"saved: {self.dir}")
 
 
-def read_frames(ser: serial.Serial, on_frame, stats: dict, deadline: float | None = None):
+def parse_frames(buf: bytearray, on_frame, stats: dict) -> bool:
+    """buf の先頭から完全なフレームを順に取り出して on_frame に渡し、取り出した分を buf から消す
+    （read_frames と wait_meta で共通の解析）。
+
+    stats の数え方は read_frames と同じ。on_frame が真を返したら、そのフレームの直後で止めて True を返す
+    （後ろのバイトは buf に残り、次の段が続きから読む）。読み切ったら False（途中までのフレームは buf に残る）。
+    """
+    while True:
+        i = buf.find(SYNC)
+        if i < 0:
+            buf.clear(); return False
+        if len(buf) < i + 9:
+            del buf[:i]; return False
+        sid = buf[i + 2]
+        ln, t_ms = struct.unpack_from("<HI", buf, i + 3)
+        end = i + 9 + ln + 1
+        if len(buf) < end:
+            del buf[:i]; return False
+        payload = bytes(buf[i + 9:i + 9 + ln])
+        x = 0
+        for b in buf[i + 2:i + 9 + ln]:
+            x ^= b
+        stop = False
+        if x == buf[end - 1]:
+            stats["ok"][sid] = stats["ok"].get(sid, 0) + 1
+            stop = bool(on_frame(sid, t_ms, payload))
+        else:
+            stats["xor_err"] += 1
+        del buf[:end]
+        if stop:
+            return True
+
+
+def read_frames(ser: serial.Serial, on_frame, stats: dict, deadline: float | None = None,
+                buf: bytearray | None = None):
     """フレームを読み続ける。
 
     stats["ok"][stream_id] に**正常受信フレーム数**（xor 検証を通って on_frame に渡った数）、
     stats["xor_err"] に **XOR 不一致数**（SYNC と長さと xor バイトまで読めたが xor が合わずに
     捨てたフレーム候補の数）を数える。deadline（time.monotonic の値）を過ぎたら戻る。
+    buf を渡すと、その中身（wait_meta が META の後ろに残したバイト）の続きから読む。
     """
-    buf = bytearray()
+    if buf is None:
+        buf = bytearray()
     while True:
         if deadline is not None and time.monotonic() >= deadline:
             return
         buf += ser.read(4096)
-        while True:
-            i = buf.find(SYNC)
-            if i < 0:
-                buf.clear(); break
-            if len(buf) < i + 9:
-                del buf[:i]; break
-            sid = buf[i + 2]
-            ln, t_ms = struct.unpack_from("<HI", buf, i + 3)
-            end = i + 9 + ln + 1
-            if len(buf) < end:
-                del buf[:i]; break
-            payload = bytes(buf[i + 9:i + 9 + ln])
-            x = 0
-            for b in buf[i + 2:i + 9 + ln]:
-                x ^= b
-            if x == buf[end - 1]:
-                stats["ok"][sid] = stats["ok"].get(sid, 0) + 1
-                on_frame(sid, t_ms, payload)
-            else:
-                stats["xor_err"] += 1
-            del buf[:end]
+        parse_frames(buf, on_frame, stats)
+
+
+class MetaRejected(Exception):
+    """記録を始めない META を受けた（送り直しても中身は同じなので、待ち続けずに止まる）。文は表示する理由。"""
+
+
+DETECTOR_META_KEYS = ("threshold", "model", "feature_names")
+
+
+def start_meta(payload: bytes, cond: str) -> dict | None:
+    """記録を始めてよい META かを見る（値の正しさは評価のときに analysis/ が見る。ここでは見ない）。
+
+    始めてよければ JSON の辞書を返す。届かない扱い（JSON の辞書でない、fw が空でない文字列でない）なら None。
+    検出器の META に threshold・model・feature_names が欠けている、または --cond meal で fw が detector でなければ
+    MetaRejected を出す。
+    """
+    try:
+        meta = json.loads(payload.decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(meta, dict):
+        return None
+    fw = meta.get("fw")
+    if not isinstance(fw, str) or not fw:
+        return None
+    if cond == "meal" and fw != "detector":
+        raise MetaRejected(f"meal は検出器で録ります（fw={fw}）。記録を始めません")
+    if fw == "detector":
+        missing = []
+        th = meta.get("threshold")
+        if not isinstance(th, (int, float)) or isinstance(th, bool):
+            missing.append("threshold")
+        if not isinstance(meta.get("model"), dict):
+            missing.append("model")
+        names = meta.get("feature_names")
+        if not isinstance(names, list) or not names:
+            missing.append("feature_names")
+        if missing:
+            raise MetaRejected(f"検出器の META に {', '.join(missing)} がありません。記録を始めません")
+    return meta
+
+
+def wait_meta(ser, timeout_s: float, cond: str, stats: dict, buf: bytearray):
+    """合図の後、最長 timeout_s 秒、記録を始めてよい META を待つ（Issue #33）。
+
+    受けたら (t_ms, payload, meta) を返し、stats["ok"][ID_META] に 1 を足す。buf には META の後ろのバイトが残る
+    （read_frames に渡して続きから読む）。届かなければ None。待つ間の META 以外のフレームと、届かない扱いの META と
+    XOR 不一致は記録の開始前のもので、on_frame に渡さず stats にも数えない。止まる META は MetaRejected を出す。
+    """
+    found = []
+
+    def on_frame(sid: int, t_ms: int, payload: bytes) -> bool:
+        if sid != ID_META:
+            return False
+        meta = start_meta(payload, cond)
+        if meta is None:
+            return False
+        found.append((t_ms, payload, meta))
+        return True
+
+    before = {"ok": {}, "xor_err": 0}       # 開始前の数（表示しない）
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if parse_frames(buf, on_frame, before):
+            stats["ok"][ID_META] = stats["ok"].get(ID_META, 0) + 1
+            return found[0]
+        if time.monotonic() >= deadline:
+            return None
+        buf += ser.read(4096)
 
 
 def detect_led(payload: bytes) -> int | None:
@@ -471,6 +571,7 @@ def main():
         sys.exit(err)
 
     fwd = None
+    ind_ser = None
     if a.indicator is not None:
         # セッションのフォルダを作る前に開く。開けなければ記録を始めない（フォルダが空で残らない）
         try:
@@ -480,9 +581,47 @@ def main():
         fwd = IndicatorForwarder(ind_ser)
         print(f"表示器: {a.indicator} へ LED の状態（DETECT の led）を送る")
 
-    sess = Session(RAW_DIR, a.subject, a.cond, a.position, a.band)
-    ser = serial.Serial(a.port, a.baud, timeout=0.05)
+    def stop_before_start(msg: str, ser=None):
+        """記録を始めずに止まる。ポートを閉じ、フォルダは作らない。終了コード 1。"""
+        for s in (ser, ind_ser):
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+        sys.exit(msg)
+
+    # 検出器のポートを開き、合図を送って META を待つ（#33）。受けるまでフォルダを作らない
+    try:
+        ser = serial.Serial(a.port, a.baud, timeout=0.05, write_timeout=DETECTOR_WRITE_TIMEOUT_S)
+    except (serial.SerialException, OSError) as e:
+        stop_before_start(f"検出器のポートを開けません（記録を始めません）: {e}")
+    try:
+        n = ser.write(META_REQUEST)
+    except (serial.SerialException, OSError) as e:
+        stop_before_start(f"検出器に合図を書けません（記録を始めません）: {e}", ser)
+    if n != len(META_REQUEST):
+        stop_before_start(f"検出器に合図を書けません（書けたバイト数が {n}）。記録を始めません", ser)
     stats = {"ok": {}, "xor_err": 0}
+    buf = bytearray()
+    try:
+        got = wait_meta(ser, META_WAIT_S, a.cond, stats, buf)
+    except MetaRejected as e:
+        stop_before_start(str(e), ser)
+    except KeyboardInterrupt:
+        stop_before_start("META を待つ間に中断しました。記録を始めません", ser)
+    if got is None:
+        stop_before_start(
+            f"META が {META_WAIT_S:g} 秒以内に届きませんでした。記録を始めません。\n"
+            "  考えられる原因:\n"
+            "  - 検出器のファームウェアが #33 より前のもの（合図に応えない）\n"
+            "  - 記録ファームウェア（logger）は合図に応えない。USB を挿し直してから始める（docs/decisions/0006）\n"
+            f"  - ポートの取り違え（--port {a.port}）", ser)
+    meta_t_ms, meta_payload, meta = got
+
+    sess = Session(RAW_DIR, a.subject, a.cond, a.position, a.band)
+    sess.on_frame(ID_META, meta_t_ms, meta_payload)
+    print(f"META を受けました（fw={meta['fw']}）")
     deadline = time.monotonic() + a.duration if a.duration > 0 else None
 
     def on_key(ch):
@@ -517,7 +656,7 @@ def main():
             thread.start()
         if fwd is not None:
             fwd.start()
-        read_frames(ser, with_indicator(sess.on_frame, fwd), stats, deadline)
+        read_frames(ser, with_indicator(sess.on_frame, fwd), stats, deadline, buf)   # META の後ろに残ったバイトから続ける
     except KeyboardInterrupt:
         pass
     finally:

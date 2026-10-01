@@ -3,6 +3,7 @@
 実行: python -m unittest discover -s tools -v
 子プロセスの stdin/stdout/stderr を pty の slave につなぎ、シリアルは偽物に差し替えて
 `record.main()` を動かす。出力先は tempfile で、`data/raw/` は読み書きしない。
+偽物のシリアルは合図（#33）を受けると、最初の read() で META のフレームを返す（NO_META=1 なら返さない）。
 POSIX 以外では skip（Windows の経路は端末の設定を変えない）。
 """
 from __future__ import annotations
@@ -26,19 +27,41 @@ from pathlib import Path
 sys.path.insert(0, os.environ["RECORD_DIR"])
 import record
 
-FAIL_AT = int(os.environ.get("FAIL_AT", "0"))
+FAIL_AT = int(os.environ.get("FAIL_AT", "0"))     # 記録の段（META を返した後）の read() の何回目で失敗するか
 FAIL_KIND = os.environ.get("FAIL_KIND", "os")
+NO_META = os.environ.get("NO_META", "") == "1"
+if os.environ.get("META_WAIT_S"):
+    record.META_WAIT_S = float(os.environ["META_WAIT_S"])
+
+
+def meta_frame():
+    """t_ms 0 の検出器の META（マーカーの時刻は 0 ms のまま）。"""
+    payload = b'{"fw":"detector","threshold":0.5,"model":{},"feature_names":["a"]}'
+    body = bytes([record.ID_META]) + len(payload).to_bytes(2, "little") + (0).to_bytes(4, "little") + payload
+    x = 0
+    for b in body:
+        x ^= b
+    return record.SYNC + body + bytes([x])
 
 
 class FakeSerial:
-    """read() は少し待って空のバイト列を返すだけ。実機は要らない。"""
+    """合図を受けたら最初の read() で META を返し、以後は少し待って空のバイト列を返すだけ。実機は要らない。"""
 
-    def __init__(self, port, baud, timeout=0.05):
+    def __init__(self, port, baud, timeout=0.05, write_timeout=None):
         if FAIL_KIND == "init":
             raise OSError("fake: port not found")
         self.n = 0
+        self.meta_pending = False
+
+    def write(self, data):
+        if data == record.META_REQUEST and not NO_META:
+            self.meta_pending = True
+        return len(data)
 
     def read(self, n):
+        if self.meta_pending:
+            self.meta_pending = False
+            return meta_frame()
         self.n += 1
         if FAIL_AT and self.n >= FAIL_AT:
             if FAIL_KIND == "exit":
@@ -278,6 +301,15 @@ class RecordTtyTest(unittest.TestCase):
         self.assertNotEqual(c.wait_exit(), 0)
         self.assertTtyRestored(c)
         self.assertNotIn("recording...", c.output())
+
+    def test_t10_no_meta_stops_before_recording(self):
+        """META が届かなければ recording... を出さずに止まり、端末は元のまま、フォルダはできない（#33）。"""
+        c = self.start(env_extra={"NO_META": "1", "META_WAIT_S": "0.3"})
+        self.assertEqual(c.wait_exit(), 1, c.output())
+        self.assertTtyRestored(c)
+        self.assertNotIn("recording...", c.output())
+        self.assertIn("META が 0.3 秒以内に届きませんでした", c.output())
+        self.assertEqual(list(c.raw_dir.iterdir()), [])
 
 
 class MarkAfterCloseTest(unittest.TestCase):

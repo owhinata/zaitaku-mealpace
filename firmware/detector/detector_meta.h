@@ -16,3 +16,9 @@ static const size_t DETECTOR_META_CAP = 768;   // 約 620 B が収まる固定�
 
 // buf（cap バイト）に JSON を作り、長さを返す（終端の NUL は含めない）。収まらなければ −1（setup() で止まる）。
 int detector_meta_build(char* buf, size_t cap, uint32_t project_id, uint32_t deploy_version);
+
+// PC → 装置の合図（Issue #33、docs/decisions/0006 の追記）。tools/record.py が記録の開始時に 1 バイト 'M' を送り、
+// 検出器は受けたら setup() で作った同じ META を送り直す。フレームではない（SYNC も長さも無い）。他のバイトは捨てる。
+static const uint8_t DETECTOR_META_REQUEST = 0x4D;   // 'M'
+// c（Serial.read() の戻り値。受けていなければ −1）が合図なら真
+bool detector_meta_is_request(int c);

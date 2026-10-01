@@ -116,7 +116,8 @@ data/raw/20261005-121500_self_meal/
   比較も両方を float32 にして行う。`model` は Edge Impulse の書き出しのプロジェクト ID と deploy version（Private にした場合は 0。docs/decisions/0019）。
   `feature_set` は音の式の記録の番号。`feature_names` は `feat.csv` の `f0 …` の順の名前
 - `imu_hz` / `audio_hz` はセンサの取り込みレート。特徴量の計算で音を間引いても、マイクの取り込みは 16000
-- 基板をリセットせずに記録を始めると META が届かず、これらのキーが入らない（docs/decisions/0006）。`fw` が `detector` でないセッションは M2 の評価に使わない
+- `record.py` は記録を始める前に合図を送って META を待ち、届かなければ記録を始めない（docs/decisions/0006 の追記）。
+  それより前に録ったセッションには、これらのキーが無いものがある。`fw` が `detector` でないセッションは M2 の評価に使わない
   （`docs/recording-protocol.md`）
 
 ## シリアルのフレーム形式（装置 → PC）
@@ -137,8 +138,11 @@ data/raw/20261005-121500_self_meal/
 - `xor`: stream_id〜payload の XOR
 - ストリームを足すときは `stream_id` を増やす。PC 側は未知の ID を読み飛ばす
 
+PC → 装置: 検出器は 1 バイト `M`（0x4D）を受けると META を送り直す。フレームではない。他のバイトは捨てる。記録ファームウェアは受けない。
+
 ## 変更ルール
 
 この文書を変えるときは `docs/decisions/` に記録を残す。記録済みのセッションは変換スクリプトで新形式に揃える。
 DETECT / FEAT と `detect.csv`・`feat.csv`・検出器の `meta.json` の追記は既存のファイル・列・単位・フレーム形式を変えていないので、
 記録済みのセッションの変換は要らない（docs/decisions/0021）。
+開始時の合図（PC → 装置の `M`、docs/decisions/0006 の追記）もファイル・列・単位・フレーム形式を変えていないので、変換は要らない。
