@@ -49,6 +49,17 @@ data/raw/20261005-121500_self_meal/
 - 代替センサ（圧電コンタクトマイク、ピエゾ電線センサなど）を ADC で読む場合
 - 1〜4 kHz。`ch0..chN` は ADC 生値（12 bit）
 - `meta.json` の `sensors` に接続を記録する
+- 記録ファームウェアで DFR0052 を試用したとき（`meta.json` の `sensors` に `piezo` があるセッション。Issue #35、docs/decisions/0022）:
+  - 接続: DFR0052 の VCC → 3.3V、GND → GND、信号 → A0（RP2040 の ADC0）に直結。分圧・直列抵抗なし。`iface` は `A0-direct`
+    （直列 10 kΩ を入れて録ったセッションは `A0-direct-10k` として区別する）
+  - サンプリング: 2 kHz（ハードウェアのタイマで 500 µs ごと）、12 bit の生値（0〜4095）。チャネルは 1 つ
+  - 1 行 = 1 フレーム = A0 の連続した `analog_n` サンプル（古い順）。`chK` は塊の中の K 番目のサンプルで、チャネルではない。
+    `analog_n` と `analog_channels` は `meta.json` にある（装置の申告値）
+  - `t_ms` は、装置がその塊の最後のサンプルを読んだ直後に取った `millis()`（音声チャンクと同じく終端側の時刻）。K 番目のサンプルの時刻の推定値は
+    `t_ms − 1000 × (analog_n − 1 − K) ÷ analog_hz` ms
+  - `analog_hz` は `meta.json` のトップレベル（装置の申告値。docs/decisions/0006）
+  - 装置は META を 1000 ms ごとに送り直し、`analog_ticks`・`analog_reads`・`analog_blocks`・`analog_dropped`・`analog_lag_max_ms`・`analog_stats_t_ms`
+    （起動からの累計と、その時点の `millis()`）を載せる。`meta.json` には最後に受けた値が残る。欠けの照合に使う（docs/decisions/0022）
 
 ## events.csv
 
@@ -128,6 +139,7 @@ data/raw/20261005-121500_self_meal/
 
 - `stream_id`: `0x01` IMU（float32 × 6）, `0x02` AUDIO（int16 × N）, `0x03` ANALOG（uint16 × N）, `0x04` DETECT, `0x05` FEAT, `0x7F` META（UTF-8 JSON）
 - ヘッダの `t_ms` は、どのストリームでも装置がそのフレームを送るときの `millis()`。`tools/record.py` のマーカーは直前に届いたフレームのこの値を使う
+- 例外: `0x02` AUDIO の `t_ms` は `audio.wav` の節、`0x03` ANALOG の `t_ms` は `analog.csv` の節を見る（どちらも塊の終端側の時刻で、送る時刻ではない）
 - `0x04` DETECT（検出器のみ。窓ごとに 1 フレーム、ペイロード 10 B）:
   `window_t_ms` u32 LE（窓の開始）、`prob` float32 LE（`swallow` の確率）、`positive` u8（0 / 1）、`led` u8（0 / 1 / 2）
 - `0x05` FEAT（検出器のみ。窓ごとに 1 フレーム、ペイロード 4 + 4N B）:
