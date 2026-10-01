@@ -319,7 +319,12 @@ def parse_frames(buf: bytearray, on_frame, stats: dict) -> bool:
     while True:
         i = buf.find(SYNC)
         if i < 0:
-            buf.clear(); return False
+            # 末尾が SYNC の前半（0xA5）なら残す（次の読み取りの先頭に 0x5A が来るとフレームになる）。他は捨てる
+            if buf and buf[-1] == SYNC[0]:
+                del buf[:-1]
+            else:
+                buf.clear()
+            return False
         if len(buf) < i + 9:
             del buf[:i]; return False
         sid = buf[i + 2]

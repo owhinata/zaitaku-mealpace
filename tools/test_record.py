@@ -6,6 +6,7 @@ build_frame が作る。出力先は tempfile で、data/raw/ は読み書きし
 r10〜r17 は表示器への転送（--indicator、Issue #29）。表示器のシリアルは偽物（FakeWriter など）で、実機を使わない。
 r18〜r24 は開始時の合図と META の待ち（Issue #33）。record.main() を偽物の検出器（FakeDetector）で通す。record.serial.Serial と
 record.RAW_DIR（tempfile）と sys.argv・sys.stdin（tty でない）を差し替え、record.META_WAIT_S を短くする。
+r25〜r25c は SYNC の途中で read() が切れてもフレームを失わないこと（Issue #34）。ChunkFakeSerial で read() の切れ目を作る。
 """
 from __future__ import annotations
 import contextlib, csv, io, json, os, serial, signal, struct, sys, tempfile, threading, time, unittest, wave
@@ -54,6 +55,38 @@ class FakeSerial:
         if not d:
             time.sleep(0.005)
         return d
+
+
+def split_before_sync_second_byte(data: bytes) -> list[bytes]:
+    """data を各フレームの SYNC（A5 5A）の間で切る（#34 r25）。返す要素をそのまま順に read() させると、
+    1 回の read() が …A5 で終わり、次が 5A… で始まる（SYNC の途中で読み取りが切れる状況を再現する）。"""
+    cuts = []
+    i = 0
+    while True:
+        j = data.find(record.SYNC, i)
+        if j < 0:
+            break
+        cuts.append(j + 1)
+        i = j + 2
+    chunks, prev = [], 0
+    for c in cuts:
+        chunks.append(data[prev:c])
+        prev = c
+    chunks.append(data[prev:])
+    return chunks
+
+
+class ChunkFakeSerial:
+    """chunks を 1 回の read() に 1 つずつ返す（#34 r25・r25b）。尽きたら FakeSerial と同じく少し待って空を返す。"""
+
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+
+    def read(self, n: int) -> bytes:
+        if self.chunks:
+            return self.chunks.pop(0)
+        time.sleep(0.005)
+        return b""
 
 
 class FakeWriter:
@@ -288,6 +321,40 @@ class RecordSessionTest(unittest.TestCase):
         self.sess.close()
         self.assertEqual(self.sess.bad_len, {record.ID_DETECT: 2, record.ID_IMU: 1, record.ID_FEAT: 2})
         self.assertEqual(self.files(), {"events.csv", "meta.json"})
+
+    def test_r25_sync_split_between_a5_and_5a_does_not_lose_frames(self):
+        data = b"".join(det(w) + feat(w) for w in (1000, 1250, 1500))
+        chunks = split_before_sync_second_byte(data)
+        for ch in chunks[:-1]:
+            self.assertEqual(ch[-1], record.SYNC[0])
+        for ch in chunks[1:]:
+            self.assertEqual(ch[0], record.SYNC[1])
+        stats = {"ok": {}, "xor_err": 0}
+        record.read_frames(ChunkFakeSerial(chunks), self.sess.on_frame, stats, deadline=time.monotonic() + 0.05)
+        self.sess.close()
+        self.assertEqual(stats["ok"], {record.ID_DETECT: 3, record.ID_FEAT: 3})
+        self.assertEqual(stats["xor_err"], 0)
+        self.assertEqual([r[1] for r in read_csv(self.sess.dir / "detect.csv")[1:]], ["1000", "1250", "1500"])
+        self.assertEqual([r[1] for r in read_csv(self.sess.dir / "feat.csv")[1:]], ["1000", "1250", "1500"])
+
+    def test_r25b_sync_split_byte_by_byte_does_not_lose_frames(self):
+        data = b"".join(det(w) + feat(w) for w in (1000, 1250, 1500))
+        chunks = [data[i:i + 1] for i in range(len(data))]
+        stats = {"ok": {}, "xor_err": 0}
+        record.read_frames(ChunkFakeSerial(chunks), self.sess.on_frame, stats, deadline=time.monotonic() + 0.05)
+        self.sess.close()
+        self.assertEqual(stats["ok"], {record.ID_DETECT: 3, record.ID_FEAT: 3})
+        self.assertEqual(stats["xor_err"], 0)
+        self.assertEqual([r[1] for r in read_csv(self.sess.dir / "detect.csv")[1:]], ["1000", "1250", "1500"])
+        self.assertEqual([r[1] for r in read_csv(self.sess.dir / "feat.csv")[1:]], ["1000", "1250", "1500"])
+
+    def test_r25c_garbage_without_trailing_sync_byte_is_discarded(self):
+        buf = bytearray(b"\x00\x01\x02\xff\x10")   # SYNC が無く、末尾も 0xA5 ではない
+        stats = {"ok": {}, "xor_err": 0}
+        stop = record.parse_frames(buf, lambda *a: False, stats)
+        self.assertFalse(stop)
+        self.assertEqual(buf, bytearray())
+        self.assertEqual(stats, {"ok": {}, "xor_err": 0})
 
 
 class IndicatorForwarderTest(unittest.TestCase):
