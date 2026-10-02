@@ -109,9 +109,9 @@ Codex の呼び出しは codex plugin（`/codex:*`）に一本化する。
 - 対象は制約領域に触れる plan。次に関わるもの。
   - 生データの扱いと記録形式（`docs/data-schema.md`、`firmware/logger/frame.h`、`tools/record.py`）
   - 評価の分割と指標（`analysis/`、`docs/evaluation.md`）
-  - 推論パイプライン（Edge Impulse の書き出し、量子化、装置上の推論）
+  - 推論パイプライン（M2（Nano）は Edge Impulse の書き出し・量子化・装置上の推論、咽喉マイク版（UNO Q）は Linux 側の Python の推論と MCU 側への RPC）
   - LED の表示ロジックと文言
-  - センサ構成の変更（`docs/decisions/0002`）
+  - センサ構成の変更（`docs/decisions/0002`・`0025`・`0026`）
 - **ゲートは BLOCKING だけ。** BLOCKING は CLAUDE.md の制約違反と評価定義からの逸脱。
   CONCERN は列挙して人が採否を決め、結果を Issue のコメントに一行ずつ残す。
 - 再レビューに回数の上限は置かない（docs/decisions/0009）。BLOCKING が残っている間は直して再レビューする。
@@ -170,7 +170,7 @@ Codex の呼び出しは codex plugin（`/codex:*`）に一本化する。
   同じ差分に両方掛けない。後者は前者を含む。
 - focus は1〜2問に絞り、疑っている面を名指しする。「この検査を通過したまま X できるか」の形で書く。
   - 「窓単位の分割が混ざったまま、`evaluate.py` が合格と報告できるか」
-  - 「検出器ファームウェアにおいて、生の音声波形が、特徴量に変換された後もどこかに残る経路はあるか」
+  - 「検出器（Nano のファームウェア、UNO Q の Linux 側のプログラム・MCU 側のスケッチ）において、生の音声波形が、特徴量に変換された後もどこかに残る、または送られる経路はあるか」
   - 「p1 の日付・続柄・病名が、docs/ や log/ に出る経路はあるか」
   - 「LED の表示や文言が、『目安』ではなく『判定』や指示として読める箇所はあるか」
 - レビューは時間がかかるので `--background` で起動して待つ（進捗は `/codex:status`）。

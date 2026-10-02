@@ -1,8 +1,13 @@
 # zaitaku-mealpace — Codex 向けプロジェクト指示
 
-在宅介護の食卓で、喉元の小型センサ（IMU＋マイク）により嚥下の発生・タイミング・回数を記録し、
-食事中に LED でペーシングの目安を返す装置。Arduino Nano RP2040 Connect、CMake + arduino-cli、
-推論は Edge Impulse、解析と評価は PC 側の Python。
+在宅介護の食卓で、喉元の小型センサにより嚥下の発生・タイミング・回数を記録し、
+食事中に LED でペーシングの目安を返す装置。解析と評価は PC 側の Python。
+
+- M1・M2: Arduino Nano RP2040 Connect（基板の IMU＋マイク）、CMake + arduino-cli、推論は Edge Impulse
+  （C++ ライブラリ形式）。記録・数字・決定（`docs/decisions/0001`〜`0023`）はこの構成（Nano）のもの。
+- M3 以降: Arduino UNO Q。音は咽喉マイク（IMU なしで始め、条件つきで外付けを足す。`docs/decisions/0026`）。
+  Linux 側の Python で推論し、MCU 側で LED を出す。両側は RPC で結合する。MCU 側は CMake + arduino-cli
+  （`docs/decisions/0025`）。
 
 このファイルは Codex（`/codex:review` の内蔵レビュアーを含む）が毎回読む前提の要約。
 正は `CLAUDE.md`。**レビュー時は、コードの正しさより先に、ここの不変条件に触れていないかを見る。**
@@ -17,10 +22,13 @@
    装置は数値を示し、記録するだけ。
 3. **Issue にない機能を作らない。** 必要なのは検出・LED・記録の3つ。ダッシュボード、設定画面、
    グラフ UI は作らない。
-4. **検出器のビルドにおいて、生の音声波形を保存しない。** 特徴量に変換した後に破棄する。波形が
-   ファイル、ログ、シリアル出力、デバッグ用ダンプのどこかに残る経路は違反。記録ファームウェア
-   （`firmware/logger/`）は開発用の計測器で、生の音声を PC に送ってよい（`docs/decisions/0005`）。
-   検出器の Linux 側（UNO Q、docs/decisions/0025）は音声をディスクに書かない（WAV・raw とも）。メモリ上で特徴量に変換して破棄する。
+4. **検出器において、生の音声波形を保存も送信もしない。** 検出器は M2 以降、食卓で使う形態で、Nano のファームウェアと、
+   UNO Q の Linux 側のプログラム・MCU 側のスケッチを指す。特徴量に変換した後に破棄する。波形がファイル、ログ、
+   シリアル出力、デバッグ用ダンプのどこかに残る経路は違反。UNO Q の Linux 側は ALSA からメモリに取り、音声を
+   ディスクに書かない（WAV・raw とも）。ログ・標準出力・ネットワーク・RPC にも波形を出さない（`docs/decisions/0025`）。
+   記録ファームウェア（`firmware/logger/`）は開発用の計測器で、生の音声を PC に送ってよい。咽喉マイクの学習用の記録は、
+   USB オーディオアダプタを PC に挿して PC で録る（開発用の計測。`docs/decisions/0025`）。PC 側の生波形は被験者ごとの
+   規則（CLAUDE.md「データの扱い」）に従う（`docs/decisions/0005`）。
 5. **生の計測データをコミットしない。** `data/raw/` は .gitignore 済み。「解析のため一時的に」も不可。
    `data/sample/` に置く見本は被験者 `self` のみ、10秒以内。
 6. **公開してよい情報の線引き**（リポジトリは public。docs/、log/、Issue、コミットメッセージに適用）
@@ -31,10 +39,13 @@
 7. **評価はセッション単位で分ける。** 学習と評価に同じセッションの窓が混ざる分割は違反。
    `docs/evaluation.md` の定義と合格線を、`docs/decisions/` の記録なしに変えない。
    達成率の報告には混同行列と評価に使ったセッション一覧を添える。
-8. **実装方針**（`docs/decisions/0001`）
+8. **実装方針**（`docs/decisions/0001`・`0025`）
+   - ビルドは CMake がタスクランナーとして arduino-cli を呼ぶ構成（A案）。UNO Q では MCU 側のスケッチに当てる。
+     Linux 側の Python の配置は M3 で決める（`docs/decisions/0025`）。
    - センサ入力とフレーム形式に Arduino の型を漏らさない。Arduino ライブラリの API は
-     モジュールの内側だけで呼ぶ。
-   - 推論は Edge Impulse の C++ ライブラリ形式で書き出す（Arduino ライブラリ形式ではない）。
+     モジュールの内側だけで呼ぶ。UNO Q の RPC は Linux 側・MCU 側とも1つのモジュールの内側だけで呼ぶ。
+   - M2（Nano）の推論は Edge Impulse の C++ ライブラリ形式で書き出す（Arduino ライブラリ形式ではない）。
+     咽喉マイク版（UNO Q）の推論は Linux 側の Python で行い、PC 側の解析と同じコードを使う（`docs/decisions/0025`）。
    - 解析と評価は PC 側の Python で完結させる。
 9. **表現。** 「VE の代替」と書かない（「VE の空白を埋める」）。LED の表示は「目安」であり
    「判定」ではない。装置の表示と文書の両方でその語を使う。
