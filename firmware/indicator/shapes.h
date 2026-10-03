@@ -1,6 +1,9 @@
+// clang-format off
 // shapes.h — 表示器の図形の表（Issue #32、docs/decisions/0018 の追記）。
-// 生成物。直接書き換えない。python3 firmware/indicator/shapes/gen_shapes.py で作り直す（元は shapes/gen_shapes.py）。
-// 状態 1 = 流れる波線（動画。FRAME_MS ごとに次のフレームへ進めてループ）、状態 2 = 微笑む顔（静止画。FRAME_MS は 0）。
+// 生成物。直接書き換えない。python3 firmware/indicator/shapes/gen_shapes.py
+// で作り直す（元は shapes/gen_shapes.py）。
+// 状態 1 = 流れる波線（動画。FRAME_MS ごとに次のフレームへ進めてループ）、
+// 状態 2 = 微笑む顔（静止画。FRAME_MS は 0）。
 // 状態 0 は消灯（表を持たない）。Arduino 依存なし。
 #pragma once
 #include <stdint.h>

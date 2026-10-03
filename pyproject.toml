@@ -1,0 +1,8 @@
+# Python のフォーマッタ（ruff）の設定。使い方: bash tools/format.sh
+[tool.ruff]
+line-length = 80
+target-version = "py312"
+extend-exclude = ["firmware/detector/src"]
+
+[tool.ruff.format]
+quote-style = "double"

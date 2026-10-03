@@ -1,9 +1,15 @@
-// firmware/detector/host/test_detector.cpp — 検出器の Arduino に依存しないモジュールの PC 上のテスト（Issue #24 plan 第 15 節 1）。
-// 対象: audio_capture、imu_capture、pipeline の帳簿（classify はスタブ）、detector_meta（合図のバイトの見分けは #33）、detector_frames、led_rule（#25）。
-// data/ を使わない。Edge Impulse の SDK を要らない。実行: bash firmware/detector/host/test_detector.sh
+// firmware/detector/host/test_detector.cpp — 検出器の Arduino
+// に依存しないモジュールの PC 上のテスト（Issue #24 plan 第 15 節 1）。
+// 対象: audio_capture、imu_capture、pipeline の帳簿（classify はスタブ）、
+// detector_meta（合図のバイトの見分けは #33）、detector_frames、
+// led_rule（#25）。
+// data/ を使わない。Edge Impulse の SDK を要らない。実行: bash
+// firmware/detector/host/test_detector.sh
 //
-// IMU の valid の突き合わせ: 合成の t_ms（gen_alt: 0 から +9, +10 を交互に 2100 未満まで）を analysis/features.py の
-// _imu_period_ms と valid の規則に掛けた期待値（scratchpad の使い捨てスクリプトで 2026-09-25 に出した）を埋めてある。
+// IMU の valid の突き合わせ: 合成の t_ms（gen_alt: 0 から +9, +10 を交互に
+// 2100 未満まで）を analysis/features.py の
+// _imu_period_ms と valid の規則に掛けた期待値（scratchpad
+// の使い捨てスクリプトで 2026-09-25 に出した）を埋めてある。
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -20,22 +26,45 @@
 #include "m2_threshold.h"
 #include "led_rule.h"
 
-// 検出器の格子（-DAF_PROFILE=1、AF_M2_FRAME_HOP 既定 200）: 1 スライスで計算するのは末尾 10 フレーム（#24 の 3 回目の実機の切り分け）
-static_assert(AF_N_FRAMES == 40 && AF_HOP_FRAMES == 10 && AF_FRAME_HOP == 200, "検出器の格子は 40 フレーム / ホップ 10 フレーム");
+// 検出器の格子（-DAF_PROFILE=1、AF_M2_FRAME_HOP 既定 200）: 1
+// スライスで計算するのは末尾 10 フレーム（#24 の 3 回目の実機の切り分け）
+static_assert(AF_N_FRAMES == 40 && AF_HOP_FRAMES == 10 && AF_FRAME_HOP == 200,
+              "検出器の格子は 40 フレーム / ホップ 10 フレーム");
 
 static int g_fail = 0;
 static int g_pass = 0;
-#define CHECK(cond) do { if (cond) { g_pass++; } else { g_fail++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
-#define CHECK_EQ(a, b) do { long long _a = (long long)(a), _b = (long long)(b); if (_a == _b) { g_pass++; } else { g_fail++; printf("FAIL %s:%d: %s == %s (%lld != %lld)\n", __FILE__, __LINE__, #a, #b, _a, _b); } } while (0)
+#define CHECK(cond)                                          \
+  do {                                                       \
+    if (cond) {                                              \
+      g_pass++;                                              \
+    } else {                                                 \
+      g_fail++;                                              \
+      printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+    }                                                        \
+  } while (0)
+#define CHECK_EQ(a, b)                                                        \
+  do {                                                                        \
+    long long _a = (long long)(a), _b = (long long)(b);                       \
+    if (_a == _b) {                                                           \
+      g_pass++;                                                               \
+    } else {                                                                  \
+      g_fail++;                                                               \
+      printf("FAIL %s:%d: %s == %s (%lld != %lld)\n", __FILE__, __LINE__, #a, \
+             #b, _a, _b);                                                     \
+    }                                                                         \
+  } while (0)
 
-// ---------- classify のスタブ（SDK 無し。pipeline_hop の帳簿と positive の判定を試す） ----------
+// ---------- classify のスタブ（SDK 無し。pipeline_hop の帳簿と positive
+// の判定を試す） ----------
 static float g_stub_swallow = 0.0f;
 static bool g_stub_ok = true;
 bool classify_init() { return true; }
 bool classify_run(const float* z, float* probs) {
   (void)z;
   if (!g_stub_ok) return false;
-  probs[0] = 0.0f; probs[1] = 1.0f - g_stub_swallow; probs[2] = g_stub_swallow;
+  probs[0] = 0.0f;
+  probs[1] = 1.0f - g_stub_swallow;
+  probs[2] = g_stub_swallow;
   return true;
 }
 int classify_swallow_index() { return 2; }
@@ -56,18 +85,23 @@ static void test_audio_capture_split() {
   audio_capture_init();
   uint32_t t = 1000;
   // 62 チャンク = 3968 サンプル。まだ READY でない
-  for (int c = 0; c < 62; c++) { push64(t, (int16_t)c); t += 4; }
+  for (int c = 0; c < 62; c++) {
+    push64(t, (int16_t)c);
+    t += 4;
+  }
   CHECK_EQ(audio_capture_face_state(0), AC_WRITING);
   CHECK_EQ(audio_capture_face_fill(0), 3968);
   CHECK_EQ(audio_capture_face_state(1), AC_FREE);
-  // 63 チャンク目（t = 1000 + 62×4 = 1248）: 前半 32 が面 0 を満たし、後半 32 が面 1 の先頭に来る
+  // 63 チャンク目（t = 1000 + 62×4 = 1248）: 前半 32 が面 0 を満たし、後半 32
+  // が面 1 の先頭に来る
   push64(t, 62);
   CHECK_EQ(audio_capture_face_state(0), AC_READY);
   CHECK_EQ(audio_capture_face_state(1), AC_WRITING);
   CHECK_EQ(audio_capture_face_fill(1), 32);
-  const int16_t* s; uint32_t t0, seq, rd;
+  const int16_t* s;
+  uint32_t t0, seq, rd;
   CHECK(audio_capture_take(&s, &t0, &seq, &rd));
-  CHECK_EQ(t0, 1000 - 4);          // 先頭のチャンクの t − 4 ms
+  CHECK_EQ(t0, 1000 - 4);  // 先頭のチャンクの t − 4 ms
   CHECK_EQ(seq, 0);
   CHECK_EQ(rd, 1248);
   CHECK_EQ(s[0], 0);
@@ -78,21 +112,26 @@ static void test_audio_capture_split() {
   CHECK_EQ(audio_capture_face_state(0), AC_FREE);
   // 面 1 を満たす: 残り 3968 = 62 チャンク
   t += 4;
-  for (int c = 0; c < 62; c++) { push64(t, (int16_t)(100 + c)); t += 4; }
+  for (int c = 0; c < 62; c++) {
+    push64(t, (int16_t)(100 + c));
+    t += 4;
+  }
   CHECK_EQ(audio_capture_face_state(1), AC_READY);
   CHECK(audio_capture_take(&s, &t0, &seq, &rd));
-  CHECK_EQ(seq, 1);                // 連番は 1 ずつ
-  CHECK_EQ(t0, 1248 - 2);          // 後半 32 サンプルから始まった: t − 2 ms
+  CHECK_EQ(seq, 1);        // 連番は 1 ずつ
+  CHECK_EQ(t0, 1248 - 2);  // 後半 32 サンプルから始まった: t − 2 ms
   CHECK_EQ(s[0], 62);
   CHECK_EQ(s[32], 100);
   audio_capture_release();
-  AudioCaptureStats st; audio_capture_stats(&st);
+  AudioCaptureStats st;
+  audio_capture_stats(&st);
   CHECK_EQ(st.dropped_chunks, 0);
   CHECK_EQ(st.pdm_odd_chunks, 0);
   CHECK_EQ(st.pdm_gaps, 0);
-  CHECK_EQ(st.slices_started, 2);  // 62 チャンクでちょうど満ちたので 3 つ目はまだ始まっていない
+  // 62 チャンクでちょうど満ちたので 3 つ目はまだ始まっていない
+  CHECK_EQ(st.slices_started, 2);
   CHECK_EQ(audio_capture_face_state(0), AC_FREE);
-  push64(t, 7);                    // 次のチャンクで 3 つ目（面 0）が始まる
+  push64(t, 7);  // 次のチャンクで 3 つ目（面 0）が始まる
   CHECK_EQ(audio_capture_face_state(0), AC_WRITING);
   audio_capture_stats(&st);
   CHECK_EQ(st.slices_started, 3);
@@ -101,31 +140,51 @@ static void test_audio_capture_split() {
 static void test_audio_capture_states() {
   audio_capture_init();
   uint32_t t = 0;
-  for (int c = 0; c < 63; c++) { push64(t, 1); t += 4; }   // 面 0 READY、面 1 に 32
-  const int16_t* s; uint32_t t0, seq, rd;
-  CHECK(audio_capture_take(&s, &t0, &seq, &rd));            // 面 0 IN_USE のまま放さない
+  // 面 0 READY、面 1 に 32
+  for (int c = 0; c < 63; c++) {
+    push64(t, 1);
+    t += 4;
+  }
+  const int16_t* s;
+  uint32_t t0, seq, rd;
+  CHECK(audio_capture_take(&s, &t0, &seq, &rd));  // 面 0 IN_USE のまま放さない
   CHECK_EQ(seq, 0);
-  for (int c = 0; c < 62; c++) { push64(t, 2); t += 4; }   // 面 1 が 4000 で READY
+  // 面 1 が 4000 で READY
+  for (int c = 0; c < 62; c++) {
+    push64(t, 2);
+    t += 4;
+  }
   CHECK_EQ(audio_capture_face_state(1), AC_READY);
   CHECK_EQ(audio_capture_face_state(0), AC_IN_USE);
   // FREE の面が無い状態で届いたチャンクは捨てられる
-  push64(t, 99); t += 4;
-  push64(t, 99); t += 4;
-  AudioCaptureStats st; audio_capture_stats(&st);
+  push64(t, 99);
+  t += 4;
+  push64(t, 99);
+  t += 4;
+  AudioCaptureStats st;
+  audio_capture_stats(&st);
   CHECK_EQ(st.dropped_chunks, 2);
   CHECK_EQ(audio_capture_face_state(0), AC_IN_USE);
   CHECK_EQ(audio_capture_face_state(1), AC_READY);
-  CHECK_EQ(s[0], 1); CHECK_EQ(s[3999], 1);                 // IN_USE の中身は変わらない
-  // 主スレッドが取っていない（READY）面の中身も変わらない: 放してから取って確かめる
+  CHECK_EQ(s[0], 1);
+  CHECK_EQ(s[3999], 1);  // IN_USE の中身は変わらない
+  // 主スレッドが取っていない（READY）面の中身も変わらない:
+  // 放してから取って確かめる
   audio_capture_release();
-  const int16_t* s1; uint32_t t01, seq1;
+  const int16_t* s1;
+  uint32_t t01, seq1;
   CHECK(audio_capture_take(&s1, &t01, &seq1, &rd));
   CHECK_EQ(seq1, 1);
-  CHECK_EQ(s1[0], 1); CHECK_EQ(s1[32], 2); CHECK_EQ(s1[3999], 2);
+  CHECK_EQ(s1[0], 1);
+  CHECK_EQ(s1[32], 2);
+  CHECK_EQ(s1[3999], 2);
   audio_capture_release();
   // 面 0 は FREE。次のチャンクで始まるスライスの連番は 1 つ飛ぶ（2 ではなく 3）
   uint32_t t_start = t;
-  for (int c = 0; c < 63; c++) { push64(t, 5); t += 4; }
+  for (int c = 0; c < 63; c++) {
+    push64(t, 5);
+    t += 4;
+  }
   CHECK_EQ(audio_capture_face_state(0), AC_READY);
   CHECK(audio_capture_take(&s, &t0, &seq, &rd));
   CHECK_EQ(seq, 3);
@@ -140,31 +199,53 @@ static void test_audio_capture_states() {
 static void test_audio_capture_split_drop() {
   audio_capture_init();
   uint32_t t = 0;
-  for (int c = 0; c < 63; c++) { push64(t, 1); t += 4; }   // 面 0 READY、面 1 に 32（seq 1）
-  const int16_t* s; uint32_t t0, seq, rd;
-  CHECK(audio_capture_take(&s, &t0, &seq, &rd));            // 面 0 IN_USE
-  audio_capture_release();                                  // 面 0 FREE
-  // 面 1 を満たす途中で面 0 に新しいスライス（seq 2）が始まるように: 面 1 の残り 3968 = 62 チャンク。
-  // 61 チャンク積んでから面 0 を「取れない」状態にはできないので、代わりに面 1 を READY にしてから取り、面 0 が満ちる境目で
+  // 面 0 READY、面 1 に 32（seq 1）
+  for (int c = 0; c < 63; c++) {
+    push64(t, 1);
+    t += 4;
+  }
+  const int16_t* s;
+  uint32_t t0, seq, rd;
+  CHECK(audio_capture_take(&s, &t0, &seq, &rd));  // 面 0 IN_USE
+  audio_capture_release();                        // 面 0 FREE
+  // 面 1 を満たす途中で面 0 に新しいスライス（seq 2）が始まるように: 面 1
+  // の残り 3968 = 62 チャンク。
+  // 61 チャンク積んでから面 0 を「取れない」状態にはできないので、代わりに面 1
+  // を READY にしてから取り、面 0 が満ちる境目で
   // 後半を捨てる形にする
-  for (int c = 0; c < 62; c++) { push64(t, 2); t += 4; }   // 面 1 READY（seq 1）、面 0 は FREE のまま
-  CHECK(audio_capture_take(&s, &t0, &seq, &rd));            // 面 1 IN_USE（放さない）
+  // 面 1 READY（seq 1）、面 0 は FREE のまま
+  for (int c = 0; c < 62; c++) {
+    push64(t, 2);
+    t += 4;
+  }
+  CHECK(audio_capture_take(&s, &t0, &seq, &rd));  // 面 1 IN_USE（放さない）
   CHECK_EQ(seq, 1);
-  for (int c = 0; c < 62; c++) { push64(t, 3); t += 4; }   // 面 0 に 3968（seq 2）
+  // 面 0 に 3968（seq 2）
+  for (int c = 0; c < 62; c++) {
+    push64(t, 3);
+    t += 4;
+  }
   CHECK_EQ(audio_capture_face_fill(0), 3968);
-  push64(t, 4); t += 4;                                     // 前半 32 で面 0 が READY、後半 32 は行き場が無い
+  push64(t, 4);
+  t += 4;  // 前半 32 で面 0 が READY、後半 32 は行き場が無い
   CHECK_EQ(audio_capture_face_state(0), AC_READY);
-  AudioCaptureStats st; audio_capture_stats(&st);
+  AudioCaptureStats st;
+  audio_capture_stats(&st);
   CHECK_EQ(st.dropped_chunks, 1);
-  audio_capture_release();                                  // 面 1 FREE
-  const int16_t* s0; uint32_t seq0;
+  audio_capture_release();  // 面 1 FREE
+  const int16_t* s0;
+  uint32_t seq0;
   CHECK(audio_capture_take(&s0, &t0, &seq0, &rd));
   CHECK_EQ(seq0, 2);
-  CHECK_EQ(s0[3968], 4); CHECK_EQ(s0[3999], 4);            // 前半は入っている
+  CHECK_EQ(s0[3968], 4);
+  CHECK_EQ(s0[3999], 4);  // 前半は入っている
   audio_capture_release();
-  push64(t, 6);                                             // 次のスライスは連番が飛ぶ（4）。空いている面 0 に始まる
+  push64(t, 6);  // 次のスライスは連番が飛ぶ（4）。空いている面 0 に始まる
   CHECK_EQ(audio_capture_face_state(0), AC_WRITING);
-  for (int c = 0; c < 62; c++) { t += 4; push64(t, 6); }
+  for (int c = 0; c < 62; c++) {
+    t += 4;
+    push64(t, 6);
+  }
   CHECK(audio_capture_take(&s, &t0, &seq, &rd));
   CHECK_EQ(seq, 4);
   audio_capture_release();
@@ -174,60 +255,82 @@ static void test_audio_capture_pdm_gaps() {
   // n が 128 B でないコールバック: pdm_odd_chunks が増え、実際の量だけ積まれる
   audio_capture_init();
   for (int i = 0; i < 256; i++) g_chunk[i] = 7;
-  audio_capture_push_chunk(g_chunk, 64, 100);              // 32 サンプル
-  AudioCaptureStats st; audio_capture_stats(&st);
+  audio_capture_push_chunk(g_chunk, 64, 100);  // 32 サンプル
+  AudioCaptureStats st;
+  audio_capture_stats(&st);
   CHECK_EQ(st.pdm_odd_chunks, 1);
   CHECK_EQ(st.pdm_gaps, 0);
   CHECK_EQ(audio_capture_face_fill(0), 32);
-  audio_capture_push_chunk(g_chunk, 256, 104);             // 128 サンプル
+  audio_capture_push_chunk(g_chunk, 256, 104);  // 128 サンプル
   audio_capture_stats(&st);
   CHECK_EQ(st.pdm_odd_chunks, 2);
   CHECK_EQ(audio_capture_face_fill(0), 160);
   // t0 の換算は実際の n で: 最初のチャンク 32 サンプル → 100 − 2
   // （面 0 を満たして取り出して確かめる）
   uint32_t t = 108;
-  while (audio_capture_face_state(0) != AC_READY) { push64(t, 7); t += 4; }
-  const int16_t* s; uint32_t t0, seq, rd;
+  while (audio_capture_face_state(0) != AC_READY) {
+    push64(t, 7);
+    t += 4;
+  }
+  const int16_t* s;
+  uint32_t t0, seq, rd;
   CHECK(audio_capture_take(&s, &t0, &seq, &rd));
   CHECK_EQ(t0, 98);
   CHECK_EQ(seq, 0);
   audio_capture_release();
 
-  // 面を半分書いた時点で n == 0: pdm_gaps が増え、途中までのサンプルは捨てられ、次のチャンクから飛んだ連番で始まる
+  // 面を半分書いた時点で n == 0: pdm_gaps が増え、途中までのサンプルは捨てら
+  // れ、次のチャンクから飛んだ連番で始まる
   audio_capture_init();
   t = 1000;
-  for (int c = 0; c < 31; c++) { push64(t, 1); t += 4; }   // 1984 サンプル
+  for (int c = 0; c < 31; c++) {
+    push64(t, 1);
+    t += 4;
+  }  // 1984 サンプル
   CHECK_EQ(audio_capture_face_fill(0), 1984);
-  audio_capture_push_chunk(g_chunk, 0, t); t += 4;         // n == 0
+  audio_capture_push_chunk(g_chunk, 0, t);
+  t += 4;  // n == 0
   audio_capture_stats(&st);
   CHECK_EQ(st.pdm_gaps, 1);
   CHECK_EQ(audio_capture_face_fill(0), 0);
   CHECK_EQ(audio_capture_face_state(0), AC_WRITING);
   uint32_t t_restart = t;
-  for (int c = 0; c < 63; c++) { push64(t, 2); t += 4; }
+  for (int c = 0; c < 63; c++) {
+    push64(t, 2);
+    t += 4;
+  }
   CHECK(audio_capture_take(&s, &t0, &seq, &rd));
-  CHECK_EQ(seq, 1);                                        // 0 を飛ばして 1
-  CHECK_EQ(t0, t_restart - 4);                             // t0 は次のチャンクで取り直す
-  CHECK_EQ(s[0], 2); CHECK_EQ(s[3999], 2);
+  CHECK_EQ(seq, 1);             // 0 を飛ばして 1
+  CHECK_EQ(t0, t_restart - 4);  // t0 は次のチャンクで取り直す
+  CHECK_EQ(s[0], 2);
+  CHECK_EQ(s[3999], 2);
   audio_capture_release();
 
   // 面の途中で 6 ms 以上の飛び: 同じ扱い。5 ms は飛びにならない
   audio_capture_init();
   t = 2000;
-  for (int c = 0; c < 20; c++) { push64(t, 1); t += 4; }
-  t += 1;                                                  // 5 ms 間隔
-  push64(t, 1); t += 4;
+  for (int c = 0; c < 20; c++) {
+    push64(t, 1);
+    t += 4;
+  }
+  t += 1;  // 5 ms 間隔
+  push64(t, 1);
+  t += 4;
   audio_capture_stats(&st);
   CHECK_EQ(st.pdm_gaps, 0);
   CHECK_EQ(audio_capture_face_fill(0), 21 * 64);
-  t += 2;                                                  // 6 ms 間隔
+  t += 2;  // 6 ms 間隔
   push64(t, 3);
   audio_capture_stats(&st);
   CHECK_EQ(st.pdm_gaps, 1);
-  CHECK_EQ(audio_capture_face_fill(0), 64);                // 途中までは捨て、このチャンクから始まる
+  // 途中までは捨て、このチャンクから始まる
+  CHECK_EQ(audio_capture_face_fill(0), 64);
   t_restart = t;
   t += 4;
-  for (int c = 0; c < 62; c++) { push64(t, 3); t += 4; }
+  for (int c = 0; c < 62; c++) {
+    push64(t, 3);
+    t += 4;
+  }
   CHECK(audio_capture_take(&s, &t0, &seq, &rd));
   CHECK_EQ(seq, 1);
   CHECK_EQ(t0, t_restart - 4);
@@ -237,113 +340,202 @@ static void test_audio_capture_pdm_gaps() {
 
 // ---------- imu_capture ----------
 static ImuCapture g_cap;
-static ImuWindowSource g_src = { &g_cap, nullptr, nullptr };
+static ImuWindowSource g_src = {&g_cap, nullptr, nullptr};
 
 static void push_row(uint32_t t) {
-  float a[3] = { 0.0f, 1.0f, 0.0f }, g[3] = { 0.0f, 0.0f, 0.0f };
+  float a[3] = {0.0f, 1.0f, 0.0f}, g[3] = {0.0f, 0.0f, 0.0f};
   imu_capture_push(&g_cap, t, a, g);
 }
 
-// 0 から +9, +10 を交互に limit 未満まで（scratchpad の imu_valid_expect.py の gen_alt と同じ）
+// 0 から +9, +10 を交互に limit 未満まで（scratchpad の imu_valid_expect.py の
+// gen_alt と同じ）
 static std::vector<uint32_t> gen_alt(uint32_t limit = 2100) {
-  std::vector<uint32_t> t; t.push_back(0);
+  std::vector<uint32_t> t;
+  t.push_back(0);
   int i = 0;
-  while (true) { uint32_t nxt = t.back() + ((i % 2 == 0) ? 9 : 10); i++; if (nxt >= limit) break; t.push_back(nxt); }
+  while (true) {
+    uint32_t nxt = t.back() + ((i % 2 == 0) ? 9 : 10);
+    i++;
+    if (nxt >= limit) break;
+    t.push_back(nxt);
+  }
   return t;
 }
 
-static bool near(float a, double b, double tol) { return fabs((double)a - b) <= tol; }
+static bool near(float a, double b, double tol) {
+  return fabs((double)a - b) <= tol;
+}
 
 static void test_imu_window_valid_rules() {
-  // 基準の周期 9.48 ms: 106 行は有効、95 行は有効、94 行は無効（0.9 × 1000 ÷ 9.48 = 94.94）
+  // 基準の周期 9.48 ms: 106 行は有効、95 行は有効、94 行は無効（0.9 × 1000 ÷
+  // 9.48 = 94.94）
   ImuWindow w;
   memset(&w, 0, sizeof w);
-  w.w0_ms = 1000; w.w1_ms = 2000;
+  w.w0_ms = 1000;
+  w.w1_ms = 2000;
   const float P = 9.48f;
-  // n 行を窓いっぱいに等間隔（step10 = 10 × 刻み [ms]）で置く: t[i] = 1000 + floor(i × step10 / 10)
-  auto fill_rows = [&](uint32_t n, uint32_t step10) { w.n = n; for (uint32_t i = 0; i < n; i++) w.t_ms[i] = 1000 + (i * step10) / 10; };
-  fill_rows(106, 95); CHECK(imu_window_valid(&w, P));    // 9.5 ms 刻み、最後 1997
-  fill_rows(95, 105); CHECK(imu_window_valid(&w, P));    // 10.5 ms 刻み、最後 1987（0.9 × 1000 ÷ 9.48 = 94.94 以上）
-  fill_rows(94, 106); CHECK(!imu_window_valid(&w, P));   // 10.6 ms 刻み、最後 1985。行数だけで無効
+  // n 行を窓いっぱいに等間隔（step10 = 10 × 刻み [ms]）で置く: t[i] = 1000 +
+  // floor(i × step10 / 10)
+  auto fill_rows = [&](uint32_t n, uint32_t step10) {
+    w.n = n;
+    for (uint32_t i = 0; i < n; i++) w.t_ms[i] = 1000 + (i * step10) / 10;
+  };
+  fill_rows(106, 95);
+  CHECK(imu_window_valid(&w, P));  // 9.5 ms 刻み、最後 1997
+  // 10.5 ms 刻み、最後 1987（0.9 × 1000 ÷ 9.48 = 94.94 以上）
+  fill_rows(95, 105);
+  CHECK(imu_window_valid(&w, P));
+  // 10.6 ms 刻み、最後 1985。行数だけで無効
+  fill_rows(94, 106);
+  CHECK(!imu_window_valid(&w, P));
   // 窓内に 20 ms の差分があれば無効
-  fill_rows(106, 95); for (uint32_t i = 51; i < 106; i++) w.t_ms[i] += 10; w.t_ms[105] = 1997; CHECK(!imu_window_valid(&w, P));
-  // 窓の直前からの飛びが窓と交われば無効（prev = 980、t[0] = 1005 → 25 ms、区間 (980, 1005) は窓と交わる）
-  fill_rows(106, 95); for (uint32_t i = 0; i < 105; i++) w.t_ms[i] += 5;
-  w.have_prev = true; w.prev_t_ms = 980; CHECK(!imu_window_valid(&w, P));
+  fill_rows(106, 95);
+  for (uint32_t i = 51; i < 106; i++) w.t_ms[i] += 10;
+  w.t_ms[105] = 1997;
+  CHECK(!imu_window_valid(&w, P));
+  // 窓の直前からの飛びが窓と交われば無効（prev = 980、t[0] = 1005 → 25 ms、
+  // 区間 (980, 1005) は窓と交わる）
+  fill_rows(106, 95);
+  for (uint32_t i = 0; i < 105; i++) w.t_ms[i] += 5;
+  w.have_prev = true;
+  w.prev_t_ms = 980;
+  CHECK(!imu_window_valid(&w, P));
   // 飛びが窓の先頭ちょうどで終わる（t[0] == w0）なら交わらない → 有効
-  fill_rows(106, 95); w.have_prev = true; w.prev_t_ms = 970; CHECK(imu_window_valid(&w, P));
+  fill_rows(106, 95);
+  w.have_prev = true;
+  w.prev_t_ms = 970;
+  CHECK(imu_window_valid(&w, P));
   w.have_prev = false;
   // 2 行未満は無効
-  fill_rows(1, 95); CHECK(!imu_window_valid(&w, P));
-  fill_rows(0, 95); CHECK(!imu_window_valid(&w, P));
-  // 局所の周期 12 ms の 83 行（12 × 82 = 984、最後 1984）: 基準 9.48 では無効（局所の周期 12 なら 75 行で足りてしまう。基準を使うことの確認）
-  fill_rows(83, 120); CHECK(!imu_window_valid(&w, P)); CHECK(imu_window_valid(&w, 12.0f));
-  // (iv) 窓の最後の行から終端まで 1.5 周期以上空くと無効（行数は足りている: 100 行、9.5 ms 刻みで最後 1940）
-  fill_rows(100, 95); CHECK(!imu_window_valid(&w, P));    // 2000 − 1940 = 60 ≥ 14.2
-  fill_rows(100, 100); CHECK(imu_window_valid(&w, P));    // 同じ 100 行でも 10 ms 刻み（最後 1990）なら有効
+  fill_rows(1, 95);
+  CHECK(!imu_window_valid(&w, P));
+  fill_rows(0, 95);
+  CHECK(!imu_window_valid(&w, P));
+  // 局所の周期 12 ms の 83 行（12 × 82 = 984、最後 1984）: 基準 9.48
+  // では無効（局所の周期 12 なら 75 行で足りてしまう。基準を使うことの確認）
+  fill_rows(83, 120);
+  CHECK(!imu_window_valid(&w, P));
+  CHECK(imu_window_valid(&w, 12.0f));
+  // (iv) 窓の最後の行から終端まで 1.5 周期以上空くと無効（行数は足りている:
+  // 100 行、9.5 ms 刻みで最後 1940）
+  // 2000 − 1940 = 60 ≥ 14.2
+  fill_rows(100, 95);
+  CHECK(!imu_window_valid(&w, P));
+  // 同じ 100 行でも 10 ms 刻み（最後 1990）なら有効
+  fill_rows(100, 100);
+  CHECK(imu_window_valid(&w, P));
 }
 
 static void test_imu_baseline_and_python_agreement() {
-  // 基準の移動平均: 直近の差分の平均（飛びも含める）を公称の 1/1.25〜1.25 倍に収める
+  // 基準の移動平均: 直近の差分の平均（飛びも含める）を公称の 1/1.25〜1.25
+  // 倍に収める
   imu_capture_init(&g_cap);
   CHECK(near(imu_period_baseline_ms(&g_src), 1000.0 / 104.0, 1e-4));
-  push_row(0); push_row(10); push_row(19); push_row(29);   // 差分 10, 9, 10
+  push_row(0);
+  push_row(10);
+  push_row(19);
+  push_row(29);  // 差分 10, 9, 10
   CHECK(near(imu_period_baseline_ms(&g_src), 29.0 / 3.0, 1e-5));
-  push_row(60);                                           // 31 ms の飛びも平均に入る（60 ÷ 4 = 15 → 上限 12.02 に収まる）
+  // 31 ms の飛びも平均に入る（60 ÷ 4 = 15 → 上限 12.02 に収まる）
+  push_row(60);
   CHECK(near(imu_period_baseline_ms(&g_src), 1000.0 / 104.0 * 1.25, 1e-4));
-  for (uint32_t t = 70; t <= 60 + 10 * 100; t += 10) push_row(t);   // 100 行進めば 31 の影響は 0.2 ms 程度
-  CHECK(near(imu_period_baseline_ms(&g_src), (double)(60 + 10 * 100) / (double)(4 + 100), 1e-4));
-  // 4 ms の poll で量子化した差分（8 と 12 が混ざる。平均 9.6。実機 P4 の imu_rows 105〜106 と同じ状態）でも基準は 9.6 に留まり、窓は有効。
-  // 注: 16 ms の差分（poll の遅れが 2 回分重なったとき）は 1.5 × 9.6 = 14.4 以上なので (ii) で飛びになる。poll 4 ms では
-  // 差分の最大は 9.6 + 約 4.5 ≒ 14.1 で閾値の内側だが余裕は小さい（0012 の規則は変えない。実機の imu_short で見る）
+  // 100 行進めば 31 の影響は 0.2 ms 程度
+  for (uint32_t t = 70; t <= 60 + 10 * 100; t += 10) push_row(t);
+  CHECK(near(imu_period_baseline_ms(&g_src),
+             (double)(60 + 10 * 100) / (double)(4 + 100), 1e-4));
+  // 4 ms の poll で量子化した差分（8 と 12 が混ざる。平均 9.6。実機 P4 の
+  // imu_rows 105〜106 と同じ状態）でも基準は 9.6 に留まり、窓は有効。
+  // 注: 16 ms の差分（poll の遅れが 2 回分重なったとき）は 1.5 × 9.6 = 14.4
+  // 以上なので (ii) で飛びになる。poll 4 ms では
+  // 差分の最大は 9.6 + 約 4.5 ≒ 14.1 で閾値の内側だが余裕は小さい（0012
+  // の規則は変えない。実機の imu_short で見る）
   {
     imu_capture_init(&g_cap);
-    const uint32_t pat[5] = { 8, 12, 8, 12, 8 };   // 和 48 = 5 × 9.6
+    const uint32_t pat[5] = {8, 12, 8, 12, 8};  // 和 48 = 5 × 9.6
     uint32_t t = 0;
-    for (uint32_t i = 0; i < 400; i++) { push_row(t); t += pat[i % 5]; }
+    for (uint32_t i = 0; i < 400; i++) {
+      push_row(t);
+      t += pat[i % 5];
+    }
     CHECK(near(imu_period_baseline_ms(&g_src), 9.6, 0.05));
     ImuWindow w;
     imu_window_copy(&g_src, t - 1500, t - 500, &w);
     CHECK(w.n >= 103 && w.n <= 106);
     CHECK(imu_window_valid(&w, imu_period_baseline_ms(&g_src)));
   }
-  // 自己固定の回帰: 起動直後に小さい差分（8, 8, 4）が続いても、その後の 12 ms の差分が平均に入り、基準が 9.6 付近に戻る
+  // 自己固定の回帰: 起動直後に小さい差分（8, 8, 4）が続いても、その後の 12 ms
+  // の差分が平均に入り、基準が 9.6 付近に戻る
   {
     imu_capture_init(&g_cap);
     uint32_t t = 0;
-    const uint32_t early[3] = { 8, 8, 4 };
-    for (uint32_t i = 0; i < 30; i++) { push_row(t); t += early[i % 3]; }
+    const uint32_t early[3] = {8, 8, 4};
+    for (uint32_t i = 0; i < 30; i++) {
+      push_row(t);
+      t += early[i % 3];
+    }
     CHECK(imu_period_baseline_ms(&g_src) < 8.0f);
-    const uint32_t pat[5] = { 12, 8, 12, 8, 8 };   // 平均 9.6
-    for (uint32_t i = 0; i < 300; i++) { push_row(t); t += pat[i % 5]; }
-    CHECK(near(imu_period_baseline_ms(&g_src), 9.6, 0.3));      // 329 個の平均（初期の 29 個が残る）: 約 9.34
-    for (uint32_t i = 0; i < 300; i++) { push_row(t); t += pat[i % 5]; }
-    CHECK(near(imu_period_baseline_ms(&g_src), 9.6, 0.05));     // 512 個を超えて初期の差分が抜けた後
+    const uint32_t pat[5] = {12, 8, 12, 8, 8};  // 平均 9.6
+    for (uint32_t i = 0; i < 300; i++) {
+      push_row(t);
+      t += pat[i % 5];
+    }
+    // 329 個の平均（初期の 29 個が残る）: 約 9.34
+    CHECK(near(imu_period_baseline_ms(&g_src), 9.6, 0.3));
+    for (uint32_t i = 0; i < 300; i++) {
+      push_row(t);
+      t += pat[i % 5];
+    }
+    // 512 個を超えて初期の差分が抜けた後
+    CHECK(near(imu_period_baseline_ms(&g_src), 9.6, 0.05));
   }
 
-  // analysis/features.py の同じ入力での valid と一致すること（期待値は scratchpad の imu_valid_expect.py の出力）。
-  // 飛びの無い列では周期も 1e-6 で一致する。飛びのある列では Python は飛びの差分を除き、装置は含めるので、周期は飛びの分
+  // analysis/features.py の同じ入力での valid と一致すること（期待値は
+  // scratchpad の imu_valid_expect.py の出力）。
+  // 飛びの無い列では周期も 1e-6 で一致する。飛びのある列では Python
+  // は飛びの差分を除き、装置は含めるので、周期は飛びの分
   // （(29 − 9.5) ÷ 219 ≒ 0.09 ms）だけ違う（period_tol）。valid は必ず一致する
-  struct Case { const char* name; uint32_t drop_lo, drop_hi; bool local12; uint32_t w0; double period_py; double period_tol; uint32_t rows_py; bool valid_py; };
+  struct Case {
+    const char* name;
+    uint32_t drop_lo, drop_hi;
+    bool local12;
+    uint32_t w0;
+    double period_py;
+    double period_tol;
+    uint32_t rows_py;
+    bool valid_py;
+  };
   const Case cases[] = {
-    { "alt_9_10",               0, 0,       false, 1000, 9.497737557, 1e-6, 105, true  },
-    { "alt_gap20_in_window",    1500, 1520, false, 1000, 9.495412844, 0.15, 103, false },
-    { "alt_gap_straddle_start", 992, 1010,  false, 1000, 9.500000000, 0.15, 104, false },
-    { "alt_gap_straddle_end",   1990, 2010, false, 1000, 9.495412844, 0.15, 104, false },
-    { "local_12ms",             0, 0,       true,  1000, 10.537688442, 1e-6, 83, false },
-    { "alt_window_1003",        0, 0,       false, 1003, 9.497737557, 1e-6, 105, true  },
+      {"alt_9_10", 0, 0, false, 1000, 9.497737557, 1e-6, 105, true},
+      {"alt_gap20_in_window", 1500, 1520, false, 1000, 9.495412844, 0.15, 103,
+       false},
+      {"alt_gap_straddle_start", 992, 1010, false, 1000, 9.500000000, 0.15, 104,
+       false},
+      {"alt_gap_straddle_end", 1990, 2010, false, 1000, 9.495412844, 0.15, 104,
+       false},
+      {"local_12ms", 0, 0, true, 1000, 10.537688442, 1e-6, 83, false},
+      {"alt_window_1003", 0, 0, false, 1003, 9.497737557, 1e-6, 105, true},
   };
   for (const Case& c : cases) {
     std::vector<uint32_t> t;
     if (c.local12) {
       std::vector<uint32_t> base = gen_alt();
-      for (uint32_t x : base) if (x < 1000) t.push_back(x);
+      for (uint32_t x : base)
+        if (x < 1000) t.push_back(x);
       uint32_t x = t.back();
-      while (x + 12 < 2000) { x += 12; t.push_back(x); }
+      while (x + 12 < 2000) {
+        x += 12;
+        t.push_back(x);
+      }
       int i = 0;
-      while (true) { x += (i % 2 == 0) ? 9 : 10; i++; if (x >= 2100) break; t.push_back(x); }
+      while (true) {
+        x += (i % 2 == 0) ? 9 : 10;
+        i++;
+        if (x >= 2100) break;
+        t.push_back(x);
+      }
     } else {
-      for (uint32_t x : gen_alt()) if (!(c.drop_lo <= x && x < c.drop_hi)) t.push_back(x);
+      for (uint32_t x : gen_alt())
+        if (!(c.drop_lo <= x && x < c.drop_hi)) t.push_back(x);
     }
     imu_capture_init(&g_cap);
     for (uint32_t x : t) push_row(x);
@@ -351,9 +543,14 @@ static void test_imu_baseline_and_python_agreement() {
     ImuWindow w;
     imu_window_copy(&g_src, c.w0, c.w0 + 1000, &w);
     bool v = imu_window_valid(&w, period);
-    bool ok = near(period, c.period_py, c.period_tol) && w.n == c.rows_py && v == c.valid_py;
-    if (!ok) printf("  %s: device period=%.9f rows=%u valid=%d / python period=%.9f rows=%u valid=%d\n",
-                    c.name, (double)period, (unsigned)w.n, (int)v, c.period_py, (unsigned)c.rows_py, (int)c.valid_py);
+    bool ok = near(period, c.period_py, c.period_tol) && w.n == c.rows_py &&
+              v == c.valid_py;
+    if (!ok)
+      printf(
+          "  %s: device period=%.9f rows=%u valid=%d / python period=%.9f "
+          "rows=%u valid=%d\n",
+          c.name, (double)period, (unsigned)w.n, (int)v, c.period_py,
+          (unsigned)c.rows_py, (int)c.valid_py);
     CHECK(ok);
   }
 }
@@ -361,17 +558,19 @@ static void test_imu_baseline_and_python_agreement() {
 static void test_imu_window_copy() {
   // 半開区間 [w0, w1)、直前の行、リングの一周、128 行の上限
   imu_capture_init(&g_cap);
-  for (uint32_t i = 0; i < 300; i++) push_row(i * 10);     // 0..2990。リングは 192 行（1080..2990 が残る）
+  // 0..2990。リングは 192 行（1080..2990 が残る）
+  for (uint32_t i = 0; i < 300; i++) push_row(i * 10);
   ImuWindow w;
   imu_window_copy(&g_src, 2000, 3000, &w);
   CHECK_EQ(w.n, 100);
-  CHECK_EQ(w.t_ms[0], 2000);                                // w0 は含む
+  CHECK_EQ(w.t_ms[0], 2000);  // w0 は含む
   CHECK_EQ(w.t_ms[99], 2990);
-  CHECK(w.have_prev); CHECK_EQ(w.prev_t_ms, 1990);
+  CHECK(w.have_prev);
+  CHECK_EQ(w.prev_t_ms, 1990);
   CHECK(!w.truncated);
   imu_window_copy(&g_src, 1500, 2500, &w);
   CHECK_EQ(w.n, 100);
-  CHECK_EQ(w.t_ms[99], 2490);                               // w1 は含まない
+  CHECK_EQ(w.t_ms[99], 2490);  // w1 は含まない
   CHECK_EQ(w.acc[0][1], 1);
   // リングより古い窓: 行は残っていない
   imu_window_copy(&g_src, 0, 1000, &w);
@@ -388,14 +587,24 @@ static void test_imu_window_copy() {
 // ---------- pipeline の帳簿（classify はスタブ） ----------
 static int16_t g_slice[AC_SLICE_SAMPLES];
 
-// IMU の行を実時間の到着のように積む（リングは 192 行しか持たないので、窓の終端の少し先まで進めてから prepare を呼ぶ）
+// IMU の行を実時間の到着のように積む（リングは 192 行しか持たないので、
+// 窓の終端の少し先まで進めてから prepare を呼ぶ）
 static uint32_t g_imu_t = 0;
 static int g_imu_i = 0;
-static void imu_reset() { imu_capture_init(&g_cap); g_imu_t = 0; g_imu_i = 0; }
-static void imu_advance_to(uint32_t t_end) {
-  while (g_imu_t < t_end) { push_row(g_imu_t); g_imu_t += (g_imu_i % 2 == 0) ? 9 : 10; g_imu_i++; }
+static void imu_reset() {
+  imu_capture_init(&g_cap);
+  g_imu_t = 0;
+  g_imu_i = 0;
 }
-// スライス t0 の 250 ms 後 + 20 ms まで IMU を進めてから prepare（detector.ino が w1 + 5 まで待つのと同じ向き）
+static void imu_advance_to(uint32_t t_end) {
+  while (g_imu_t < t_end) {
+    push_row(g_imu_t);
+    g_imu_t += (g_imu_i % 2 == 0) ? 9 : 10;
+    g_imu_i++;
+  }
+}
+// スライス t0 の 250 ms 後 + 20 ms まで IMU を進めてから prepare（detector.ino
+// が w1 + 5 まで待つのと同じ向き）
 static bool prep(uint32_t t0, uint32_t seq, HopResult* r) {
   imu_advance_to(t0 + 250 + 20);
   return pipeline_prepare(g_slice, t0, seq, &g_src, r);
@@ -407,12 +616,15 @@ static bool hop(uint32_t t0, uint32_t seq, HopResult* r) {
 
 static void test_pipeline_bookkeeping() {
   pipeline_init_stages();
-  for (uint32_t i = 0; i < AC_SLICE_SAMPLES; i++) g_slice[i] = (int16_t)((i * 37) % 2000 - 1000);
+  for (uint32_t i = 0; i < AC_SLICE_SAMPLES; i++)
+    g_slice[i] = (int16_t)((i * 37) % 2000 - 1000);
   imu_reset();
   HopResult r;
   // 4 スライス目で窓が出る。window_t_ms は最も古いスライスの t0
-  CHECK(!prep(0, 0, &r));   CHECK_EQ(r.reason, HOP_NOT_FILLED);
-  CHECK(!prep(250, 1, &r)); CHECK_EQ(r.reason, HOP_NOT_FILLED);
+  CHECK(!prep(0, 0, &r));
+  CHECK_EQ(r.reason, HOP_NOT_FILLED);
+  CHECK(!prep(250, 1, &r));
+  CHECK_EQ(r.reason, HOP_NOT_FILLED);
   CHECK(!prep(500, 2, &r));
   CHECK_EQ(pipeline_window_end_ms(750), 1000);
   CHECK(prep(750, 3, &r));
@@ -423,42 +635,61 @@ static void test_pipeline_bookkeeping() {
   CHECK_EQ(r.window_t_ms, 250);
   CHECK_EQ(pipeline_window_end_ms(1250), 1500);
   // 連番の飛び: audio_reuse_init に戻り（resets++）、4 スライス後に窓が出る
-  CHECK(!prep(1500, 6, &r)); CHECK_EQ(r.reason, HOP_RESET);
-  PipelineStats st; pipeline_stats(&st);
+  CHECK(!prep(1500, 6, &r));
+  CHECK_EQ(r.reason, HOP_RESET);
+  PipelineStats st;
+  pipeline_stats(&st);
   CHECK_EQ(st.resets, 1);
-  CHECK(!prep(1750, 7, &r)); CHECK_EQ(r.reason, HOP_NOT_FILLED);
+  CHECK(!prep(1750, 7, &r));
+  CHECK_EQ(r.reason, HOP_NOT_FILLED);
   CHECK(!prep(2000, 8, &r));
   CHECK(prep(2250, 9, &r));
   CHECK_EQ(r.window_t_ms, 1500);
-  // 無効な IMU の窓: 窓を出さず imu_short++（IMU スレッドが止まった形: 行を進めずに次のスライス。窓 [1750, 2750) の行は 2520 まで）
+  // 無効な IMU の窓: 窓を出さず imu_short++（IMU スレッドが止まった形:
+  // 行を進めずに次のスライス。窓 [1750, 2750) の行は 2520 まで）
   CHECK(!pipeline_prepare(g_slice, 2500, 10, &g_src, &r));
   CHECK_EQ(r.reason, HOP_IMU_SHORT);
   CHECK(r.imu_rows < 94);
   pipeline_stats(&st);
   CHECK_EQ(st.imu_short, 1);
-  CHECK_EQ(st.windows, 0);   // prepare だけでは windows は増えない
+  CHECK_EQ(st.windows, 0);  // prepare だけでは windows は増えない
   // 行が届けば次の窓は出る（音声は連続なので窓を作り直さない）
   CHECK(prep(2750, 11, &r));
   CHECK_EQ(r.window_t_ms, 2000);
 
-  // 帳簿の固定（#24 の実機で IMU の行が 60〜68 だった件の切り分け）: 不揃いな t0 を並べ、連番の飛びで戻した後の 4 スライス目の
-  // window_t_ms が「窓が満ちた瞬間のリングにある 4 スライスのうち最も古いもの（= 戻したスライス）」の t0 になること
+  // 帳簿の固定（#24 の実機で IMU の行が 60〜68 だった件の切り分け）: 不揃いな
+  // t0 を並べ、連番の飛びで戻した後の 4 スライス目の
+  // window_t_ms が「窓が満ちた瞬間のリングにある 4 スライスのうち最も古いもの（
+  // = 戻したスライス）」の t0 になること
   pipeline_init_stages();
   imu_reset();
-  CHECK(!prep(100, 0, &r)); CHECK(!prep(351, 1, &r)); CHECK(!prep(600, 2, &r));
-  CHECK(prep(852, 3, &r)); CHECK_EQ(r.window_t_ms, 100);
-  CHECK(prep(1101, 4, &r)); CHECK_EQ(r.window_t_ms, 351);
-  CHECK(!prep(3000, 9, &r)); CHECK_EQ(r.reason, HOP_RESET);                  // 飛び
-  CHECK(!prep(3251, 10, &r)); CHECK_EQ(r.reason, HOP_NOT_FILLED);
+  CHECK(!prep(100, 0, &r));
+  CHECK(!prep(351, 1, &r));
+  CHECK(!prep(600, 2, &r));
+  CHECK(prep(852, 3, &r));
+  CHECK_EQ(r.window_t_ms, 100);
+  CHECK(prep(1101, 4, &r));
+  CHECK_EQ(r.window_t_ms, 351);
+  CHECK(!prep(3000, 9, &r));
+  CHECK_EQ(r.reason, HOP_RESET);  // 飛び
+  CHECK(!prep(3251, 10, &r));
+  CHECK_EQ(r.reason, HOP_NOT_FILLED);
   CHECK(!prep(3500, 11, &r));
   CHECK_EQ(pipeline_window_end_ms(3750), 4000);
-  CHECK(prep(3750, 12, &r)); CHECK_EQ(r.window_t_ms, 3000);                  // 戻したスライスの t0
-  CHECK(prep(4001, 13, &r)); CHECK_EQ(r.window_t_ms, 3251);
+  // 戻したスライスの t0
+  CHECK(prep(3750, 12, &r));
+  CHECK_EQ(r.window_t_ms, 3000);
+  CHECK(prep(4001, 13, &r));
+  CHECK_EQ(r.window_t_ms, 3251);
   // 連続して 2 回飛んだ場合
-  CHECK(!prep(6000, 20, &r)); CHECK_EQ(r.reason, HOP_RESET);
-  CHECK(!prep(7000, 30, &r)); CHECK_EQ(r.reason, HOP_RESET);
-  CHECK(!prep(7250, 31, &r)); CHECK(!prep(7500, 32, &r));
-  CHECK(prep(7750, 33, &r)); CHECK_EQ(r.window_t_ms, 7000);
+  CHECK(!prep(6000, 20, &r));
+  CHECK_EQ(r.reason, HOP_RESET);
+  CHECK(!prep(7000, 30, &r));
+  CHECK_EQ(r.reason, HOP_RESET);
+  CHECK(!prep(7250, 31, &r));
+  CHECK(!prep(7500, 32, &r));
+  CHECK(prep(7750, 33, &r));
+  CHECK_EQ(r.window_t_ms, 7000);
 
   // pipeline_hop（スタブの classify）: positive は float32 同士の比較
   CHECK(pipeline_init());
@@ -466,15 +697,16 @@ static void test_pipeline_bookkeeping() {
   g_stub_swallow = 0.95f;
   for (uint32_t k = 0; k < 3; k++) CHECK(!hop(k * 250, k, &r));
   CHECK(hop(750, 3, &r));
-  CHECK_EQ(r.positive, 1);            // 0.95f >= M2_THRESHOLD(0.95f)
-  CHECK_EQ(r.led, LED_GREEN);         // 陽性窓で緑（docs/decisions/0018。#25）
+  CHECK_EQ(r.positive, 1);     // 0.95f >= M2_THRESHOLD(0.95f)
+  CHECK_EQ(r.led, LED_GREEN);  // 陽性窓で緑（docs/decisions/0018。#25）
   CHECK(r.prob == M2_THRESHOLD);
   g_stub_swallow = 0.9499f;
   CHECK(hop(1000, 4, &r));
   CHECK_EQ(r.positive, 0);
   CHECK_EQ(r.window_t_ms, 250);
-  CHECK_EQ(r.led, LED_GREEN);         // 陽性窓（開始 0）から 250 ms: 緑のまま
-  // 特徴量の並び: 0..13 が IMU（静止の合成: acc_axis_y が 1 に近い）、14..28 が音
+  CHECK_EQ(r.led, LED_GREEN);  // 陽性窓（開始 0）から 250 ms: 緑のまま
+  // 特徴量の並び: 0..13 が IMU（静止の合成: acc_axis_y が 1 に近い）、14..28
+  // が音
   CHECK(near(r.features[12], 1.0, 1e-3));
   g_stub_ok = false;
   CHECK(!hop(1250, 5, &r));
@@ -485,34 +717,57 @@ static void test_pipeline_bookkeeping() {
   CHECK_EQ(st.classify_errors, 1);
 }
 
-// pipeline_hop の r.led（#25）: 陽性の窓で 2、その窓を含めて 8 窓（結果 8 回分 = 2.0 秒）が 2、9 窓目で 1。
-// 結果が出ない呼び出し（classify のエラー）は規則の状態を進めず、led は 0 のまま
+// pipeline_hop の r.led（#25）: 陽性の窓で 2、その窓を含めて 8 窓（結果 8 回分
+// = 2.0 秒）が 2、9 窓目で 1。
+// 結果が出ない呼び出し（classify のエラー）は規則の状態を進めず、led は 0
+// のまま
 static void test_pipeline_led() {
   HopResult r;
   CHECK(pipeline_init());
   imu_reset();
   g_stub_ok = true;
   g_stub_swallow = 0.0f;
-  for (uint32_t k = 0; k < 3; k++) { CHECK(!hop(k * 250, k, &r)); CHECK_EQ(r.led, 0); }
-  CHECK(hop(750, 3, &r)); CHECK_EQ(r.window_t_ms, 0);   CHECK_EQ(r.positive, 0); CHECK_EQ(r.led, LED_YELLOW);
-  CHECK(hop(1000, 4, &r)); CHECK_EQ(r.led, LED_YELLOW);
-  g_stub_swallow = M2_THRESHOLD;                        // 閾値ちょうどで陽性
-  CHECK(hop(1250, 5, &r)); CHECK_EQ(r.window_t_ms, 500); CHECK_EQ(r.positive, 1); CHECK_EQ(r.led, LED_GREEN);
+  for (uint32_t k = 0; k < 3; k++) {
+    CHECK(!hop(k * 250, k, &r));
+    CHECK_EQ(r.led, 0);
+  }
+  CHECK(hop(750, 3, &r));
+  CHECK_EQ(r.window_t_ms, 0);
+  CHECK_EQ(r.positive, 0);
+  CHECK_EQ(r.led, LED_YELLOW);
+  CHECK(hop(1000, 4, &r));
+  CHECK_EQ(r.led, LED_YELLOW);
+  g_stub_swallow = M2_THRESHOLD;  // 閾値ちょうどで陽性
+  CHECK(hop(1250, 5, &r));
+  CHECK_EQ(r.window_t_ms, 500);
+  CHECK_EQ(r.positive, 1);
+  CHECK_EQ(r.led, LED_GREEN);
   g_stub_swallow = 0.0f;
   uint32_t seq = 6, t0 = 1500;
-  for (uint32_t k = 1; k <= 7; k++, seq++, t0 += 250) {  // 開始 750〜2250（w_p + 250 〜 w_p + 1750）: 緑
-    CHECK(hop(t0, seq, &r)); CHECK_EQ(r.positive, 0); CHECK_EQ(r.led, LED_GREEN);
+  // 開始 750〜2250（w_p + 250 〜 w_p + 1750）: 緑
+  for (uint32_t k = 1; k <= 7; k++, seq++, t0 += 250) {
+    CHECK(hop(t0, seq, &r));
+    CHECK_EQ(r.positive, 0);
+    CHECK_EQ(r.led, LED_GREEN);
   }
   CHECK_EQ(r.window_t_ms, 2250);
-  CHECK(hop(t0, seq, &r)); CHECK_EQ(r.window_t_ms, 2500); CHECK_EQ(r.led, LED_YELLOW);   // 9 窓目（w_p + 2000）: 黄
-  seq++; t0 += 250;
+  // 9 窓目（w_p + 2000）: 黄
+  CHECK(hop(t0, seq, &r));
+  CHECK_EQ(r.window_t_ms, 2500);
+  CHECK_EQ(r.led, LED_YELLOW);
+  seq++;
+  t0 += 250;
   g_stub_ok = false;
-  CHECK(!hop(t0, seq, &r)); CHECK_EQ(r.reason, HOP_CLASSIFY_ERROR); CHECK_EQ(r.led, 0);
+  CHECK(!hop(t0, seq, &r));
+  CHECK_EQ(r.reason, HOP_CLASSIFY_ERROR);
+  CHECK_EQ(r.led, 0);
   g_stub_ok = true;
 }
 
-// 実機で見えた「IMU の行が 60〜68」の再現: 窓 [w0, w0 + 1000) の取り出しが w0 + 2180 ms まで遅れる（旧 audio_reuse_push が最初の窓で
-// 全フレームを計算して 1177 ms 掛かった）と、192 行のリング（約 1.85 秒）から窓の前半が押し出されて行数が足りなくなる
+// 実機で見えた「IMU の行が 60〜68」の再現: 窓 [w0, w0 + 1000) の取り出しが w0
+// + 2180 ms まで遅れる（旧 audio_reuse_push が最初の窓で
+// 全フレームを計算して 1177 ms 掛かった）と、192 行のリング（約 1.85 秒）
+// から窓の前半が押し出されて行数が足りなくなる
 static void test_imu_ring_eviction() {
   imu_reset();
   imu_advance_to(1000 + 2180);
@@ -528,8 +783,10 @@ static void test_imu_ring_eviction() {
   CHECK(imu_window_valid(&w, imu_period_baseline_ms(&g_src)));
 }
 
-// audio_reuse_push が窓が満ちる前のスライスでもフレームを積み、最初の窓が全窓版と一致し、かつ最初の窓の費用（frame_features の
-// 回数）が定常状態と同じであること（#24: 4 スライス目で 1177 ms 掛かっていた）。frame_features の回数は音の段階の関数からは数え
+// audio_reuse_push が窓が満ちる前のスライスでもフレームを積み、
+// 最初の窓が全窓版と一致し、かつ最初の窓の費用（frame_features の
+// 回数）が定常状態と同じであること（#24: 4 スライス目で 1177 ms
+// 掛かっていた）。frame_features の回数は音の段階の関数からは数え
 // られないので、4 スライス目と 5 スライス目の CPU 時間（clock()）の比で見る
 #include <time.h>
 static int16_t g_audio16k[4 * AC_SLICE_SAMPLES + AC_SLICE_SAMPLES];
@@ -538,8 +795,12 @@ static void test_audio_reuse_incremental() {
   // 合成: 2 つの正弦波 + 擬似乱数（値の範囲は小さめ）
   uint32_t x = 12345u;
   for (uint32_t i = 0; i < sizeof(g_audio16k) / sizeof(g_audio16k[0]); i++) {
-    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
-    double v = 3000.0 * sin(2 * M_PI * 440.0 * i / 16000.0) + 1500.0 * sin(2 * M_PI * 1234.5 * i / 16000.0) + (double)(x % 2001) - 1000.0;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    double v = 3000.0 * sin(2 * M_PI * 440.0 * i / 16000.0) +
+               1500.0 * sin(2 * M_PI * 1234.5 * i / 16000.0) +
+               (double)(x % 2001) - 1000.0;
     g_audio16k[i] = (int16_t)v;
   }
   AudioReuseState st;
@@ -555,23 +816,29 @@ static void test_audio_reuse_incremental() {
   audio_features_full(g_audio8k, full);
   double max_rel = 0;
   for (uint32_t k = 0; k < AF_N_FEATURES; k++) {
-    double rel = fabs((double)out[k] - (double)full[k]) / (fabs((double)full[k]) + 1e-6);
+    double rel =
+        fabs((double)out[k] - (double)full[k]) / (fabs((double)full[k]) + 1e-6);
     if (rel > max_rel) max_rel = rel;
   }
   printf("  reuse first window vs full: max_rel_err=%.3e\n", max_rel);
   CHECK(max_rel < 1e-5);
-  // 5 スライス目（定常状態）と 4 スライス目の時間の比。旧実装では 4 スライス目が約 4 倍
+  // 5 スライス目（定常状態）と 4 スライス目の時間の比。旧実装では 4
+  // スライス目が約 4 倍
   clock_t c2 = clock();
   CHECK(audio_reuse_push(&st, g_audio16k + 4 * AC_SLICE_SAMPLES, out));
   clock_t c3 = clock();
   double t4 = (double)(c1 - c0), t5 = (double)(c3 - c2);
-  printf("  reuse cpu: 4th slice=%.0f us, 5th slice=%.0f us\n", t4 * 1e6 / CLOCKS_PER_SEC, t5 * 1e6 / CLOCKS_PER_SEC);
-  CHECK(t5 <= 0 || t4 < 2.0 * t5 + (double)CLOCKS_PER_SEC / 1000.0);   // 2 倍未満（+1 ms の余裕）
-  audio_stage_decimate(g_audio16k + AC_SLICE_SAMPLES, 4 * AC_SLICE_SAMPLES, g_audio8k);
+  printf("  reuse cpu: 4th slice=%.0f us, 5th slice=%.0f us\n",
+         t4 * 1e6 / CLOCKS_PER_SEC, t5 * 1e6 / CLOCKS_PER_SEC);
+  // 2 倍未満（+1 ms の余裕）
+  CHECK(t5 <= 0 || t4 < 2.0 * t5 + (double)CLOCKS_PER_SEC / 1000.0);
+  audio_stage_decimate(g_audio16k + AC_SLICE_SAMPLES, 4 * AC_SLICE_SAMPLES,
+                       g_audio8k);
   audio_features_full(g_audio8k, full);
   max_rel = 0;
   for (uint32_t k = 0; k < AF_N_FEATURES; k++) {
-    double rel = fabs((double)out[k] - (double)full[k]) / (fabs((double)full[k]) + 1e-6);
+    double rel =
+        fabs((double)out[k] - (double)full[k]) / (fabs((double)full[k]) + 1e-6);
     if (rel > max_rel) max_rel = rel;
   }
   CHECK(max_rel < 1e-5);
@@ -583,14 +850,20 @@ static void test_meta() {
   int n = detector_meta_build(buf, sizeof buf, 1117130, 2);
   CHECK(n > 0);
   const char* expected =
-    "{\"fw\":\"detector\",\"imu_hz\":104,\"audio_hz\":16000,\"window_ms\":1000,\"hop_ms\":250,"
-    "\"threshold\":0.949999988,"
-    "\"model\":{\"source\":\"edge-impulse\",\"project_id\":1117130,\"deploy_version\":2},"
-    "\"feature_set\":\"m2-0020\","
-    "\"feature_names\":[\"acc_ptp_x\",\"acc_ptp_y\",\"acc_ptp_z\",\"gyro_norm_ptp\",\"acc_rms_x\",\"acc_rms_y\",\"acc_rms_z\","
-    "\"gyro_rms_x\",\"gyro_rms_y\",\"gyro_rms_z\",\"acc_peak_count\",\"acc_axis_x\",\"acc_axis_y\",\"acc_axis_z\","
-    "\"mfcc_0\",\"mfcc_1\",\"mfcc_2\",\"mfcc_3\",\"mfcc_4\",\"mfcc_5\",\"mfcc_6\",\"mfcc_7\",\"mfcc_8\",\"mfcc_9\",\"mfcc_10\","
-    "\"mfcc_11\",\"mfcc_12\",\"spectral_centroid_hz\",\"zero_crossing_rate\"]}";
+      "{\"fw\":\"detector\",\"imu_hz\":104,\"audio_hz\":16000,\"window_ms\":"
+      "1000,\"hop_ms\":250,"
+      "\"threshold\":0.949999988,"
+      "\"model\":{\"source\":\"edge-impulse\",\"project_id\":1117130,\"deploy_"
+      "version\":2},"
+      "\"feature_set\":\"m2-0020\","
+      "\"feature_names\":[\"acc_ptp_x\",\"acc_ptp_y\",\"acc_ptp_z\",\"gyro_"
+      "norm_ptp\",\"acc_rms_x\",\"acc_rms_y\",\"acc_rms_z\","
+      "\"gyro_rms_x\",\"gyro_rms_y\",\"gyro_rms_z\",\"acc_peak_count\",\"acc_"
+      "axis_x\",\"acc_axis_y\",\"acc_axis_z\","
+      "\"mfcc_0\",\"mfcc_1\",\"mfcc_2\",\"mfcc_3\",\"mfcc_4\",\"mfcc_5\","
+      "\"mfcc_6\",\"mfcc_7\",\"mfcc_8\",\"mfcc_9\",\"mfcc_10\","
+      "\"mfcc_11\",\"mfcc_12\",\"spectral_centroid_hz\",\"zero_crossing_rate\"]"
+      "}";
   if (n > 0 && strcmp(buf, expected) != 0) printf("  meta: %s\n", buf);
   CHECK(n > 0 && strcmp(buf, expected) == 0);
   CHECK_EQ(n, (int)strlen(expected));
@@ -601,7 +874,8 @@ static void test_meta() {
   CHECK_EQ(detector_meta_build(small, sizeof small, 1, 2), -1);
 }
 
-// 合図のバイト（Issue #33）: 'M' だけが真。表示器の値 0/1/2、小文字、他の文字、受けていない −1、上位ビットの立ったバイトは偽
+// 合図のバイト（Issue #33）: 'M' だけが真。表示器の値 0/1/2、小文字、他の文字、
+// 受けていない −1、上位ビットの立ったバイトは偽
 static void test_meta_request() {
   CHECK_EQ(DETECTOR_META_REQUEST, 0x4D);
   CHECK(detector_meta_is_request('M'));
@@ -614,74 +888,107 @@ static void test_meta_request() {
   CHECK(!detector_meta_is_request(0xCD));
 }
 
-// ---------- led_rule（docs/decisions/0018。analysis/test_led_rule.py と同じ入力の表。値は両方に書いてある） ----------
-struct LedCase { const char* name; std::vector<uint32_t> w; std::vector<uint8_t> positive; std::vector<uint8_t> led; };
+// ---------- led_rule（docs/decisions/0018。analysis/test_led_rule.py
+// と同じ入力の表。値は両方に書いてある） ----------
+struct LedCase {
+  const char* name;
+  std::vector<uint32_t> w;
+  std::vector<uint8_t> positive;
+  std::vector<uint8_t> led;
+};
 
 static void run_led_case(const LedCase& c) {
-  LedRule s; led_rule_init(&s);
+  LedRule s;
+  led_rule_init(&s);
   bool ok = c.w.size() == c.positive.size() && c.w.size() == c.led.size();
   for (size_t i = 0; ok && i < c.w.size(); i++) {
     uint8_t got = led_rule_update(&s, c.w[i], c.positive[i]);
-    if (got != c.led[i]) { printf("  led_rule %s: row %zu w=%u got %u want %u\n", c.name, i, (unsigned)c.w[i], (unsigned)got, (unsigned)c.led[i]); ok = false; }
+    if (got != c.led[i]) {
+      printf("  led_rule %s: row %zu w=%u got %u want %u\n", c.name, i,
+             (unsigned)c.w[i], (unsigned)got, (unsigned)c.led[i]);
+      ok = false;
+    }
   }
   CHECK(ok);
 }
 
 static void test_led_rule() {
   const LedCase cases[] = {
-    // 1. 起動直後: 陽性なし → 黄
-    { "1_start", { 1000, 1250, 1500 }, { 0, 0, 0 }, { 1, 1, 1 } },
-    // 2. 1 窓の陽性: 2000〜3750 の 8 行が緑、4000 が黄（結果 8 回分 = 2.0 秒）
-    { "2_single", { 2000, 2250, 2500, 2750, 3000, 3250, 3500, 3750, 4000 },
-                  { 1, 0, 0, 0, 0, 0, 0, 0, 0 },
-                  { 2, 2, 2, 2, 2, 2, 2, 2, 1 } },
-    // 3. 2 窓連続: 2000〜4000 の 9 行が緑（(k − 1) × 0.25 + 2.0 秒）、4250 が黄
-    { "3_two_in_a_row", { 2000, 2250, 2500, 2750, 3000, 3250, 3500, 3750, 4000, 4250 },
-                        { 1, 1, 0, 0, 0, 0, 0, 0, 0, 0 },
-                        { 2, 2, 2, 2, 2, 2, 2, 2, 2, 1 } },
-    // 4. 陽性が離れて 2 回（2000 と 3000）: 2000〜4750 が緑、5000 が黄
-    { "4_two_apart", { 2000, 2250, 2500, 2750, 3000, 3250, 3500, 3750, 4000, 4250, 4500, 4750, 5000 },
-                     { 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0 },
-                     { 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1 } },
-    // 5. 窓の飛び: 2000 陽性、次が 3750（差 1750 ちょうど）→ 緑、次が 3800（差 1800）→ 黄
-    { "5_gap", { 2000, 3750, 3800 }, { 1, 0, 0 }, { 2, 2, 1 } },
-    // 6. 陽性が続く 18 窓（2000〜6250）: 緑は最後の陽性（6250）から 8 行（〜8000）、8250 が黄
-    { "6_run18", { 2000, 2250, 2500, 2750, 3000, 3250, 3500, 3750, 4000, 4250, 4500, 4750, 5000,
-                   5250, 5500, 5750, 6000, 6250, 6500, 6750, 7000, 7250, 7500, 7750, 8000, 8250 },
-                 { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0 },
-                 { 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1 } },
+      // 1. 起動直後: 陽性なし → 黄
+      {"1_start", {1000, 1250, 1500}, {0, 0, 0}, {1, 1, 1}},
+      // 2. 1 窓の陽性: 2000〜3750 の 8 行が緑、4000 が黄（結果 8 回分 = 2.0
+      //   秒）
+      {"2_single",
+       {2000, 2250, 2500, 2750, 3000, 3250, 3500, 3750, 4000},
+       {1, 0, 0, 0, 0, 0, 0, 0, 0},
+       {2, 2, 2, 2, 2, 2, 2, 2, 1}},
+      // 3. 2 窓連続: 2000〜4000 の 9 行が緑（(k − 1) × 0.25 + 2.0 秒）、4250
+      //   が黄
+      {"3_two_in_a_row",
+       {2000, 2250, 2500, 2750, 3000, 3250, 3500, 3750, 4000, 4250},
+       {1, 1, 0, 0, 0, 0, 0, 0, 0, 0},
+       {2, 2, 2, 2, 2, 2, 2, 2, 2, 1}},
+      // 4. 陽性が離れて 2 回（2000 と 3000）: 2000〜4750 が緑、5000 が黄
+      {"4_two_apart",
+       {2000, 2250, 2500, 2750, 3000, 3250, 3500, 3750, 4000, 4250, 4500, 4750,
+        5000},
+       {1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0},
+       {2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1}},
+      // 5. 窓の飛び: 2000 陽性、次が 3750（差 1750 ちょうど）→ 緑、次が
+      //   3800（差 1800）→ 黄
+      {"5_gap", {2000, 3750, 3800}, {1, 0, 0}, {2, 2, 1}},
+      // 6. 陽性が続く 18 窓（2000〜6250）: 緑は最後の陽性（6250）から 8
+      //   行（〜8000）、8250 が黄
+      {"6_run18",
+       {2000, 2250, 2500, 2750, 3000, 3250, 3500, 3750, 4000,
+        4250, 4500, 4750, 5000, 5250, 5500, 5750, 6000, 6250,
+        6500, 6750, 7000, 7250, 7500, 7750, 8000, 8250},
+       {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0},
+       {2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1}},
   };
   for (const LedCase& c : cases) run_led_case(c);
   // LED_OFF は返さない
-  LedRule s; led_rule_init(&s);
+  LedRule s;
+  led_rule_init(&s);
   CHECK_EQ(led_rule_update(&s, 0, 0), LED_YELLOW);
   // 陽性の後の陰性が続いても w_p は消えない（後で陽性が無ければ黄のまま）
   CHECK_EQ(led_rule_update(&s, 250, 1), LED_GREEN);
   CHECK_EQ(led_rule_update(&s, 2250, 0), LED_YELLOW);
-  CHECK_EQ(s.has_positive, 1); CHECK_EQ(s.last_positive_w_ms, 250);
+  CHECK_EQ(s.has_positive, 1);
+  CHECK_EQ(s.last_positive_w_ms, 250);
 }
 
 static void test_led_off_due() {
-  CHECK(!led_off_due(1999, 1000));                     // 999 ms
-  CHECK(led_off_due(2000, 1000));                      // 1000 ms
+  CHECK(!led_off_due(1999, 1000));  // 999 ms
+  CHECK(led_off_due(2000, 1000));   // 1000 ms
   CHECK(led_off_due(5000, 1000));
   CHECK(!led_off_due(1000, 1000));
-  CHECK(led_off_due(1000u, 0xFFFFFF00u));              // millis() の一周をまたぐ（差 1256 ms）
-  CHECK(!led_off_due(500u, 0xFFFFFF00u));              // 同（差 756 ms）
+  // millis() の一周をまたぐ（差 1256 ms）
+  CHECK(led_off_due(1000u, 0xFFFFFF00u));
+  CHECK(!led_off_due(500u, 0xFFFFFF00u));  // 同（差 756 ms）
 }
 
 static void test_led_shown_after() {
-  // 表 2 の入力で規則の出力を目標にし、2000（黄 → 緑）の窓だけ NINA の準備ができていない形。直前は黄を表示していたとする
-  const uint32_t w[] = { 2000, 2250, 2500, 2750, 3000, 3250, 3500, 3750, 4000 };
-  const uint8_t pos[] = { 1, 0, 0, 0, 0, 0, 0, 0, 0 };
-  const uint8_t shown_want[] = { 1, 2, 2, 2, 2, 2, 2, 2, 1 };   // DETECT に載る状態: 2000 は前の黄のまま、2250 で緑
-  LedRule s; led_rule_init(&s);
+  // 表 2 の入力で規則の出力を目標にし、2000（黄 → 緑）の窓だけ NINA
+  // の準備ができていない形。直前は黄を表示していたとする
+  const uint32_t w[] = {2000, 2250, 2500, 2750, 3000, 3250, 3500, 3750, 4000};
+  const uint8_t pos[] = {1, 0, 0, 0, 0, 0, 0, 0, 0};
+  // DETECT に載る状態: 2000 は前の黄のまま、2250 で緑
+  const uint8_t shown_want[] = {1, 2, 2, 2, 2, 2, 2, 2, 1};
+  LedRule s;
+  led_rule_init(&s);
   uint8_t shown = LED_YELLOW;
   bool ok = true;
   for (int i = 0; i < 9; i++) {
     uint8_t target = led_rule_update(&s, w[i], pos[i]);
     shown = led_shown_after(shown, target, w[i] != 2000);
-    if (shown != shown_want[i]) { printf("  led_shown_after: w=%u shown %u want %u\n", (unsigned)w[i], (unsigned)shown, (unsigned)shown_want[i]); ok = false; }
+    if (shown != shown_want[i]) {
+      printf("  led_shown_after: w=%u shown %u want %u\n", (unsigned)w[i],
+             (unsigned)shown, (unsigned)shown_want[i]);
+      ok = false;
+    }
   }
   CHECK(ok);
   // 消灯から黄への書き込みを飛ばすと 0 のまま、次に準備ができて 1
@@ -700,26 +1007,43 @@ static void test_frames() {
   HopResult r;
   memset(&r, 0, sizeof r);
   r.window_t_ms = 0x04030A01u;
-  r.prob = 0.75f;     // 0x3F400000
-  r.positive = 1; r.led = 0;
-  for (int i = 0; i < M2_N_FEATURES; i++) r.features[i] = (float)i * 0.5f - 3.0f;
+  r.prob = 0.75f;  // 0x3F400000
+  r.positive = 1;
+  r.led = 0;
+  for (int i = 0; i < M2_N_FEATURES; i++)
+    r.features[i] = (float)i * 0.5f - 3.0f;
   uint8_t p[DETECT_PAYLOAD_LEN];
   pack_detect(&r, p);
   CHECK_EQ(DETECT_PAYLOAD_LEN, 10);
-  CHECK_EQ(p[0], 0x01); CHECK_EQ(p[1], 0x0A); CHECK_EQ(p[2], 0x03); CHECK_EQ(p[3], 0x04);
-  CHECK_EQ(p[4], 0x00); CHECK_EQ(p[5], 0x00); CHECK_EQ(p[6], 0x40); CHECK_EQ(p[7], 0x3F);
-  CHECK_EQ(p[8], 1); CHECK_EQ(p[9], 0);
+  CHECK_EQ(p[0], 0x01);
+  CHECK_EQ(p[1], 0x0A);
+  CHECK_EQ(p[2], 0x03);
+  CHECK_EQ(p[3], 0x04);
+  CHECK_EQ(p[4], 0x00);
+  CHECK_EQ(p[5], 0x00);
+  CHECK_EQ(p[6], 0x40);
+  CHECK_EQ(p[7], 0x3F);
+  CHECK_EQ(p[8], 1);
+  CHECK_EQ(p[9], 0);
   // struct.unpack("<IfBB") と同じ読み方で戻る
-  uint32_t wt; float prob;
-  memcpy(&wt, p, 4); memcpy(&prob, p + 4, 4);
-  CHECK_EQ(wt, 0x04030A01u); CHECK(prob == 0.75f);
+  uint32_t wt;
+  float prob;
+  memcpy(&wt, p, 4);
+  memcpy(&prob, p + 4, 4);
+  CHECK_EQ(wt, 0x04030A01u);
+  CHECK(prob == 0.75f);
   uint8_t f[FEAT_PAYLOAD_LEN];
   pack_feat(&r, f);
   CHECK_EQ(FEAT_PAYLOAD_LEN, 120);
   CHECK_EQ((FEAT_PAYLOAD_LEN - 4) % 4, 0);
-  memcpy(&wt, f, 4); CHECK_EQ(wt, 0x04030A01u);
+  memcpy(&wt, f, 4);
+  CHECK_EQ(wt, 0x04030A01u);
   bool all = true;
-  for (int i = 0; i < M2_N_FEATURES; i++) { float v; memcpy(&v, f + 4 + 4 * i, 4); if (v != r.features[i]) all = false; }
+  for (int i = 0; i < M2_N_FEATURES; i++) {
+    float v;
+    memcpy(&v, f + 4 + 4 * i, 4);
+    if (v != r.features[i]) all = false;
+  }
   CHECK(all);
 }
 

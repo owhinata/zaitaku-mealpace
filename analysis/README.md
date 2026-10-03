@@ -311,10 +311,17 @@ bash firmware/detector/host/build.sh         # → build-host/score_windows（fi
 
 ```python
 import m2_scorer
-s = m2_scorer.Scorer()                       # 既定 build-host/score_windows。環境変数 M2_SCORE_BIN で差し替え（テスト用）
+
+s = (
+    m2_scorer.Scorer()
+)  # 既定 build-host/score_windows。環境変数 M2_SCORE_BIN で差し替え（テスト用）
 s.model, s.labels, s.n_features, s.swallow_index
-P = s.score_rows(rows)                       # (n, LABEL_COUNT)。1 回の起動で全行を流す。行数が合わなければ止まる
-m2_scorer.score(features, meta)              # evaluate_detector.py --scorer の形。swallow の列を返す
+P = s.score_rows(
+    rows
+)  # (n, LABEL_COUNT)。1 回の起動で全行を流す。行数が合わなければ止まる
+m2_scorer.score(
+    features, meta
+)  # evaluate_detector.py --scorer の形。swallow の列を返す
 ```
 
 - `Scorer` は起動時に見出しの `selfcheck`（実行ファイルが `SELFCHECK_INPUT` の 29 個を `m2_normalize` した値）を、`m2_norm.json` から作った

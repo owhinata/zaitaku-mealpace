@@ -1,11 +1,12 @@
 // 実 FFT（fft512.h。点数は AF_N_FFT）。Arduino 依存なし。ヒープは使わない。
-// 装置のビルドでは案2（BENCH_CASE == 2）のときだけ組み込む。PC の答え合わせ（BENCH_CASE 未定義）では常に組み込む。
+// 装置のビルドでは案2（BENCH_CASE == 2）のときだけ組み込む。PC
+// の答え合わせ（BENCH_CASE 未定義）では常に組み込む。
 #if !defined(BENCH_CASE) || BENCH_CASE == 2
 
 #include "fft512.h"
 #include <math.h>
 
-static const uint32_t HALF = FFT512_N / 2;   // N/2 点の複素 FFT
+static const uint32_t HALF = FFT512_N / 2;  // N/2 点の複素 FFT
 
 static float s_cos[HALF];        // cos(2π k / N)
 static float s_sin[HALF];        // sin(2π k / N)
@@ -20,13 +21,16 @@ static uint32_t log2_u32(uint32_t v) {
 }
 
 void fft512_init() {
-  const uint32_t bits = log2_u32(HALF);   // 512 → 8、256 → 7
+  const uint32_t bits = log2_u32(HALF);  // 512 → 8、256 → 7
   for (uint32_t k = 0; k < HALF; k++) {
     double a = 2.0 * M_PI * (double)k / (double)FFT512_N;
     s_cos[k] = (float)cos(a);
     s_sin[k] = (float)sin(a);
     uint32_t r = 0, v = k;
-    for (uint32_t b = 0; b < bits; b++) { r = (r << 1) | (v & 1u); v >>= 1; }
+    for (uint32_t b = 0; b < bits; b++) {
+      r = (r << 1) | (v & 1u);
+      v >>= 1;
+    }
     s_bitrev[k] = (uint16_t)r;
   }
 }
@@ -56,7 +60,8 @@ void fft512_power(const float* in, float* power) {
       }
     }
   }
-  // 分離: X_k = Fe + W_N^k Fo、Fe = (Z_k + conj Z_{N/2-k}) / 2、Fo = -i (Z_k − conj Z_{N/2-k}) / 2
+  // 分離: X_k = Fe + W_N^k Fo、Fe = (Z_k + conj Z_{N/2-k}) / 2、Fo = -i (Z_k −
+  // conj Z_{N/2-k}) / 2
   const float inv_n = 1.0f / (float)FFT512_N;
   {
     float x0 = s_re[0] + s_im[0];

@@ -1,24 +1,28 @@
-// 検出器の IMU の取り込み（imu_capture.h）。Arduino 依存なし。ヒープは使わない。
+// 検出器の IMU の取り込み（imu_capture.h）。Arduino 依存なし。
+// ヒープは使わない。
 #include "imu_capture.h"
 #include <string.h>
 
-void imu_capture_init(ImuCapture* cap) {
-  memset(cap, 0, sizeof(*cap));
-}
+void imu_capture_init(ImuCapture* cap) { memset(cap, 0, sizeof(*cap)); }
 
 static float baseline_ms(const ImuCapture* cap) {
   if (cap->diff_count == 0) return IC_NOMINAL_PERIOD_MS;
   float p = (float)cap->diff_sum / (float)cap->diff_count;
-  const float lo = IC_NOMINAL_PERIOD_MS / IC_BASELINE_CLAMP, hi = IC_NOMINAL_PERIOD_MS * IC_BASELINE_CLAMP;
+  const float lo = IC_NOMINAL_PERIOD_MS / IC_BASELINE_CLAMP,
+              hi = IC_NOMINAL_PERIOD_MS * IC_BASELINE_CLAMP;
   if (p < lo) p = lo;
   if (p > hi) p = hi;
   return p;
 }
 
-void imu_capture_push(ImuCapture* cap, uint32_t t_ms, const float acc[3], const float gyro[3]) {
+void imu_capture_push(ImuCapture* cap, uint32_t t_ms, const float acc[3],
+                      const float gyro[3]) {
   ImuRow& r = cap->ring[cap->head];
   r.t_ms = t_ms;
-  for (int i = 0; i < 3; i++) { r.acc[i] = acc[i]; r.gyro[i] = gyro[i]; }
+  for (int i = 0; i < 3; i++) {
+    r.acc[i] = acc[i];
+    r.gyro[i] = gyro[i];
+  }
   cap->head = (cap->head + 1) % IC_RING_ROWS;
   if (cap->count < IC_RING_ROWS) cap->count++;
   cap->total++;
@@ -26,7 +30,8 @@ void imu_capture_push(ImuCapture* cap, uint32_t t_ms, const float acc[3], const 
   if (cap->have_last) {
     uint32_t d = t_ms - cap->last_t_ms;
     if (d > 0xFFFFu) d = 0xFFFFu;
-    // 直近 IC_BASELINE_ROWS 個の差分の移動平均（飛びも含める。imu_capture.h のコメント）
+    // 直近 IC_BASELINE_ROWS 個の差分の移動平均（飛びも含める。imu_capture.h
+    // のコメント）
     if (cap->diff_count == IC_BASELINE_ROWS) {
       cap->diff_sum -= cap->diffs[cap->diff_head];
     } else {
@@ -40,8 +45,12 @@ void imu_capture_push(ImuCapture* cap, uint32_t t_ms, const float acc[3], const 
   cap->last_t_ms = t_ms;
 }
 
-static void lock(const ImuWindowSource* src) { if (src->lock) src->lock(); }
-static void unlock(const ImuWindowSource* src) { if (src->unlock) src->unlock(); }
+static void lock(const ImuWindowSource* src) {
+  if (src->lock) src->lock();
+}
+static void unlock(const ImuWindowSource* src) {
+  if (src->unlock) src->unlock();
+}
 
 float imu_period_baseline_ms(const ImuWindowSource* src) {
   lock(src);
@@ -50,7 +59,8 @@ float imu_period_baseline_ms(const ImuWindowSource* src) {
   return p;
 }
 
-void imu_window_copy(const ImuWindowSource* src, uint32_t w0_ms, uint32_t w1_ms, ImuWindow* out) {
+void imu_window_copy(const ImuWindowSource* src, uint32_t w0_ms, uint32_t w1_ms,
+                     ImuWindow* out) {
   out->n = 0;
   out->w0_ms = w0_ms;
   out->w1_ms = w1_ms;
@@ -59,7 +69,8 @@ void imu_window_copy(const ImuWindowSource* src, uint32_t w0_ms, uint32_t w1_ms,
   out->truncated = false;
   lock(src);
   const ImuCapture* cap = src->cap;
-  uint32_t idx = (cap->head + IC_RING_ROWS - cap->count) % IC_RING_ROWS;   // 最も古い行
+  // 最も古い行
+  uint32_t idx = (cap->head + IC_RING_ROWS - cap->count) % IC_RING_ROWS;
   for (uint32_t i = 0; i < cap->count; i++) {
     const ImuRow& r = cap->ring[idx];
     idx = (idx + 1) % IC_RING_ROWS;
@@ -71,9 +82,15 @@ void imu_window_copy(const ImuWindowSource* src, uint32_t w0_ms, uint32_t w1_ms,
       continue;
     }
     if ((int32_t)(r.t_ms - w1_ms) >= 0) break;
-    if (out->n >= IMU_MAX_ROWS) { out->truncated = true; break; }
+    if (out->n >= IMU_MAX_ROWS) {
+      out->truncated = true;
+      break;
+    }
     out->t_ms[out->n] = r.t_ms;
-    for (int k = 0; k < 3; k++) { out->acc[out->n][k] = r.acc[k]; out->gyro[out->n][k] = r.gyro[k]; }
+    for (int k = 0; k < 3; k++) {
+      out->acc[out->n][k] = r.acc[k];
+      out->gyro[out->n][k] = r.gyro[k];
+    }
     out->n++;
   }
   unlock(src);
@@ -90,12 +107,13 @@ bool imu_window_valid(const ImuWindow* w, float period_ms) {
     if ((float)(w->t_ms[i] - w->t_ms[i - 1]) >= gap_ms) return false;
   }
   // (iii) 窓の直前からの飛びが窓と交わる（t[0] > w0）
-  if (w->have_prev && (float)(w->t_ms[0] - w->prev_t_ms) >= gap_ms && w->t_ms[0] != w->w0_ms) return false;
-  // (iv) 窓の最後の行から終端までの空白（次の行との差分は必ず飛びになり、区間は窓と交わる）
+  if (w->have_prev && (float)(w->t_ms[0] - w->prev_t_ms) >= gap_ms &&
+      w->t_ms[0] != w->w0_ms)
+    return false;
+  // (iv) 窓の最後の行から終端までの空白（次の行との差分は必ず飛びになり、
+  // 区間は窓と交わる）
   if ((float)(w->w1_ms - w->t_ms[w->n - 1]) >= gap_ms) return false;
   return true;
 }
 
-uint32_t imu_capture_total(const ImuCapture* cap) {
-  return cap->total;
-}
+uint32_t imu_capture_total(const ImuCapture* cap) { return cap->total; }

@@ -1,6 +1,9 @@
-// firmware/indicator/host/test_indicator.cpp — 表示器の PC 上のテスト。受信の解釈（indicator_rx。Issue #29 plan 第 5.3 節の表 1〜10）と、
-// 状態 → フレーム（shape_seq）と図形の表（shapes.h）（Issue #32 plan 第 6.6 節の表 11〜18）。
-// Arduino に依存しない。led_rule.h は firmware/indicator/ のリンク（→ ../detector/）を通して読む。matrix_out.cpp は足さない（Arduino_LED_Matrix）。
+// firmware/indicator/host/test_indicator.cpp — 表示器の PC 上のテスト。
+// 受信の解釈（indicator_rx。Issue #29 plan 第 5.3 節の表 1〜10）と、
+// 状態 → フレーム（shape_seq）と図形の表（shapes.h）（Issue #32 plan 第 6.6
+// 節の表 11〜18）。
+// Arduino に依存しない。led_rule.h は firmware/indicator/ のリンク（→
+// ../detector/）を通して読む。matrix_out.cpp は足さない（Arduino_LED_Matrix）。
 // data/ を使わない。実行: bash firmware/indicator/host/test_indicator.sh
 #include <stdio.h>
 #include <stdint.h>
@@ -13,10 +16,30 @@
 
 static int g_fail = 0;
 static int g_pass = 0;
-#define CHECK(cond) do { if (cond) { g_pass++; } else { g_fail++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
-#define CHECK_EQ(a, b) do { long long _a = (long long)(a), _b = (long long)(b); if (_a == _b) { g_pass++; } else { g_fail++; printf("FAIL %s:%d: %s == %s (%lld != %lld)\n", __FILE__, __LINE__, #a, #b, _a, _b); } } while (0)
+#define CHECK(cond)                                          \
+  do {                                                       \
+    if (cond) {                                              \
+      g_pass++;                                              \
+    } else {                                                 \
+      g_fail++;                                              \
+      printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+    }                                                        \
+  } while (0)
+#define CHECK_EQ(a, b)                                                        \
+  do {                                                                        \
+    long long _a = (long long)(a), _b = (long long)(b);                       \
+    if (_a == _b) {                                                           \
+      g_pass++;                                                               \
+    } else {                                                                  \
+      g_fail++;                                                               \
+      printf("FAIL %s:%d: %s == %s (%lld != %lld)\n", __FILE__, __LINE__, #a, \
+             #b, _a, _b);                                                     \
+    }                                                                         \
+  } while (0)
 
-static void feed1(IndicatorRx* s, uint8_t b, uint32_t now) { indicator_rx_feed(s, &b, 1, now); }
+static void feed1(IndicatorRx* s, uint8_t b, uint32_t now) {
+  indicator_rx_feed(s, &b, 1, now);
+}
 
 // 1. 初期化直後は、どの now でも消灯
 static void test_1_init_is_off() {
@@ -28,7 +51,8 @@ static void test_1_init_is_off() {
   CHECK_EQ(s.ignored, 0);
 }
 
-// 2. 1 を受けたら 1.0 秒未満は状態 1（LED_YELLOW）、1000 ms ちょうどで消灯（led_off_due と同じ境界）
+// 2. 1 を受けたら 1.0 秒未満は状態 1（LED_YELLOW）、1000 ms
+//   ちょうどで消灯（led_off_due と同じ境界）
 static void test_2_timeout_boundary() {
   IndicatorRx s;
   indicator_rx_init(&s);
@@ -51,7 +75,8 @@ static void test_3_last_valid_byte() {
   CHECK_EQ(indicator_rx_target(&s, 1000), LED_GREEN);
 }
 
-// 4. ゴミだけの塊は目標も消灯の時計も変えない（印字できる文字は '0' = 0x30 も捨てる）
+// 4. ゴミだけの塊は目標も消灯の時計も変えない（印字できる文字は '0' = 0x30
+//   も捨てる）
 static void test_4_garbage_only() {
   IndicatorRx s;
   indicator_rx_init(&s);
@@ -75,7 +100,8 @@ static void test_5_mixed() {
   CHECK_EQ(s.ignored, 1);
 }
 
-// 6. 0 を受けたら消灯で、時計は進める（検出器が消灯から状態 1（LED_YELLOW）への書き込みを飛ばした窓）
+// 6. 0 を受けたら消灯で、時計は進める（検出器が消灯から状態 1（LED_YELLOW）
+//   への書き込みを飛ばした窓）
 static void test_6_zero_is_off_and_refreshes() {
   IndicatorRx s;
   indicator_rx_init(&s);
@@ -92,8 +118,8 @@ static void test_7_millis_wrap() {
   IndicatorRx s;
   indicator_rx_init(&s);
   feed1(&s, 2, 0xFFFFFF00u);
-  CHECK_EQ(indicator_rx_target(&s, 0x000002E7u), LED_GREEN);   // 差 999
-  CHECK_EQ(indicator_rx_target(&s, 0x000002E8u), LED_OFF);     // 差 1000
+  CHECK_EQ(indicator_rx_target(&s, 0x000002E7u), LED_GREEN);  // 差 999
+  CHECK_EQ(indicator_rx_target(&s, 0x000002E8u), LED_OFF);    // 差 1000
 }
 
 // 8. 消灯の後に再開
@@ -123,7 +149,8 @@ static void test_9_empty_feed() {
   CHECK_EQ(indicator_rx_target(&s, 1500), LED_OFF);
 }
 
-// 10. 32 バイトを超える塊（indicator.ino と同じく 32 バイトずつ渡す）: 全体の最後の有効なバイトが目標
+// 10. 32 バイトを超える塊（indicator.ino と同じく 32 バイトずつ渡す）:
+//   全体の最後の有効なバイトが目標
 static void test_10_over_32_bytes() {
   IndicatorRx s;
   indicator_rx_init(&s);
@@ -131,7 +158,8 @@ static void test_10_over_32_bytes() {
   memset(first, 1, 31);
   first[31] = 2;
   indicator_rx_feed(&s, first, sizeof first, 1000);
-  CHECK_EQ(indicator_rx_target(&s, 1000), LED_GREEN);   // 1 回目だけの直後（indicator.ino はこの間に表示を書かない）
+  // 1 回目だけの直後（indicator.ino はこの間に表示を書かない）
+  CHECK_EQ(indicator_rx_target(&s, 1000), LED_GREEN);
   const uint8_t second[] = {2, 2, 2, 1, 'x', 'x', 'x', 'x'};
   indicator_rx_feed(&s, second, sizeof second, 1000);
   CHECK_EQ(indicator_rx_target(&s, 1000), LED_YELLOW);
@@ -152,10 +180,12 @@ static void test_12_smile_static() {
   ShapeSeq q;
   shape_seq_init(&q);
   const uint32_t nows[] = {0u, 1u, 1199u, 5000u};
-  for (uint32_t now : nows) CHECK_EQ(shape_seq_frame(&q, LED_GREEN, now), SHAPE_SMILE);
+  for (uint32_t now : nows)
+    CHECK_EQ(shape_seq_frame(&q, LED_GREEN, now), SHAPE_SMILE);
 }
 
-// 13. 目標 LED_YELLOW（状態 1）を時刻 1000 で始める: 200 ms ごとに次のフレーム、周期 1200 ms でループ
+// 13. 目標 LED_YELLOW（状態 1）を時刻 1000 で始める: 200 ms
+//   ごとに次のフレーム、周期 1200 ms でループ
 static void test_13_wave_phase() {
   ShapeSeq q;
   shape_seq_init(&q);
@@ -210,7 +240,8 @@ static void test_17_invalid_target() {
   CHECK_EQ(shape_seq_frame(&q, 3, 1100), -1);
 }
 
-// 18. 表の形: 流れる波線の 6 フレームは各列にちょうど 1 個（計 12 個）で 200 ms ずつ（合計 1200 ms）。微笑む顔は 1 枚で 16 個。値は 0 か 1
+// 18. 表の形: 流れる波線の 6 フレームは各列にちょうど 1 個（計 12 個）で 200
+//   ms ずつ（合計 1200 ms）。微笑む顔は 1 枚で 16 個。値は 0 か 1
 static void test_18_table_shape() {
   CHECK_EQ(SHAPE_WAVE_FIRST, 0);
   CHECK_EQ(SHAPE_WAVE_COUNT, 6);
@@ -239,7 +270,8 @@ static void test_18_table_shape() {
   CHECK_EQ(smile, 16);
   for (int f = 0; f < 7; ++f)
     for (int y = 0; y < 8; ++y)
-      for (int x = 0; x < 12; ++x) CHECK(FRAMES[f][y][x] == 0 || FRAMES[f][y][x] == 1);
+      for (int x = 0; x < 12; ++x)
+        CHECK(FRAMES[f][y][x] == 0 || FRAMES[f][y][x] == 1);
 }
 
 int main() {

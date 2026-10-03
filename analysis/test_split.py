@@ -3,17 +3,19 @@
 実行: python -m unittest discover -s analysis -v
 合成セッションは tempfile に作る。data/ と実データは使わない。
 """
+
 from __future__ import annotations
 import inspect, json, tempfile, unittest
 from pathlib import Path
 
 from split import split_sessions
 
-NO_META = object()   # meta.json を置かない印
+NO_META = object()  # meta.json を置かない印
 
 
 def make_session(root: Path, name: str, meta=None) -> None:
-    """空のセッションフォルダを作る。meta を省くと、フォルダ名の subject を meta.json に書く。"""
+    """空のセッションフォルダを作る。meta を省くと、フォルダ名の subject を
+    meta.json に書く。"""
     d = root / name
     d.mkdir()
     if meta is NO_META:
@@ -77,13 +79,19 @@ class SplitTest(unittest.TestCase):
 
     def test_sp6_name_with_two_subjects(self):
         self.make(names("self", 4))
-        make_session(self.root, "20260927-120000_p1_retake_self_water", meta={"subject": "p1"})
+        make_session(
+            self.root,
+            "20260927-120000_p1_retake_self_water",
+            meta={"subject": "p1"},
+        )
         with self.assertRaises(SystemExit):
             split_sessions(self.root, eval_min=3, subject="self")
 
     def test_sp7_stray_directory_stops(self):
         self.make(names("self", 4))
-        (self.root / "20260930-000000_self_water").write_text("", encoding="utf-8")
+        (self.root / "20260930-000000_self_water").write_text(
+            "", encoding="utf-8"
+        )
         (self.root / "notes_self_x").mkdir()
         with self.assertRaises(SystemExit):
             split_sessions(self.root, eval_min=3, subject="self")
@@ -91,7 +99,9 @@ class SplitTest(unittest.TestCase):
     def test_sp7_stray_file_is_ignored(self):
         ns = names("self", 4)
         self.make(ns)
-        (self.root / "20260930-000000_self_water").write_text("", encoding="utf-8")
+        (self.root / "20260930-000000_self_water").write_text(
+            "", encoding="utf-8"
+        )
         r = split_sessions(self.root, eval_min=3, subject="self")
         self.assertEqual(sorted(r["train"] + r["eval"]), ns)
 
@@ -108,16 +118,21 @@ class SplitTest(unittest.TestCase):
 
     def test_sp8b_cond_outside_enum(self):
         self.make(names("self", 4))
-        make_session(self.root, "20260927-120000_self_water2", meta={"subject": "self"})
+        make_session(
+            self.root, "20260927-120000_self_water2", meta={"subject": "self"}
+        )
         with self.assertRaises(SystemExit):
             split_sessions(self.root, eval_min=3, subject="self")
 
     def test_sp8c_symlinked_session_stops(self):
-        """同じセッションを指す別名のリンクで、学習側と評価側に同じ実体を入れさせない。"""
+        """同じセッションを指す別名のリンクで、学習側と評価側に同じ実体を入れさ
+        せない。"""
         ns = names("self", 4)
         self.make(ns[:1])
         for n in ns[1:]:
-            (self.root / n).symlink_to(self.root / ns[0], target_is_directory=True)
+            (self.root / n).symlink_to(
+                self.root / ns[0], target_is_directory=True
+            )
         with self.assertRaises(SystemExit):
             split_sessions(self.root, eval_min=3)
 
@@ -130,7 +145,11 @@ class SplitTest(unittest.TestCase):
     def test_sp10_last_two_collection_days(self):
         conds = ["quiet", "water", "talk", "saliva", "neck", "water", "cough"]
         days = ["20260922", "20260924", "20260926"]
-        ns = [f"{day}-19{i:02d}00_self_{c}" for day in days for i, c in enumerate(conds)]
+        ns = [
+            f"{day}-19{i:02d}00_self_{c}"
+            for day in days
+            for i, c in enumerate(conds)
+        ]
         self.assertEqual(len(ns), 21)
         self.make(ns)
         r = split_sessions(self.root, eval_min=14)
@@ -154,13 +173,16 @@ class SplitTest(unittest.TestCase):
         self.assertEqual(r["eval"], ns[1:])
         self.assertEqual(r["detector"], det)
         self.assertFalse(set(det) & set(r["train"] + r["eval"]))
-        # eval_min の検査は除外後の数で行う（記録ファームウェアが 3 本 + 検出器 3 本 → 学習側が空）
+        # eval_min の検査は除外後の数で行う（記録ファームウェアが 3 本 + 検出器
+        # 3 本 → 学習側が空）
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             for n in ns[:3]:
                 make_session(root, n)
             for n in det:
-                make_session(root, n, meta={"subject": "self", "fw": "detector"})
+                make_session(
+                    root, n, meta={"subject": "self", "fw": "detector"}
+                )
             with self.assertRaises(SystemExit):
                 split_sessions(root, eval_min=3)
 
@@ -168,20 +190,29 @@ class SplitTest(unittest.TestCase):
         ns = names("self", 4)
         for meta in ({"subject": "self"}, {"subject": "self", "fw": "logger"}):
             for fname in ("detect.csv", "feat.csv"):
-                with self.subTest(meta=meta, file=fname), tempfile.TemporaryDirectory() as d:
+                with (
+                    self.subTest(meta=meta, file=fname),
+                    tempfile.TemporaryDirectory() as d,
+                ):
                     root = Path(d)
                     self_names = ns[:3] + ["20261005-120000_self_meal"]
                     for n in self_names[:3]:
                         make_session(root, n)
                     make_session(root, self_names[3], meta=meta)
-                    (root / self_names[3] / fname).write_text("t_ms,window_t_ms\n", encoding="utf-8")
+                    (root / self_names[3] / fname).write_text(
+                        "t_ms,window_t_ms\n", encoding="utf-8"
+                    )
                     with self.assertRaises(SystemExit):
                         split_sessions(root, eval_min=3)
 
     def test_sp12c_detector_sessions_do_not_change_sp10(self):
         conds = ["quiet", "water", "talk", "saliva", "neck", "water", "cough"]
         days = ["20260922", "20260924", "20260926"]
-        ns = [f"{day}-19{i:02d}00_self_{c}" for day in days for i, c in enumerate(conds)]
+        ns = [
+            f"{day}-19{i:02d}00_self_{c}"
+            for day in days
+            for i, c in enumerate(conds)
+        ]
         self.make(ns)
         det = [f"20261005-12{i:02d}00_self_meal" for i in range(3)]
         self.make(det, meta={"subject": "self", "fw": "detector"})
@@ -193,14 +224,19 @@ class SplitTest(unittest.TestCase):
     def test_sp12d_logger_session_without_fw_is_still_split(self):
         ns = names("self", 4)
         self.make(ns[:2])
-        make_session(self.root, ns[2], meta={"subject": "self"})                 # fw が無い（META が届かなかった）
+        # fw が無い（META が届かなかった）
+        make_session(self.root, ns[2], meta={"subject": "self"})
         make_session(self.root, ns[3], meta={"subject": "self", "fw": "logger"})
         r = split_sessions(self.root, eval_min=3)
         self.assertEqual(r["train"], ns[:1])
         self.assertEqual(r["eval"], ns[1:])
         self.assertEqual(r["detector"], [])
         # p1 の検出器のセッションは self の detector に列挙しない
-        make_session(self.root, "20261005-120000_p1_meal", meta={"subject": "p1", "fw": "detector"})
+        make_session(
+            self.root,
+            "20261005-120000_p1_meal",
+            meta={"subject": "p1", "fw": "detector"},
+        )
         self.assertEqual(split_sessions(self.root, eval_min=3)["detector"], [])
 
 

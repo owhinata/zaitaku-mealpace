@@ -269,6 +269,7 @@ M0 準備の関門は 9/20 に通過（docs/decisions/0010、`gate-M0`）。
   組み替えの plan の 7.2・7.3、記録は docs/decisions/0025）。同じコミットで AGENTS.md の冒頭と不変条件 4・8、codex-review skill の観点 1（生データ。検出器の全体で保存も送信もしないか）・
   観点 3（M2 の構成と UNO Q の構成に分けた）、docs/workflow.md の旧構成前提の例 2 行とセンサ構成の参照先（0002・0025・0026）を直した。M1・M2（Nano）の決まり（EI の C++ ライブラリ形式、A 案、検出器は生の音声を保存も送信もしない）は残した。
   0025 の「UNO Q の推論のコードを書く前」の条件はこれで満たす。無線リンクの境界は #42。
+- 10/3: コードにフォーマッタをかけた（人の依頼。行幅 80）。Python は ruff（`pyproject.toml`）、C++ と .ino は clang-format（`.clang-format`、Google スタイル土台）。`bash tools/format.sh` で両方を実行する。`firmware/detector/src/`（EI の書き出し）は整形しない。生成物 `shapes.h` は gen_shapes.py が `// clang-format off` を出す。clang-format のコメント折り返しは切った（日本語の文中に空白が入る）。代わりに、行が 80 を超える行末コメントは前の行へ移し、80 を超えるコメント行は使い捨てのスクリプトで折り返した（空白・句読点を優先、カタカナ語の途中では切らない）。docstring も同じ規則で折り返し、使い方の表はコマンドの行と説明の行に分けた。出力の文面の文字列、生成物のヘッダ（m2_norm.h・m2_threshold.h は整形しない）、detector_meta.h の JSON の例と URL は 80 を超えたまま。テスト（analysis 261、tools 50、test_detector 309、test_indicator 837）と logger・detector・indicator のビルドは整形後も通る。
 - ロボセンサー技研への問い合わせ未送付（代替センサ、docs/decisions/0002、#5）。
 
 ## 次にやること

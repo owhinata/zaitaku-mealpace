@@ -1,4 +1,5 @@
-// 検出器のセンサの読み出し（sensors.h）。Arduino / mbed の API はこのファイルと detector.ino だけで呼ぶ。
+// 検出器のセンサの読み出し（sensors.h）。Arduino / mbed の API
+// はこのファイルと detector.ino だけで呼ぶ。
 #include "sensors.h"
 #include "audio_capture.h"
 
@@ -24,20 +25,24 @@
 #endif
 #else
 #if defined(DETECTOR_PROF_NO_IMU) || defined(DETECTOR_PROF_NO_PDM)
-#error "DETECTOR_PROF_NO_IMU / DETECTOR_PROF_NO_PDM は DETECTOR_PROFILE=1 の計測ビルドだけで使う"
+#error \
+    "DETECTOR_PROF_NO_IMU / DETECTOR_PROF_NO_PDM は DETECTOR_PROFILE=1 の計測ビルドだけで使う"
 #endif
 #define DETECTOR_PROF_NO_IMU 0
 #define DETECTOR_PROF_NO_PDM 0
 #endif
 
 static const int AUDIO_HZ = 16000;
-static const int AUDIO_CHUNK = 256;               // logger と同じ受け皿（512 B）。PDM.setBufferSize(512)
-static int16_t pdm_buf[AUDIO_CHUNK];              // コールバックの中で読み切り、audio_capture の面に写してすぐ捨てる
+// logger と同じ受け皿（512 B）。PDM.setBufferSize(512)
+static const int AUDIO_CHUNK = 256;
+// コールバックの中で読み切り、audio_capture の面に写してすぐ捨てる
+static int16_t pdm_buf[AUDIO_CHUNK];
 static volatile uint32_t s_pdm_cb_max_us = 0;
 
 static const uint32_t IMU_STACK_BYTES = 2048;
 static unsigned char imu_stack[IMU_STACK_BYTES] __attribute__((aligned(8)));
-static rtos::Thread imu_thread(osPriorityAboveNormal, IMU_STACK_BYTES, imu_stack, "imu");
+static rtos::Thread imu_thread(osPriorityAboveNormal, IMU_STACK_BYTES,
+                               imu_stack, "imu");
 static ImuCapture s_imu;
 static ImuWindowSource s_imu_src;
 static volatile uint32_t s_imu_polls = 0;
@@ -63,7 +68,8 @@ static void on_pdm() {
 }
 
 #if DETECTOR_PROF_NO_PDM
-// 計測用の代替入力: 4 ms ごとのタイマ割り込みで固定の合成チャンク（64 サンプル = 128 B）を積む。マイクは使わない。
+// 計測用の代替入力: 4 ms ごとのタイマ割り込みで固定の合成チャンク（64 サンプル
+// = 128 B）を積む。マイクは使わない。
 #include "drivers/Ticker.h"
 static mbed::Ticker synth_ticker;
 static int16_t synth_chunk[64];
@@ -89,14 +95,15 @@ static void imu_thread_main() {
   while (true) {
     s_imu_polls++;
     if (IMU.accelerationAvailable() && IMU.gyroscopeAvailable()) {
-      IMU.readAcceleration(acc[0], acc[1], acc[2]);   // g
-      IMU.readGyroscope(gyro[0], gyro[1], gyro[2]);   // deg/s
+      IMU.readAcceleration(acc[0], acc[1], acc[2]);  // g
+      IMU.readGyroscope(gyro[0], gyro[1], gyro[2]);  // deg/s
       uint32_t t = millis();
       imu_lock();
       imu_capture_push(&s_imu, t, acc, gyro);
       imu_unlock();
     }
-    rtos::ThisThread::sleep_for(std::chrono::milliseconds(DETECTOR_IMU_POLL_MS));
+    rtos::ThisThread::sleep_for(
+        std::chrono::milliseconds(DETECTOR_IMU_POLL_MS));
   }
 }
 
@@ -107,17 +114,22 @@ bool sensors_begin() {
   s_imu_src.lock = imu_lock;
   s_imu_src.unlock = imu_unlock;
 #if DETECTOR_PROFILE
-  for (uint32_t i = 0; i + 4 <= IMU_STACK_BYTES; i += 4) *(uint32_t*)(imu_stack + i) = STACK_PATTERN;
+  for (uint32_t i = 0; i + 4 <= IMU_STACK_BYTES; i += 4)
+    *(uint32_t*)(imu_stack + i) = STACK_PATTERN;
 #endif
-  if (!IMU.begin()) return false;                 // LSM6DSOX: 104 Hz, ±4 g, ±2000 dps（ライブラリ既定、bypass モード）
+  // LSM6DSOX: 104 Hz, ±4 g, ±2000 dps（ライブラリ既定、bypass モード）
+  if (!IMU.begin()) return false;
 #if DETECTOR_I2C_HZ > 0
-  Wire.setClock(DETECTOR_I2C_HZ);                 // LSM6DSOX は 400 kHz 対応（plan #24 第 16 節 P の 1 段目）
+  // LSM6DSOX は 400 kHz 対応（plan #24 第 16 節 P の 1 段目）
+  Wire.setClock(DETECTOR_I2C_HZ);
 #endif
 #if !DETECTOR_PROF_NO_IMU
   if (imu_thread.start(imu_thread_main) != osOK) return false;
 #endif
 #if DETECTOR_PROF_NO_PDM
-  for (int i = 0; i < 64; i++) synth_chunk[i] = (int16_t)(8000.0 * sin(2.0 * M_PI * (double)i / 16.0));   // 1 kHz の正弦波
+  // 1 kHz の正弦波
+  for (int i = 0; i < 64; i++)
+    synth_chunk[i] = (int16_t)(8000.0 * sin(2.0 * M_PI * (double)i / 16.0));
   synth_ticker.attach(&on_synth, std::chrono::microseconds(4000));
 #else
   PDM.onReceive(on_pdm);
@@ -127,17 +139,14 @@ bool sensors_begin() {
   return true;
 }
 
-bool sensors_take_slice(const int16_t** slice, uint32_t* t0_ms, uint32_t* seq, uint32_t* ready_t_ms) {
+bool sensors_take_slice(const int16_t** slice, uint32_t* t0_ms, uint32_t* seq,
+                        uint32_t* ready_t_ms) {
   return audio_capture_take(slice, t0_ms, seq, ready_t_ms);
 }
 
-void sensors_release_slice() {
-  audio_capture_release();
-}
+void sensors_release_slice() { audio_capture_release(); }
 
-const ImuWindowSource* sensors_imu_source() {
-  return &s_imu_src;
-}
+const ImuWindowSource* sensors_imu_source() { return &s_imu_src; }
 
 void sensors_stats(SensorStats* out) {
   AudioCaptureStats a;
@@ -156,11 +165,16 @@ void sensors_stats(SensorStats* out) {
   out->imu_polls = s_imu_polls;
   out->imu_stack_high_water = 0;
 #if DETECTOR_PROFILE
-  // 下（低いアドレス）から走査して、パターンが壊れた最初の位置から上端までを高水位とする（bench.ino と同じ）。
-  // 先頭の 1 語は RTX がスレッド生成時に Stack Magic Word（rtx_os.h の osRtxStackMagicWord）を書くので飛ばす
-  // （飛ばさないと常に IMU_STACK_BYTES と読める。#24 の 4 回目の実機で stack_imu=2048 だった原因）
+  // 下（低いアドレス）から走査して、パターンが壊れた最初の位置から上端までを高
+  // 水位とする（bench.ino と同じ）。
+  // 先頭の 1 語は RTX がスレッド生成時に Stack Magic Word（rtx_os.h の
+  // osRtxStackMagicWord）を書くので飛ばす
+  // （飛ばさないと常に IMU_STACK_BYTES と読める。#24 の 4 回目の実機で
+  // stack_imu=2048 だった原因）
   uint32_t i = 4;
-  while (i + 4 <= IMU_STACK_BYTES && *(uint32_t*)(imu_stack + i) == STACK_PATTERN) i += 4;
+  while (i + 4 <= IMU_STACK_BYTES &&
+         *(uint32_t*)(imu_stack + i) == STACK_PATTERN)
+    i += 4;
   out->imu_stack_high_water = IMU_STACK_BYTES - i;
 #endif
   out->imu_thread = DETECTOR_PROF_NO_IMU ? 0 : 1;

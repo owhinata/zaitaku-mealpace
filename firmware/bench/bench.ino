@@ -1,18 +1,25 @@
 // zaitaku-mealpace 計測用スケッチ（#17）。Nano RP2040 Connect。
 // 装置上で窓ごとの特徴量（1.0 秒窓・0.25 秒ホップ）の計算コストを 3 案で測る。
-// 入力は装置上で作る合成信号（synth.h）だけ。マイクと IMU は使わず、生の音声を扱わない。
+// 入力は装置上で作る合成信号（synth.h）だけ。マイクと IMU は使わず、
+// 生の音声を扱わない。
 // PDM.h・Arduino_LSM6DSOX.h・frame.h は含めない。
 //
-// Serial・micros()・mbed のメモリトレース・SystemCoreClock・RTX のスレッド構造体はこのファイルだけで触る。
+// Serial・micros()・mbed のメモリトレース・SystemCoreClock・RTX
+// のスレッド構造体はこのファイルだけで触る。
 // シリアルに出すのは数字と見出しだけ（合成信号の値も特徴量の値も出さない）。
 //
 // ビルド（案ごとに別ディレクトリ。plan #17「ビルド・書き込み・計測の手順」）:
-//   cmake -S . -B build-bench2 -DSKETCH_NAME=bench -DBUILD_FLAGS="-DBENCH_CASE=2"
+//   cmake -S . -B build-bench2 -DSKETCH_NAME=bench
+//   -DBUILD_FLAGS="-DBENCH_CASE=2"
 //   cmake --build build-bench2 --target build
-// BENCH_CASE: 0 ハーネスだけ / 1 EI の MFCC と MFE / 2 音 15 次元（既定は 0012、-DAF_PROFILE=1 で 0020 の M2 の式）/ 3 0012 の IMU 14 次元。
-// 案1 は BUILD_FLAGS に -I<リポジトリ>/firmware/bench/src -DEI_PORTING_MBED=0 も要る。
-// 案2 の M2（#21）: -DBUILD_FLAGS="-DBENCH_CASE=2 -DAF_PROFILE=1"（f′ は -DAF_M2_FRAME_HOP=400 を足す）。
-// -DBENCH_HEAP_TABLE=1 で、コールバック内の mallinfo() の代わりに自前の表でヒープを追う（mallinfo() が止まるときの代替）。
+// BENCH_CASE: 0 ハーネスだけ / 1 EI の MFCC と MFE / 2 音 15 次元（既定は
+// 0012、-DAF_PROFILE=1 で 0020 の M2 の式）/ 3 0012 の IMU 14 次元。
+// 案1 は BUILD_FLAGS に -I<リポジトリ>/firmware/bench/src -DEI_PORTING_MBED=0
+// も要る。
+// 案2 の M2（#21）: -DBUILD_FLAGS="-DBENCH_CASE=2 -DAF_PROFILE=1"（f′ は
+// -DAF_M2_FRAME_HOP=400 を足す）。
+// -DBENCH_HEAP_TABLE=1 で、コールバック内の mallinfo()
+// の代わりに自前の表でヒープを追う（mallinfo() が止まるときの代替）。
 
 #include <malloc.h>
 #include <stdarg.h>
@@ -34,31 +41,44 @@
 #error "BENCH_CASE は 0..3"
 #endif
 
-static const uint32_t WINDOW_SAMPLES = 16000;   // 1.0 秒 @ 16 kHz
-static const uint32_t HOP_SAMPLES = 4000;       // 0.25 秒
-static const uint32_t N_REPEAT = 20;            // 中央値と最大を取る回数（別に 1 回のウォームアップ）
+static const uint32_t WINDOW_SAMPLES = 16000;  // 1.0 秒 @ 16 kHz
+static const uint32_t HOP_SAMPLES = 4000;      // 0.25 秒
+// 中央値と最大を取る回数（別に 1 回のウォームアップ）
+static const uint32_t N_REPEAT = 20;
 
 // ---------- ヒープ（mbed のメモリトレース） ----------
 
 static volatile size_t heap_peak = 0;
 
 #if defined(BENCH_HEAP_TABLE) && BENCH_HEAP_TABLE
-// 代替: コールバックの引数の size と戻りのポインタを小さな表に記録して自前で合計を追う
+// 代替: コールバックの引数の size と戻りのポインタを小さな表に記録して自前で合
+// 計を追う
 static const int HEAP_TABLE_N = 256;
 static void* heap_ptr[HEAP_TABLE_N];
 static size_t heap_size[HEAP_TABLE_N];
 static size_t heap_in_use = 0;
-static uint32_t heap_table_overflow = 0;   // 表に入りきらなかった割り当ての数（0 でなければ表は信用できない）
+// 表に入りきらなかった割り当ての数（0 でなければ表は信用できない）
+static uint32_t heap_table_overflow = 0;
 static void heap_table_remove(void* p) {
   if (!p) return;
   for (int i = 0; i < HEAP_TABLE_N; i++) {
-    if (heap_ptr[i] == p) { heap_in_use -= heap_size[i]; heap_ptr[i] = nullptr; heap_size[i] = 0; return; }
+    if (heap_ptr[i] == p) {
+      heap_in_use -= heap_size[i];
+      heap_ptr[i] = nullptr;
+      heap_size[i] = 0;
+      return;
+    }
   }
 }
 static void heap_table_add(void* p, size_t n) {
   if (!p) return;
   for (int i = 0; i < HEAP_TABLE_N; i++) {
-    if (!heap_ptr[i]) { heap_ptr[i] = p; heap_size[i] = n; heap_in_use += n; goto added; }
+    if (!heap_ptr[i]) {
+      heap_ptr[i] = p;
+      heap_size[i] = n;
+      heap_in_use += n;
+      goto added;
+    }
   }
   heap_table_overflow++;
 added:
@@ -69,18 +89,40 @@ static void trace_cb(uint8_t op, void* res, void* caller, ...) {
   va_list va;
   va_start(va, caller);
   switch (op) {
-    case MBED_MEM_TRACE_MALLOC: { size_t n = va_arg(va, size_t); heap_table_add(res, n); break; }
-    case MBED_MEM_TRACE_REALLOC: { void* old = va_arg(va, void*); size_t n = va_arg(va, size_t); heap_table_remove(old); heap_table_add(res, n); break; }
-    case MBED_MEM_TRACE_CALLOC: { size_t num = va_arg(va, size_t); size_t sz = va_arg(va, size_t); heap_table_add(res, num * sz); break; }
-    case MBED_MEM_TRACE_FREE: { void* p = va_arg(va, void*); heap_table_remove(p); break; }
-    default: break;
+    case MBED_MEM_TRACE_MALLOC: {
+      size_t n = va_arg(va, size_t);
+      heap_table_add(res, n);
+      break;
+    }
+    case MBED_MEM_TRACE_REALLOC: {
+      void* old = va_arg(va, void*);
+      size_t n = va_arg(va, size_t);
+      heap_table_remove(old);
+      heap_table_add(res, n);
+      break;
+    }
+    case MBED_MEM_TRACE_CALLOC: {
+      size_t num = va_arg(va, size_t);
+      size_t sz = va_arg(va, size_t);
+      heap_table_add(res, num * sz);
+      break;
+    }
+    case MBED_MEM_TRACE_FREE: {
+      void* p = va_arg(va, void*);
+      heap_table_remove(p);
+      break;
+    }
+    default:
+      break;
   }
   va_end(va);
 }
 static size_t heap_now() { return heap_in_use; }
 #else
 static void trace_cb(uint8_t op, void* res, void* caller, ...) {
-  (void)op; (void)res; (void)caller;
+  (void)op;
+  (void)res;
+  (void)caller;
   struct mallinfo mi = mallinfo();
   if ((size_t)mi.uordblks > heap_peak) heap_peak = mi.uordblks;
 }
@@ -100,15 +142,22 @@ static uint32_t read_sp() {
   return sp;
 }
 
-// 現在の SP より下（少し余裕を残す）をパターンで塗る。動かない条件では stack_ok = false
+// 現在の SP より下（少し余裕を残す）をパターンで塗る。動かない条件では
+// stack_ok = false
 static void stack_fill() {
   osRtxThread_t* th = (osRtxThread_t*)osThreadGetId();
-  if (!th || !th->stack_mem || th->stack_size == 0) { stack_ok = false; return; }
+  if (!th || !th->stack_mem || th->stack_size == 0) {
+    stack_ok = false;
+    return;
+  }
   stack_base = (uint32_t*)th->stack_mem;
   stack_size = th->stack_size;
   uint32_t sp = read_sp();
   uint32_t lo = (uint32_t)stack_base, hi = lo + stack_size;
-  if (sp <= lo || sp > hi) { stack_ok = false; return; }
+  if (sp <= lo || sp > hi) {
+    stack_ok = false;
+    return;
+  }
   uint32_t* end = (uint32_t*)((sp - 256) & ~3u);
   for (uint32_t* p = stack_base; p < end; p++) *p = STACK_PATTERN;
   stack_ok = true;
@@ -131,13 +180,18 @@ static void sort_u32(uint32_t* a, uint32_t n) {
   for (uint32_t i = 1; i < n; i++) {
     uint32_t v = a[i];
     uint32_t j = i;
-    while (j > 0 && a[j - 1] > v) { a[j] = a[j - 1]; j--; }
+    while (j > 0 && a[j - 1] > v) {
+      a[j] = a[j - 1];
+      j--;
+    }
     a[j] = v;
   }
 }
 
-// N 回の µs から中央値と最大を ms で出す（見出しは name と sub をつないだもの。String は使わない: ヒープを動かさない）
-static void print_timing(const char* name, const char* sub, uint32_t* us, uint32_t n) {
+// N 回の µs から中央値と最大を ms で出す（見出しは name と sub をつないだもの。
+// String は使わない: ヒープを動かさない）
+static void print_timing(const char* name, const char* sub, uint32_t* us,
+                         uint32_t n) {
   sort_u32(us, n);
   uint32_t med = (n % 2) ? us[n / 2] : (us[n / 2 - 1] + us[n / 2]) / 2;
   Serial.print(name);
@@ -148,8 +202,10 @@ static void print_timing(const char* name, const char* sub, uint32_t* us, uint32
   Serial.println(us[n - 1] / 1000.0f, 3);
 }
 
-// before: 計測の直前の uordblks、peak: 計測直後に控えた heap_peak（表示の前に控える）
-static void print_heap(const char* name, const char* sub, size_t before, size_t peak) {
+// before: 計測の直前の uordblks、peak: 計測直後に控えた
+// heap_peak（表示の前に控える）
+static void print_heap(const char* name, const char* sub, size_t before,
+                       size_t peak) {
   Serial.print(name);
   Serial.print(sub);
   Serial.print(" heap_before_B=");
@@ -191,7 +247,7 @@ static void bench_ei_block(EiDspBlock b, const char* name) {
   size_t before = heap_now();
   heap_peak = before;
   ei_dsp_case_mem_reset();
-  int rc = ei_dsp_case_full(b, window_buf);   // ウォームアップ
+  int rc = ei_dsp_case_full(b, window_buf);  // ウォームアップ
   for (uint32_t i = 0; i < N_REPEAT; i++) {
     uint32_t t0 = micros();
     rc |= ei_dsp_case_full(b, window_buf);
@@ -254,9 +310,9 @@ static float stage_pre[AF_FRAME_LEN];
 static float stage_power[AF_N_BINS];
 static float stage_dct[AF_N_MFCC];
 #if AF_DECIMATION > 1
-static int16_t window_af[AF_WINDOW_SAMPLES];   // 全窓版と段階の入力（間引き後）
+static int16_t window_af[AF_WINDOW_SAMPLES];  // 全窓版と段階の入力（間引き後）
 #endif
-static char stage_name[32];                    // "preemphasis_400" など（String は使わない）
+static char stage_name[32];  // "preemphasis_400" など（String は使わない）
 
 static void run_case() {
   audio_features_init();
@@ -269,7 +325,7 @@ static void run_case() {
   // 全窓（再利用なし）
   size_t before = heap_now();
   heap_peak = before;
-  audio_features_full(win, feat);   // ウォームアップ
+  audio_features_full(win, feat);  // ウォームアップ
   for (uint32_t i = 0; i < N_REPEAT; i++) {
     uint32_t t0 = micros();
     audio_features_full(win, feat);
@@ -297,26 +353,32 @@ static void run_case() {
   peak = heap_peak;
   print_timing("case2", " reuse", samples, N_REPEAT);
   print_heap("case2", " reuse", before, peak);
-  // 段階ごと（見立て用。1 フレーム = AF_FRAME_LEN サンプル、ゼロ交差率は窓全体）
+  // 段階ごと（見立て用。1 フレーム = AF_FRAME_LEN サンプル、
+  // ゼロ交差率は窓全体）
 #if AF_DECIMATION > 1
   for (uint32_t i = 0; i < N_REPEAT + 1; i++) {
     uint32_t t0 = micros();
-    audio_stage_decimate(window_buf, HOP_SAMPLES, window_af);   // 1 ホップ分の入力 4000 → 2000
+    // 1 ホップ分の入力 4000 → 2000
+    audio_stage_decimate(window_buf, HOP_SAMPLES, window_af);
     uint32_t dt = micros() - t0;
     if (i) samples[i - 1] = dt;
     sink += window_af[0];
   }
-  snprintf(stage_name, sizeof(stage_name), " decimate_%lu", (unsigned long)HOP_SAMPLES);
+  snprintf(stage_name, sizeof(stage_name), " decimate_%lu",
+           (unsigned long)HOP_SAMPLES);
   print_timing("stage", stage_name, samples, N_REPEAT);
-  audio_stage_decimate(window_buf, WINDOW_SAMPLES, window_af);   // 段階の入力を全窓に戻す
+  // 段階の入力を全窓に戻す
+  audio_stage_decimate(window_buf, WINDOW_SAMPLES, window_af);
 #endif
   for (uint32_t i = 0; i < N_REPEAT + 1; i++) {
     uint32_t t0 = micros();
-    audio_stage_preemphasis(win + AF_FRAME_HOP, AF_FRAME_LEN, !AF_PREEMPH_PER_FRAME, stage_pre);
+    audio_stage_preemphasis(win + AF_FRAME_HOP, AF_FRAME_LEN,
+                            !AF_PREEMPH_PER_FRAME, stage_pre);
     uint32_t dt = micros() - t0;
     if (i) samples[i - 1] = dt;
   }
-  snprintf(stage_name, sizeof(stage_name), " preemphasis_%lu", (unsigned long)AF_FRAME_LEN);
+  snprintf(stage_name, sizeof(stage_name), " preemphasis_%lu",
+           (unsigned long)AF_FRAME_LEN);
   print_timing("stage", stage_name, samples, N_REPEAT);
   for (uint32_t i = 0; i < N_REPEAT + 1; i++) {
     uint32_t t0 = micros();
@@ -324,7 +386,8 @@ static void run_case() {
     uint32_t dt = micros() - t0;
     if (i) samples[i - 1] = dt;
   }
-  snprintf(stage_name, sizeof(stage_name), " hamming_fft_power_%lu", (unsigned long)AF_FRAME_LEN);
+  snprintf(stage_name, sizeof(stage_name), " hamming_fft_power_%lu",
+           (unsigned long)AF_FRAME_LEN);
   print_timing("stage", stage_name, samples, N_REPEAT);
   for (uint32_t i = 0; i < N_REPEAT + 1; i++) {
     uint32_t t0 = micros();
@@ -349,7 +412,8 @@ static void run_case() {
     if (i) samples[i - 1] = dt;
     sink += z;
   }
-  snprintf(stage_name, sizeof(stage_name), " zcr_%lu", (unsigned long)AF_WINDOW_SAMPLES);
+  snprintf(stage_name, sizeof(stage_name), " zcr_%lu",
+           (unsigned long)AF_WINDOW_SAMPLES);
   print_timing("stage", stage_name, samples, N_REPEAT);
 }
 
@@ -370,7 +434,7 @@ static void run_case() {
   Serial.println((unsigned long)n);
   size_t before = heap_now();
   heap_peak = before;
-  imu_features(imu_t_ms, imu_acc, imu_gyro, n, feat);   // ウォームアップ
+  imu_features(imu_t_ms, imu_acc, imu_gyro, n, feat);  // ウォームアップ
   for (uint32_t i = 0; i < N_REPEAT; i++) {
     uint32_t t0 = micros();
     imu_features(imu_t_ms, imu_acc, imu_gyro, n, feat);
@@ -403,8 +467,11 @@ static void run_case() {
 
 void setup() {
   Serial.begin(115200);
-  while (!Serial) {}
-  delay(1000);   // ホストがポートを開いた直後の出力は読み手側で捨てられることがあるので少し待つ
+  while (!Serial) {
+  }
+  // ホストがポートを開いた直後の出力は読み手側で捨てられることがあるので少し待
+  // つ
+  delay(1000);
   Serial.print("bench BENCH_CASE=");
   Serial.print(BENCH_CASE);
   Serial.print(" SystemCoreClock=");
@@ -412,7 +479,8 @@ void setup() {
   Serial.print(" N=");
   Serial.println((unsigned long)N_REPEAT);
 #if BENCH_CASE == 2
-  // 音の式の切り替え（audio_features.h）。AF_PROFILE 0 = 0012（M1）、1 = 0020（M2）
+  // 音の式の切り替え（audio_features.h）。AF_PROFILE 0 = 0012（M1）、1 =
+  // 0020（M2）
   Serial.print("AF_PROFILE=");
   Serial.print(AF_PROFILE);
   Serial.print(" AF_AUDIO_HZ=");

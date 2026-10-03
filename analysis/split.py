@@ -3,20 +3,27 @@
 使い方: python split.py data/raw --eval-min 3
 収集日の新しい順に評価セッションを取り、残りを学習にする。
 
-フォルダ名の形式（docs/data-schema.md）と meta.json の subject を確かめ、合わないものがあれば止まる
+フォルダ名の形式（docs/data-schema.md）と meta.json の subject を確かめ、
+合わないものがあれば止まる
 （docs/decisions/0011）。
-meta.json の fw が detector のセッション（検出器で録った M2 のセッション）は M1 の分割（train / eval）に入れず、
-戻り値の detector に列挙する。fw が detector でないのに detect.csv か feat.csv があるセッションは止まる
-（docs/decisions/0021）。fw が無い記録ファームウェアのセッション（docs/decisions/0006）は今までどおり分割に入れる。
+meta.json の fw が detector のセッション（検出器で録った M2 のセッション）は M1
+の分割（train / eval）に入れず、
+戻り値の detector に列挙する。fw が detector でないのに detect.csv か feat.csv
+があるセッションは止まる
+（docs/decisions/0021）。fw が無い記録ファームウェアのセッション（
+docs/decisions/0006）は今までどおり分割に入れる。
 """
+
 from __future__ import annotations
 import argparse, json, re
 from pathlib import Path
 
 SUBJECTS = ("self", "p1")
-EVAL_MIN_FLOOR = 3   # docs/evaluation.md「評価には 3 セッション以上を使う」
+EVAL_MIN_FLOOR = 3  # docs/evaluation.md「評価には 3 セッション以上を使う」
 # YYYYMMDD-HHMMSS_<subject>_<cond>。cond は docs/data-schema.md の列挙
-NAME_RE = re.compile(r"^\d{8}-\d{6}_(self|p1)_(water|saliva|talk|cough|neck|quiet|meal)$")
+NAME_RE = re.compile(
+    r"^\d{8}-\d{6}_(self|p1)_(water|saliva|talk|cough|neck|quiet|meal)$"
+)
 
 
 DETECTOR_FW = "detector"
@@ -24,39 +31,55 @@ DETECTOR_FILES = ("detect.csv", "feat.csv")
 
 
 def _meta(session: Path) -> dict:
-    """meta.json を返す。無い・読めない・オブジェクトでない・subject が self / p1 でないなら止まる。"""
+    """meta.json を返す。無い・読めない・オブジェクトでない・subject が self /
+    p1 でないなら止まる。"""
     path = session / "meta.json"
     if not path.is_file():
-        raise SystemExit(f"meta.json がありません（中断したセッションは消す）: {session.name}")
+        raise SystemExit(
+            f"meta.json がありません（中断したセッションは消す）: {session.name}"
+        )
     try:
         meta = json.loads(path.read_text(encoding="utf-8"))
     except ValueError:
         raise SystemExit(f"meta.json が JSON として読めません: {session.name}")
     if not isinstance(meta, dict):
-        raise SystemExit(f"meta.json が JSON のオブジェクトではありません: {session.name}")
+        raise SystemExit(
+            f"meta.json が JSON のオブジェクトではありません: {session.name}"
+        )
     if meta.get("subject") not in SUBJECTS:
-        raise SystemExit(f"meta.json の subject が self / p1 ではありません: {session.name}")
+        raise SystemExit(
+            f"meta.json の subject が self / p1 ではありません: {session.name}"
+        )
     return meta
 
 
 def split_sessions(root: Path, eval_min: int = 3, subject: str = "self"):
     if eval_min < EVAL_MIN_FLOOR:
-        raise SystemExit(f"--eval-min は {EVAL_MIN_FLOOR} 以上にしてください: {eval_min}")
+        raise SystemExit(
+            f"--eval-min は {EVAL_MIN_FLOOR} 以上にしてください: {eval_min}"
+        )
     if subject not in SUBJECTS:
         raise SystemExit(f"subject は self / p1 のどちらかです: {subject!r}")
     sessions, detector = [], []
     for p in sorted(root.iterdir()):
         if not p.is_dir():
-            continue   # 通常ファイルは無視する
+            continue  # 通常ファイルは無視する
         if p.is_symlink():
-            # 同じセッションを別名のリンクで並べると、学習側と評価側に同じ実体が入る
-            raise SystemExit(f"セッションのフォルダがシンボリックリンクです: {p.name}")
+            # 同じセッションを別名のリンクで並べると、学習側と評価側に同じ実体が
+            # 入る
+            raise SystemExit(
+                f"セッションのフォルダがシンボリックリンクです: {p.name}"
+            )
         m = NAME_RE.fullmatch(p.name)
         if m is None:
-            raise SystemExit(f"フォルダ名が形式に合いません（消すか直す）: {p.name}")
+            raise SystemExit(
+                f"フォルダ名が形式に合いません（消すか直す）: {p.name}"
+            )
         meta = _meta(p)
         if meta["subject"] != m.group(1):
-            raise SystemExit(f"フォルダ名と meta.json の subject が違います: {p.name}")
+            raise SystemExit(
+                f"フォルダ名と meta.json の subject が違います: {p.name}"
+            )
         if meta.get("fw") == DETECTOR_FW:
             # 検出器のセッションは M1 の分割に入れない（docs/decisions/0021）
             if m.group(1) == subject:
@@ -64,16 +87,23 @@ def split_sessions(root: Path, eval_min: int = 3, subject: str = "self"):
             continue
         if any((p / name).is_file() for name in DETECTOR_FILES):
             # ファイルの有無を見るだけで、中身は開かない
-            raise SystemExit(f"検出器のファイル（detect.csv / feat.csv）があるのに meta.json の fw が {DETECTOR_FW} では"
-                             f"ありません（META が届かなかったセッションは消す）: {p.name}")
+            raise SystemExit(
+                f"検出器のファイル（detect.csv / feat.csv）があるのに meta.json の fw が {DETECTOR_FW} では"
+                f"ありません（META が届かなかったセッションは消す）: {p.name}"
+            )
         if m.group(1) == subject:
             sessions.append(p)
     if len(sessions) < eval_min + 1:
-        raise SystemExit(f"セッションが足りません: {len(sessions)} (評価 {eval_min} + 学習 1 以上が必要)")
+        raise SystemExit(
+            f"セッションが足りません: {len(sessions)} (評価 {eval_min} + 学習 1 以上が必要)"
+        )
     eval_s = sessions[-eval_min:]
     train_s = sessions[:-eval_min]
-    return {"train": [s.name for s in train_s], "eval": [s.name for s in eval_s],
-            "detector": [s.name for s in detector]}
+    return {
+        "train": [s.name for s in train_s],
+        "eval": [s.name for s in eval_s],
+        "detector": [s.name for s in detector],
+    }
 
 
 if __name__ == "__main__":
@@ -82,4 +112,10 @@ if __name__ == "__main__":
     ap.add_argument("--eval-min", type=int, default=3)
     ap.add_argument("--subject", default="self")
     a = ap.parse_args()
-    print(json.dumps(split_sessions(a.root, a.eval_min, a.subject), ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            split_sessions(a.root, a.eval_min, a.subject),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )

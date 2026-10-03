@@ -1,0 +1,3 @@
+# Edge Impulse の書き出し（外部コード）は整形しない
+DisableFormat: true
+SortIncludes: Never

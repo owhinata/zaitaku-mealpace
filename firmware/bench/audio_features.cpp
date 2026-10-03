@@ -1,6 +1,8 @@
 // 案2 の移植（audio_features.h）。Arduino 依存なし。ヒープは使わない。
-// AF_PROFILE 0（既定）は docs/decisions/0012 の式（#17 と同じ計算・同じ値）、AF_PROFILE 1 は docs/decisions/0020 の式。
-// 装置のビルドでは BENCH_CASE == 2 のときだけ組み込む。PC の答え合わせ（BENCH_CASE 未定義）では常に組み込む。
+// AF_PROFILE 0（既定）は docs/decisions/0012 の式（#17 と同じ計算・同じ値）、
+// AF_PROFILE 1 は docs/decisions/0020 の式。
+// 装置のビルドでは BENCH_CASE == 2 のときだけ組み込む。PC
+// の答え合わせ（BENCH_CASE 未定義）では常に組み込む。
 #if !defined(BENCH_CASE) || BENCH_CASE == 2
 
 #include "audio_features.h"
@@ -10,15 +12,16 @@
 
 // --- 表（audio_features_init で作る） ---
 static float s_hamming[AF_FRAME_LEN];
-// メル三角フィルタ（疎）。フィルタ m は power[s_mel_start[m] + i] × s_mel_w[s_mel_off[m] + i]（i < s_mel_len[m]）
+// メル三角フィルタ（疎）。フィルタ m は power[s_mel_start[m] + i] ×
+// s_mel_w[s_mel_off[m] + i]（i < s_mel_len[m]）
 static uint16_t s_mel_start[AF_N_MEL];
 static uint16_t s_mel_len[AF_N_MEL];
 static uint16_t s_mel_off[AF_N_MEL];
-static float s_mel_w[2 * AF_N_BINS];   // 各ビンは高々 2 本のフィルタに属する
+static float s_mel_w[2 * AF_N_BINS];  // 各ビンは高々 2 本のフィルタに属する
 static float s_dct[AF_N_MFCC][AF_N_MEL];
 
 // --- 作業領域（固定配列） ---
-static float s_frame[AF_N_FFT];      // Hamming 後、AF_N_FFT にゼロ詰め
+static float s_frame[AF_N_FFT];  // Hamming 後、AF_N_FFT にゼロ詰め
 static float s_power[AF_N_BINS];
 static float s_pre[AF_FRAME_LEN];
 #if !AF_CENTROID_SAME_FFT
@@ -27,18 +30,23 @@ static float s_raw[AF_FRAME_LEN];
 static float s_logmel[AF_N_MEL];
 
 static double hz_to_mel(double f) { return 2595.0 * log10(1.0 + f / 700.0); }
-static double mel_to_hz(double m) { return 700.0 * (pow(10.0, m / 2595.0) - 1.0); }
+static double mel_to_hz(double m) {
+  return 700.0 * (pow(10.0, m / 2595.0) - 1.0);
+}
 
 void audio_features_init() {
   fft512_init();
   for (uint32_t n = 0; n < AF_FRAME_LEN; n++) {
-    s_hamming[n] = (float)(0.54 - 0.46 * cos(2.0 * M_PI * (double)n / (double)(AF_FRAME_LEN - 1)));
+    s_hamming[n] = (float)(0.54 - 0.46 * cos(2.0 * M_PI * (double)n /
+                                             (double)(AF_FRAME_LEN - 1)));
   }
-  // メル（HTK 式、FFT ビンの周波数で評価、面積の正規化なし）。features.py / features_m2.py の _mel_filterbank と同じ
+  // メル（HTK 式、FFT ビンの周波数で評価、面積の正規化なし）。features.py /
+  // features_m2.py の _mel_filterbank と同じ
   double mel_lo = hz_to_mel(AF_MEL_FMIN_HZ), mel_hi = hz_to_mel(AF_MEL_FMAX_HZ);
   double hz[AF_N_MEL + 2];
   for (uint32_t i = 0; i < AF_N_MEL + 2; i++) {
-    hz[i] = mel_to_hz(mel_lo + (mel_hi - mel_lo) * (double)i / (double)(AF_N_MEL + 1));
+    hz[i] = mel_to_hz(mel_lo +
+                      (mel_hi - mel_lo) * (double)i / (double)(AF_N_MEL + 1));
   }
   uint32_t off = 0;
   for (uint32_t m = 0; m < AF_N_MEL; m++) {
@@ -52,7 +60,10 @@ void audio_features_init() {
       double w = up < down ? up : down;
       if (w < 0.0) w = 0.0;
       if (w > 0.0) {
-        if (!started) { started = true; start = k; }
+        if (!started) {
+          started = true;
+          start = k;
+        }
         len = k - start + 1;
       }
     }
@@ -70,7 +81,9 @@ void audio_features_init() {
   // DCT-II（ortho）の先頭 13 行。features.py の _dct_matrix と同じ
   for (uint32_t k = 0; k < AF_N_MFCC; k++) {
     for (uint32_t m = 0; m < AF_N_MEL; m++) {
-      double d = cos(M_PI * (double)k * (2.0 * (double)m + 1.0) / (2.0 * (double)AF_N_MEL)) * sqrt(2.0 / (double)AF_N_MEL);
+      double d = cos(M_PI * (double)k * (2.0 * (double)m + 1.0) /
+                     (2.0 * (double)AF_N_MEL)) *
+                 sqrt(2.0 / (double)AF_N_MEL);
       if (k == 0) d *= sqrt(0.5);
       s_dct[k][m] = (float)d;
     }
@@ -81,7 +94,8 @@ void audio_features_init() {
 
 void audio_stage_decimate(const int16_t* in, uint32_t n, int16_t* out) {
 #if AF_PROFILE == 1
-  // (in[2i] + in[2i+1]) >> 1 を int32 で（算術シフト）。features_m2._decimate と同じ整数演算
+  // (in[2i] + in[2i+1]) >> 1 を int32 で（算術シフト）。features_m2._decimate
+  // と同じ整数演算
   const uint32_t m = n / AF_DECIMATION;
   for (uint32_t i = 0; i < m; i++) {
     int32_t s = (int32_t)in[2 * i] + (int32_t)in[2 * i + 1];
@@ -92,7 +106,8 @@ void audio_stage_decimate(const int16_t* in, uint32_t n, int16_t* out) {
 #endif
 }
 
-void audio_stage_preemphasis(const int16_t* x, uint32_t n, bool has_prev, float* pre) {
+void audio_stage_preemphasis(const int16_t* x, uint32_t n, bool has_prev,
+                             float* pre) {
   const float inv = 1.0f / AF_AUDIO_SCALE;
   float prev = has_prev ? (float)x[-1] * inv : 0.0f;
   for (uint32_t i = 0; i < n; i++) {
@@ -108,7 +123,8 @@ void audio_stage_convert(const int16_t* x, uint32_t n, float* raw) {
 }
 
 void audio_stage_power(const float* frame, float* power) {
-  for (uint32_t n = 0; n < AF_FRAME_LEN; n++) s_frame[n] = frame[n] * s_hamming[n];
+  for (uint32_t n = 0; n < AF_FRAME_LEN; n++)
+    s_frame[n] = frame[n] * s_hamming[n];
   for (uint32_t n = AF_FRAME_LEN; n < AF_N_FFT; n++) s_frame[n] = 0.0f;
   fft512_power(s_frame, power);
 }
@@ -129,7 +145,7 @@ void audio_stage_mel_dct(const float* power, float* dct) {
 }
 
 float audio_stage_centroid(const float* power) {
-  const float bin_hz = (float)AF_AUDIO_HZ / (float)AF_N_FFT;   // 31.25
+  const float bin_hz = (float)AF_AUDIO_HZ / (float)AF_N_FFT;  // 31.25
   float total = 0.0f, weighted = 0.0f;
   for (uint32_t k = 0; k < AF_N_BINS; k++) {
     total += power[k];
@@ -140,7 +156,8 @@ float audio_stage_centroid(const float* power) {
 }
 
 float audio_stage_zcr(const int16_t* x, uint32_t n) {
-  // 符号は x − 平均 ≥ 0 を正。平均は Σx ÷ n なので、x[i] ≥ 平均 は n·x[i] ≥ Σx と同じ（整数で厳密）
+  // 符号は x − 平均 ≥ 0 を正。平均は Σx ÷ n なので、x[i] ≥ 平均 は n·x[i] ≥ Σx
+  // と同じ（整数で厳密）
   int64_t sum = 0;
   for (uint32_t i = 0; i < n; i++) sum += x[i];
   uint32_t changes = 0;
@@ -154,17 +171,20 @@ float audio_stage_zcr(const int16_t* x, uint32_t n) {
 }
 
 // 1 フレーム: DCT 13 係数と重心
-static void frame_features(const int16_t* x, bool has_prev, float* dct, float* centroid) {
+static void frame_features(const int16_t* x, bool has_prev, float* dct,
+                           float* centroid) {
 #if AF_PREEMPH_PER_FRAME
-  has_prev = false;                                   // フレームごとに独立（pre[0] = x[0]）
+  has_prev = false;  // フレームごとに独立（pre[0] = x[0]）
 #endif
   audio_stage_preemphasis(x, AF_FRAME_LEN, has_prev, s_pre);
   audio_stage_power(s_pre, s_power);
   audio_stage_mel_dct(s_power, dct);
 #if AF_CENTROID_SAME_FFT
-  *centroid = audio_stage_centroid(s_power);          // 同じ（プリエンファシス後の）パワースペクトルから
+  // 同じ（プリエンファシス後の）パワースペクトルから
+  *centroid = audio_stage_centroid(s_power);
 #else
-  audio_stage_convert(x, AF_FRAME_LEN, s_raw);        // 重心はプリエンファシス前（2 回目の FFT）
+  // 重心はプリエンファシス前（2 回目の FFT）
+  audio_stage_convert(x, AF_FRAME_LEN, s_raw);
   audio_stage_power(s_raw, s_power);
   *centroid = audio_stage_centroid(s_power);
 #endif
@@ -191,22 +211,29 @@ void audio_features_full(const int16_t* x, float* out) {
 
 // --- 再利用版 ---
 
-void audio_reuse_init(AudioReuseState* st) {
-  memset(st, 0, sizeof(*st));
-}
+void audio_reuse_init(AudioReuseState* st) { memset(st, 0, sizeof(*st)); }
 
 bool audio_reuse_push(AudioReuseState* st, const int16_t* slice, float* out) {
-  // リングをずらし、新しいスライスを（M2 なら間引いて）末尾に置く（この時間もホップに含める）
-  memmove(st->ring, st->ring + AF_HOP_SAMPLES, (AF_WINDOW_SAMPLES - AF_HOP_SAMPLES) * sizeof(int16_t));
-  audio_stage_decimate(slice, AF_IN_HOP_SAMPLES, st->ring + (AF_WINDOW_SAMPLES - AF_HOP_SAMPLES));
+  // リングをずらし、新しいスライスを（M2 なら間引いて）
+  // 末尾に置く（この時間もホップに含める）
+  memmove(st->ring, st->ring + AF_HOP_SAMPLES,
+          (AF_WINDOW_SAMPLES - AF_HOP_SAMPLES) * sizeof(int16_t));
+  audio_stage_decimate(slice, AF_IN_HOP_SAMPLES,
+                       st->ring + (AF_WINDOW_SAMPLES - AF_HOP_SAMPLES));
 
-  // 窓が満ちる前のスライスでも、そのスライスで新しく決まる末尾の AF_HOP_FRAMES フレームだけを計算して DCT・重心のリングに
-  // 入れる（#24: 最初の窓で全フレームをまとめて計算すると 1 ホップに窓 1 つ分の時間が掛かり、装置が追いつけない）。
-  // 末尾のフレームは、M2（フレームごとのプリエンファシス）ではその新しいスライスのサンプルだけで決まる。M1 では先頭の 2 フレーム
-  // （73・74）が前のスライスにまたがるが、そのサンプルはリングに残っている（最初のスライスでは 0。そのフレームは窓が満ちる前に
-  // リングの外へ出るので窓には残らない）。窓が満ちた時点のリングは、全フレームをまとめて計算した場合と同じ値になる。
-  const uint32_t first = AF_N_FRAMES - AF_HOP_FRAMES;   // 73 / 30（f′ 15）
-  memmove(st->dct[0], st->dct[AF_HOP_FRAMES], first * AF_N_MFCC * sizeof(float));
+  // 窓が満ちる前のスライスでも、そのスライスで新しく決まる末尾の AF_HOP_FRAMES
+  // フレームだけを計算して DCT・重心のリングに
+  // 入れる（#24: 最初の窓で全フレームをまとめて計算すると 1 ホップに窓 1
+  // つ分の時間が掛かり、装置が追いつけない）。
+  // 末尾のフレームは、M2（フレームごとのプリエンファシス）
+  // ではその新しいスライスのサンプルだけで決まる。M1 では先頭の 2 フレーム
+  // （73・74）が前のスライスにまたがるが、そのサンプルはリングに残っている（最
+  // 初のスライスでは 0。そのフレームは窓が満ちる前に
+  // リングの外へ出るので窓には残らない）。窓が満ちた時点のリングは、
+  // 全フレームをまとめて計算した場合と同じ値になる。
+  const uint32_t first = AF_N_FRAMES - AF_HOP_FRAMES;  // 73 / 30（f′ 15）
+  memmove(st->dct[0], st->dct[AF_HOP_FRAMES],
+          first * AF_N_MFCC * sizeof(float));
   memmove(st->centroid, st->centroid + AF_HOP_FRAMES, first * sizeof(float));
   for (uint32_t f = first; f < AF_N_FRAMES; f++) {
     uint32_t s = f * AF_FRAME_HOP;
@@ -217,10 +244,14 @@ bool audio_reuse_push(AudioReuseState* st, const int16_t* slice, float* out) {
   st->primed = true;
 
 #if !AF_PREEMPH_PER_FRAME
-  // 窓の先頭フレームは以前に「前のサンプルを持つ位置」で計算されているので、全窓版と同じ pre[0] = x[0] で
-  // DCT だけ計算し直す（1 ホップに FFT が 1 回増える。重心はプリエンファシスに依存しないのでそのまま）。
-  // 答え合わせで、この差が許容差（相対 1e-3）を超えたため（最大 1.5e-3）。0012 の式は変えていない。
-  // 最初の窓でも行う（先頭フレームは最初のスライスの位置 75 で計算されたもので、その前のサンプルはリングの 0 だったので
+  // 窓の先頭フレームは以前に「前のサンプルを持つ位置」で計算されているので、
+  // 全窓版と同じ pre[0] = x[0] で
+  // DCT だけ計算し直す（1 ホップに FFT が 1 回増える。重心はプリエンファシスに
+  // 依存しないのでそのまま）。
+  // 答え合わせで、この差が許容差（相対 1e-3）を超えたため（最大 1.5e-3）。0012
+  // の式は変えていない。
+  // 最初の窓でも行う（先頭フレームは最初のスライスの位置 75
+  // で計算されたもので、その前のサンプルはリングの 0 だったので
   // pre[0] = x[0] と同じ値になっているが、同じ経路を通す）。
   audio_stage_preemphasis(st->ring, AF_FRAME_LEN, false, s_pre);
   audio_stage_power(s_pre, s_power);
@@ -235,7 +266,8 @@ bool audio_reuse_push(AudioReuseState* st, const int16_t* slice, float* out) {
   }
   for (uint32_t k = 0; k < AF_N_MFCC; k++) out[k] = acc[k] / (float)AF_N_FRAMES;
   out[AF_N_MFCC] = csum / (float)AF_N_FRAMES;
-  out[AF_N_MFCC + 1] = audio_stage_zcr(st->ring, AF_WINDOW_SAMPLES);   // 窓の平均に依存するので毎回
+  // 窓の平均に依存するので毎回
+  out[AF_N_MFCC + 1] = audio_stage_zcr(st->ring, AF_WINDOW_SAMPLES);
   return true;
 }
 

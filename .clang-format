@@ -1,0 +1,10 @@
+# C++ のフォーマッタ（clang-format）の設定。使い方: bash tools/format.sh
+# 既存のコードに合わせて Google スタイルを土台にする（2 スペース、ブレースは同じ行、ポインタは型側に寄せる）。
+BasedOnStyle: Google
+ColumnLimit: 80
+DerivePointerAlignment: false
+PointerAlignment: Left
+# include の並べ替えはしない（.ino やヘッダの依存順を崩さない）
+SortIncludes: Never
+# コメントは折り返さない（日本語の文中に空白が入り読みにくくなる。長い行はそのまま残す）
+ReflowComments: false
