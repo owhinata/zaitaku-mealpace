@@ -203,6 +203,17 @@ Codex の呼び出しは codex plugin（`/codex:*`）に一本化する。
   - `Closes` / `Fixes` は使わない。Issue を閉じるのは人。
 - Issue、PR、Milestone、コメント、`docs/` は日本語。
 
+## コード整形
+
+- コミットの前に `bash tools/format.sh` を実行する（リポジトリの root から）。Python は ruff（`pyproject.toml`）、
+  C++ と `.ino` は clang-format（`.clang-format`、Google スタイル土台）。どちらも行幅 80。
+  ruff は `.venv` に入れる（`tools/requirements.txt`）。clang-format はシステムのもの（apt）。
+- 触らないもの: `firmware/detector/src/`（Edge Impulse の書き出し）と生成物のヘッダ
+  （`m2_norm.h`、`m2_threshold.h`、`shapes.h`）。生成物は元のスクリプトで作り直す。
+- コメントは折り返さない設定（`ReflowComments: false`。日本語の文中に空白が入るため）なので、コメントと docstring の
+  80 桁は書くときに守る。行末コメントで 80 を超えるときは前の行に置く（どちらのフォーマッタも宣言のほうを割ってしまう）。
+- 出力の文面の文字列、URL、JSON の例のように切れないものは 80 を超えてよい。
+
 ## セッション
 
 1. `docs/status.md` と `docs/plan.md` を読ませる。
