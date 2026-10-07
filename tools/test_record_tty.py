@@ -80,6 +80,12 @@ class FakeSerial:
 
 record.serial = types.SimpleNamespace(Serial=FakeSerial)
 record.RAW_DIR = Path(os.environ["RAW_DIR"])
+if os.environ.get("THROAT_FAKE"):
+    # --throat の子を偽の子（test_record_throat.FAKE_CHILD）に差し替える（t11）
+    import json
+    record.throat_argv = lambda host, device: json.loads(os.environ["THROAT_FAKE"])
+    record.mixer_argv = lambda host, device: None
+    record.asoundrc_check_argv = lambda host: [sys.executable, "-c", "pass"]
 record.main()
 '''
 
@@ -342,6 +348,45 @@ class RecordTtyTest(unittest.TestCase):
         self.assertNotIn("recording...", c.output())
         self.assertIn("META が 0.3 秒以内に届きませんでした", c.output())
         self.assertEqual(list(c.raw_dir.iterdir()), [])
+
+    def test_t11_throat_sigint_restores_tty_and_stops_child(self):
+        """--throat（偽の子）でも SIGINT で端末が戻り、子が残らず、throat.wav と
+        meta.json（throat.stop = interrupt）ができる（#36）。"""
+        import json
+        from test_record_throat import FAKE_CHILD, pid_alive
+
+        with tempfile.TemporaryDirectory() as d:
+            fake = Path(d) / "fake_child.py"
+            fake.write_text(FAKE_CHILD, encoding="utf-8")
+            pidfile = Path(d) / "child.pid"
+            argv = [
+                sys.executable,
+                "-I",
+                str(fake),
+                json.dumps({"pidfile": str(pidfile)}),
+            ]
+            c = self.start(
+                "--throat",
+                "sh12jk-wired-unoq-usbaudio",
+                "--cond",
+                "quiet",
+                env_extra={"THROAT_FAKE": json.dumps(argv)},
+            )
+            c.wait_ready()
+            c.send("s")
+            c.wait_text("ms] s")
+            c.signal(signal.SIGINT)
+            self.assertEqual(c.wait_exit(), 0, c.output())
+            self.assertTtyRestored(c)
+            self.assertFalse(pid_alive(int(pidfile.read_text())))
+            dirs = [p for p in c.raw_dir.iterdir() if p.is_dir()]
+            self.assertEqual(len(dirs), 1)
+            self.assertTrue((dirs[0] / "throat.wav").exists())
+            meta = json.loads(
+                (dirs[0] / "meta.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(meta["throat"]["stop"], "interrupt")
+            self.assertEqual([r[1] for r in c.events()], ["s"])
 
 
 class MarkAfterCloseTest(unittest.TestCase):

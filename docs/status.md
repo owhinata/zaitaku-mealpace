@@ -1,6 +1,6 @@
 # 現在地
 
-更新: 2026-10-04
+更新: 2026-10-07
 
 ## 段階
 
@@ -280,6 +280,11 @@ M0 準備の関門は 9/20 に通過（docs/decisions/0010、`gate-M0`）。
   観点 3（M2 の構成と UNO Q の構成に分けた）、docs/workflow.md の旧構成前提の例 2 行とセンサ構成の参照先（0002・0025・0026）を直した。M1・M2（Nano）の決まり（EI の C++ ライブラリ形式、A 案、検出器は生の音声を保存も送信もしない）は残した。
   0025 の「UNO Q の推論のコードを書く前」の条件はこれで満たす。無線リンクの境界は #42。
 - 10/3: コードにフォーマッタをかけた（人の依頼。行幅 80）。Python は ruff（`pyproject.toml`）、C++ と .ino は clang-format（`.clang-format`、Google スタイル土台）。`bash tools/format.sh` で両方を実行する。`firmware/detector/src/`（EI の書き出し）は整形しない。生成物 `shapes.h` は gen_shapes.py が `// clang-format off` を出す。clang-format のコメント折り返しは切った（日本語の文中に空白が入る）。代わりに、行が 80 を超える行末コメントは前の行へ移し、80 を超えるコメント行は使い捨てのスクリプトで折り返した（空白・句読点を優先、カタカナ語の途中では切らない）。docstring も同じ規則で折り返し、使い方の表はコマンドの行と説明の行に分けた。出力の文面の文字列、生成物のヘッダ（m2_norm.h・m2_threshold.h は整形しない）、detector_meta.h の JSON の例と URL は 80 を超えたまま。テスト（analysis 261、tools 50、test_detector 309、test_indicator 837）と logger・detector・indicator のビルドは整形後も通る。
+- #36（10/7、main）: PC がアダプタ（UGREEN CM721）を認識せず UNO Q が認識するので、UNO Q の `arecord` の生 PCM を ssh で PC に流して録る経路にした（docs/decisions/0028、`fdde805`）。
+  `tools/record.py --throat <iface>`（装置をつながない咽喉マイクだけのセッション。`throat.wav` 48 kHz・2 ch 受けたまま、`throat_chunks.csv`、`fw` = `pc-throat`、時計は PC の単調時計）、
+  `tools/throat_check.py`（受信の時刻による対応、叩きの確かめ、使わない目安）、`docs/data-schema.md` の追記、docs/decisions/0029。判定の条件は #37 の記録の前に
+  docs/log/2026-10-07.md に固定した（コミット済み）。合成で対応の誤差 最大 1.8 ms（20 ms の要求の内）。実機の疎通 10 秒で overrun 0・`buffer_size` 96000。
+  コミット前の adversarial-review 1 回目で PCM 名の検査の穴を 1 件直した。2 回目の指摘（ALSA の設定による再定義）は CONCERN（人の決定）で、起動前の `~/.asoundrc`・`/etc/asound.conf` の検査と 0029 の記録で対応した。テストは tools 50 → 75、analysis 261（不変）。集計スクリプトは使い捨て（`~/work/zaitaku-mealpace-scratch/issue36/`）。docs/log/2026-10-07.md。
 - ロボセンサー技研への問い合わせ未送付（代替センサ、docs/decisions/0002、#5）。
 
 ## 次にやること
@@ -317,7 +322,7 @@ M3 の判定の数字に使う記録（#39）と評価（#40）は、#28 の後�
 
 | Issue | 内容 | 依存 |
 |---|---|---|
-| #36 | 試用: PC 録音の準備（`throat.wav` の同時録音、時刻合わせ、集計スクリプト、判定の条件の固定） | なし |
+| #36 | 試用: PC 録音の準備（`throat.wav` の同時録音、時刻合わせ、集計スクリプト、判定の条件の固定）。**実装済み（10/7、main。経路は UNO Q 経由、0028・0029）。close は人** | なし |
 | #37 | 試用: PC での信号の確認（有線と NZ-210C 経由。5 条件。人） | #36 |
 | #38 | 試用: UNO Q の立ち上げ（USB オーディオ、LED の RPC、PD 電源、A2DP の直接ペアリング） | なし（#36・#37 と並行可） |
 | #39 | 記録の経路を決め、咽喉マイクで `self` の嚥下・非嚥下を 3 収集日以上録る | #37 で信号が見えてから。CLAUDE.md の差し替えの後 |

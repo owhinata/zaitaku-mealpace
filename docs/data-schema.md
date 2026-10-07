@@ -22,9 +22,21 @@ data/raw/20261005-121500_self_meal/
   meta.json
 ```
 
+咽喉マイクだけのセッション（`meta.json` の `fw` が `pc-throat`。装置をつながない。`tools/record.py --throat`、docs/decisions/0029）の構成:
+
+```
+data/raw/20261008-101500_self_water/
+  throat.wav          48 kHz（実際に録った値は meta.json の sample_rates.audio_hz）、2 ch、int16。受けたまま
+  throat_chunks.csv   t_ms, sample_index
+  events.csv          t_ms, label, note
+  meta.json
+```
+
 ## 共通
 
 - 時刻の基準は装置の `millis()`。すべてのストリームを同じクロックで刻印する。
+- 咽喉マイクのセッションでは、PC の単調時計の、最初の音声のバイトが届いた時刻からの ms（`events.csv` と `throat_chunks.csv`）。
+  装置の `millis()` とは別の時計で、同じセッションに両方は入らない（docs/decisions/0029）。
 - ストリームのファイル（`imu.csv`、`audio.wav` と `audio_chunks.csv`、`analog.csv`、`detect.csv`、`feat.csv`）は、そのストリームの最初のフレームが
   届いたときに作る。`events.csv` と `meta.json` は常に作る。フレームが 1 つも届かなかったセッションには `events.csv` と `meta.json` しかできない。
 - `subject`: `self` | `p1`
@@ -44,6 +56,20 @@ data/raw/20261005-121500_self_meal/
   （64 サンプル・16 kHz なら 4 ms 前）とする（docs/decisions/0013）。WAV には連続波形として書き、
   各チャンクの `t_ms` は `audio_chunks.csv`（`t_ms, sample_index`）に別途残す
 
+## throat.wav（咽喉マイクのセッションのみ）
+
+- SH-12JK（docs/decisions/0025）の音声。`tools/record.py` が子プロセス（`arecord`。UNO Q では ssh 越し。docs/decisions/0028）から受けた S16_LE を
+  変換せずに書く。サンプリング周波数とチャンネル数は `meta.json` の `sample_rates.audio_hz` と `throat.channels`（2026-10 の構成では 48000 Hz・2 ch）。
+- **解析の基準は 16 kHz・1 ch**。解析は L（ch0）を 16 kHz に落として使う（落とし方は解析のコード。#36 では `scipy.signal.resample_poly(x, 1, 3)`）。
+  この文書の他の節の「16 kHz」（`audio.wav`）は記録ファームウェアの基板マイクの値で、変わらない。
+- 生の計測データ。`data/raw/` の外に出さず、コミットしない。`self` のみ（docs/decisions/0028）。
+
+## throat_chunks.csv（咽喉マイクのセッションのみ）
+
+- 1 行 = 子の標準出力の 1 回の読み取り（書いたフレームが 0 の読み取りは行にしない）。`t_ms` は読み取りが戻った時刻（上の PC の時計）で、
+  `audio_chunks.csv` と同じく終端側の時刻として読む。`sample_index` はその読み取りで書いた最初のフレームの番号（0 から）。
+- サンプルの時刻の出し方（アンカーの下側の包絡と直線）は docs/decisions/0029 と `tools/throat_check.py`。
+
 ## analog.csv（拡張点）
 
 - 代替センサ（圧電コンタクトマイク、ピエゾ電線センサなど）を ADC で読む場合
@@ -54,6 +80,7 @@ data/raw/20261005-121500_self_meal/
 
 - `label`: `s`（嚥下）`t`（発話）`c`（咳）`n`（首の動き）`q`（静止）`b`（一口）`o`（観察: note に内容）
 - マーカーは**開始時刻**。区間の終端は後処理で決める（嚥下は開始から 1.5 秒、など）
+- 咽喉マイクのセッションのマーカーの `t_ms` は、キーを受けた時刻（PC の時計。上の「共通」）。装置のセッションの「直前に届いたフレームの `t_ms`」とは違う
 
 ## detect.csv（検出器のみ）
 
@@ -120,6 +147,53 @@ data/raw/20261005-121500_self_meal/
   それより前に録ったセッションには、これらのキーが無いものがある。`fw` が `detector` でないセッションは M2 の評価に使わない
   （`docs/recording-protocol.md`）
 
+咽喉マイクだけのセッション（docs/decisions/0029）の `meta.json` の例:
+
+```json
+{
+  "subject": "self",
+  "cond": "water",
+  "position": "midline-below-thyroid",
+  "band": "elastic-25mm",
+  "firmware_sha": "abc1234",
+  "sample_rates": {"imu_hz": 0, "audio_hz": 48000, "analog_hz": 0},
+  "sensors": [{"id": "throat", "part": "SH-12JK", "iface": "sh12jk-wired-unoq-usbaudio"}],
+  "notes": "",
+  "fw": "pc-throat",
+  "throat": {
+    "host": "arduino@unoq.local",
+    "device": "hw:CARD=Audio,DEV=0",
+    "format": "S16_LE", "channels": 2, "rate_hz": 48000,
+    "remote_command": "exec arecord -D hw:CARD=Audio,DEV=0 -f S16_LE -r 48000 -c 2 -t raw -B 2000000 -F 125000 -v -",
+    "alsa_buffer_size": 96000, "alsa_period_size": 6000,
+    "first_byte_wait_s": 3.91,
+    "frames": 8640000, "elapsed_s": 180.01, "est_diff_frames": -432,
+    "overrun_lines": 0,
+    "stop": "duration", "child_returncode": 255,
+    "mixer": "Simple mixer control 'Mic',0\n  ..."
+  }
+}
+```
+
+- `fw` = `pc-throat` は装置の申告値ではなく `record.py` が書く値（装置をつながないセッション）。トップレベルの `imu_hz`・`audio_hz` は無い（申告する装置が無い）。
+  `sample_rates` は実際に録った値（`imu_hz` 0、`analog_hz` 0）。`firmware_sha` は今までどおり PC 側のリポジトリの短い sha。
+- `sensors[].iface`:
+
+| `iface` | 経路 | `--throat-host` | 状態 |
+|---|---|---|---|
+| `sh12jk-wired-unoq-usbaudio` | SH-12JK を有線で UNO Q の USB オーディオアダプタに挿す | `local` 以外 | #37 の有線 |
+| `sh12jk-nz210c-rx-unoq-usbaudio` | NZ-210C の受信機の出力を UNO Q の USB オーディオアダプタへ | `local` 以外 | #37 の NZ-210C 経由 |
+| `sh12jk-nz210c-a2dp-unoq` | NZ-210C の送信機を UNO Q が A2DP で受ける | `local` 以外 | 予約（#38） |
+| `sh12jk-wired-pc` | SH-12JK を PC のマイク端子に挿す（PC 内蔵の入力） | `local` | 予約 |
+| `sh12jk-nz210c-rx-usbaudio` | NZ-210C の受信機 → PC に挿した USB オーディオアダプタ | `local` | 予約（PC がアダプタを認識しない） |
+
+- `throat` の各キー: `host`（ssh の宛先か `local`）、`device`（ALSA の PCM 名。許す形は hw/plughw の CARD/DEV 指定だけ（0028 の決定 2 を守るため。A2DP は #38 で決める））、`format`・`channels`・`rate_hz`（受けた形式）、`remote_command`（UNO Q に渡した文字列。
+  `local` では `null`）、`alsa_buffer_size`・`alsa_period_size`（`arecord -v` の値。拾えなければ `null`）、`first_byte_wait_s`（子の起動から最初のバイトまで）、
+  `frames`（`throat.wav` のフレーム数）、`elapsed_s`（最初の到着から最後の到着までの PC の時間）、`est_diff_frames`（推定差。
+  `(elapsed_s × 48000 + 最初の読み取りのフレーム数) − frames`。到着の揺れ・滞留・クロックの差を含む診断値で、取りこぼしの数そのものではない）、
+  `overrun_lines`（`arecord` の標準エラーで `overrun` を含む行の数）、`stop`（`duration` / `interrupt` / `child-exit`）、`child_returncode`、
+  `mixer`（`amixer -c <CARD> sget Mic` の標準出力そのまま。読み取りのみ。読めなければ `null` で、理由を `mixer_error` に書く）。
+
 ## シリアルのフレーム形式（装置 → PC）
 
 ```
@@ -146,3 +220,5 @@ PC → 装置: 検出器は 1 バイト `M`（0x4D）を受けると META を送
 DETECT / FEAT と `detect.csv`・`feat.csv`・検出器の `meta.json` の追記は既存のファイル・列・単位・フレーム形式を変えていないので、
 記録済みのセッションの変換は要らない（docs/decisions/0021）。
 開始時の合図（PC → 装置の `M`、docs/decisions/0006 の追記）もファイル・列・単位・フレーム形式を変えていないので、変換は要らない。
+咽喉マイクのセッション（`throat.wav`・`throat_chunks.csv`・`fw` = `pc-throat`）の追記も既存のファイル・列・単位・フレーム形式を変えていないので、
+変換は要らない（docs/decisions/0029）。
