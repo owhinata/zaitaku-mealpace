@@ -10,7 +10,17 @@
     アンカーの段差（50 ms 超）、直線の c0 とクロックの差（ppm）、残差
   - L と R の相関と RMS の比
   - 叩き（events.csv の o で note が tap のもの）の見つかった数と Δ
+  - ちょうど 0 の区間（L と R が両方 0 のフレームが ZERO_RUN_MS 以上続く区間）
   - 使わない目安に当たるか
+
+0 の区間（Issue #38、plan #38 第 4.2 節、docs/decisions/0030 決定 5）:
+  構成 B（iface sh12jk-nz210c-a2dp-unoq）では、Bluetooth の途切れが「ちょうど 0」
+  で埋まり、フレーム数と推定差に出ない場合がある。L と R が両方ちょうど 0 の
+  フレームが ZERO_RUN_MS ms 以上続く区間を数える。フレーム 0 から始まる区間は
+  「先頭の 0」として別に出し、回数に入れない。末尾の区間は回数に入れる。
+  使わない目安に入れるのは構成 B の iface だけ（0 の区間が 1 回以上、
+  throat.stop が stall、throat.pipewire.link_check が ok でない）。USB の iface
+  では数えて表示するだけ。
 
 時刻の対応（受信の時刻。主）:
   throat_chunks.csv の読み取り k の最後のフレーム e_k について、
@@ -42,6 +52,11 @@ TAP_MAD_K = 8.0
 TAP_MIN_LSB = 5.0
 TAP_MIN_FOUND = 3
 TAP_MAX_ABS_MEDIAN_MS = 50.0
+# 0 の区間の閾値（ms）。仮の値（plan #38 第 4.2 節）。E3 の実測の後に人が決めた
+# 値をここで置き換え、規則を docs/log/ に固定してから構成 B の正式な記録に進む
+ZERO_RUN_MS = 10
+# 0 の区間・stall・リンクの確認を使わない目安に入れる iface（構成 B）
+A2DP_IFACES = ("sh12jk-nz210c-a2dp-unoq",)
 
 
 # --- 読み込み ---
@@ -221,6 +236,42 @@ def find_taps(session, mode: str = "enter", c0=None, s=None) -> list[dict]:
     return out
 
 
+# --- 0 の区間 ---
+def zero_runs(wav: np.ndarray, fs: int, min_ms: float | None = None) -> dict:
+    """L と R（全チャンネル）が両方ちょうど 0 のフレームが min_ms 以上続く区間。
+    runs は先頭を除く区間の (開始の秒, 長さ ms)。head_ms は先頭の区間の長さ
+    （無ければ 0）。short_max_ms は閾値未満の 0 の連続（先頭を除く）の最長で、
+    自然な信号の中の 0 の連続の長さ（閾値の妥当さの確かめ）。"""
+    if min_ms is None:
+        min_ms = ZERO_RUN_MS
+    both = np.all(wav == 0, axis=1) if len(wav) else np.zeros(0, bool)
+    d = np.diff(np.concatenate(([0], both.astype(np.int8), [0])))
+    starts = np.flatnonzero(d == 1)
+    lengths = np.flatnonzero(d == -1) - starts
+    min_frames = int(round(min_ms * fs / 1000.0))
+    head = 0
+    runs, short = [], [0]
+    for s0, n in zip(starts, lengths):
+        if s0 == 0:
+            if n >= min_frames:
+                head = int(n)
+            else:
+                short.append(int(n))
+        elif n >= min_frames:
+            runs.append((float(s0 / fs), float(1000.0 * n / fs)))
+        else:
+            short.append(int(n))
+    return {
+        "min_ms": float(min_ms),
+        "runs": runs,
+        "count": len(runs),
+        "total_ms": float(sum(r[1] for r in runs)),
+        "max_ms": float(max((r[1] for r in runs), default=0.0)),
+        "head_ms": 1000.0 * head / fs,
+        "short_max_ms": 1000.0 * max(short) / fs,
+    }
+
+
 # --- まとめ ---
 def check(session, tap_mode: str = "enter") -> dict:
     ses = _as_session(session)
@@ -249,6 +300,10 @@ def check(session, tap_mode: str = "enter") -> dict:
     )
     est = est_diff_frames(ses)
     est_ms = 1000.0 * est / fs
+    zr = zero_runs(ses["wav"], fs)
+    iface = ((meta.get("sensors") or [{}])[0] or {}).get("iface")
+    a2dp = iface in A2DP_IFACES
+    pw = th.get("pipewire") or {}
     flags = []
     if (th.get("overrun_lines") or 0) > 0:
         flags.append(f"overrun の行 {th.get('overrun_lines')} > 0")
@@ -256,6 +311,17 @@ def check(session, tap_mode: str = "enter") -> dict:
         flags.append(f"|推定差| {abs(est_ms):.0f} ms > {PERIOD_MS:.0f} ms")
     if st:
         flags.append(f"段差 {len(st)} 箇所")
+    if a2dp:
+        if zr["count"] > 0:
+            flags.append(
+                f"0 の区間（{zr['min_ms']:g} ms 以上、先頭を除く）{zr['count']} 回"
+            )
+        if th.get("stop") == "stall":
+            flags.append("受信の止まり（stop = stall）")
+        if pw.get("link_check") != "ok":
+            flags.append(
+                f"起動後のリンクの確認が ok でない（{pw.get('link_check')}）"
+            )
     tap_flags = []
     if tap_mode == "enter":
         if len(found) < TAP_MIN_FOUND:
@@ -272,6 +338,9 @@ def check(session, tap_mode: str = "enter") -> dict:
         "meta_overrun_lines": th.get("overrun_lines"),
         "meta_est_diff_frames": th.get("est_diff_frames"),
         "meta_stop": th.get("stop"),
+        "iface": iface,
+        "link_check": pw.get("link_check"),
+        "zero": zr,
         "reads": int(len(a)),
         "est_diff_frames": est,
         "est_diff_ms": est_ms,
@@ -310,6 +379,22 @@ def report(r: dict) -> str:
         ),
         f"L と R: 相関 {_fmt(r['lr_corr'], '{:.3f}')}、RMS の比（R / L）{_fmt(r['lr_rms_ratio'], '{:.3f}')}",
     ]
+    z = r["zero"]
+    lines.append(
+        f"0 の区間（L と R が両方ちょうど 0 が {z['min_ms']:g} ms 以上。先頭を除く）"
+        f": {z['count']} 回、合計 {z['total_ms']:.0f} ms、最長 {z['max_ms']:.0f} ms"
+        + (
+            "、位置 " + "、".join(f"{t:.2f} 秒" for t, _ in z["runs"])
+            if z["runs"]
+            else ""
+        )
+    )
+    lines.append(
+        f"  先頭の 0 {z['head_ms']:.0f} ms、閾値未満の 0 の連続の最長 {z['short_max_ms']:.2f} ms"
+        + ("" if r["iface"] in A2DP_IFACES else "（この iface では表示だけ）")
+    )
+    if r["iface"] in A2DP_IFACES:
+        lines.append(f"起動後のリンクの確認: {r['link_check']}")
     if r["tap_mode"] == "enter":
         d = np.array(r["tap_deltas_ms"])
         if len(d):

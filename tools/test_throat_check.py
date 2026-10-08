@@ -1,5 +1,5 @@
 """tools/throat_check.py を合成のセッションで検証する（Issue #36 plan 第 4.4 節・
-第 10.3 節 k1〜k7）。
+第 10.3 節 k1〜k7、Issue #38 plan 第 9.2 節 k8・k9）。
 
 実行: python -m unittest discover -s tools -v
 合成: 48 kHz・2 ch、白色雑音（RMS 6 LSB）、叩き = 減衰する 2 ms のパルス（振幅
@@ -223,6 +223,114 @@ class ThroatCheckTest(unittest.TestCase):
         self.assertNotIn("Δ 中央値", text)
         # enter のまま読むと見つからない（窓 ±300 ms の外）
         self.assertEqual(tc.check(tc.load_session(self.dir))["taps_found"], 0)
+
+    # --- 0 の区間（plan #38 第 9.2 節 k8・k9） ---
+    def make_zero_session(self, iface: str, throat_extra=None) -> None:
+        """20 秒の合成（雑音 RMS 約 60 LSB、L と R は別の雑音）に、L と R が両方
+        ちょうど 0 の区間を 5 ms（2 秒）・25 ms（5 秒）・3 s（10 秒）、先頭に
+        200 ms、L だけ 0 の区間を 50 ms（15 秒）入れる。"""
+        make_session(self.dir, seconds=20.0, tap_times_s=(), seed=8)
+        with wave.open(str(self.dir / "throat.wav"), "rb") as w:
+            n = w.getnframes()
+        rng = np.random.default_rng(80)
+        x = np.clip(np.round(rng.normal(0.0, 60.0, (n, 2))), -32768, 32767)
+        x = x.astype("<i2")
+
+        def zero(t_s, ms, ch=slice(None)):
+            a = int(round(t_s * FS))
+            x[a : a + int(round(ms * FS / 1000)), ch] = 0
+
+        zero(0.0, 200)
+        zero(2.0, 5)
+        zero(5.0, 25)
+        zero(10.0, 3000)
+        zero(15.0, 50, 0)
+        with wave.open(str(self.dir / "throat.wav"), "wb") as w:
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(FS)
+            w.writeframes(x.tobytes())
+        meta = json.loads((self.dir / "meta.json").read_text(encoding="utf-8"))
+        meta["sensors"][0]["iface"] = iface
+        meta["throat"].update(throat_extra or {})
+        (self.dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    def test_k8_zero_runs(self):
+        self.assertEqual(tc.ZERO_RUN_MS, 10)
+        a2dp_ok = {
+            "overrun_lines": None,
+            "pipewire": {"link_check": "ok"},
+        }
+        self.make_zero_session("sh12jk-nz210c-a2dp-unoq", a2dp_ok)
+        r = tc.check(tc.load_session(self.dir))
+        z = r["zero"]
+        self.assertEqual(z["count"], 2, z)
+        self.assertAlmostEqual(z["runs"][0][0], 5.0, places=3)
+        self.assertAlmostEqual(z["runs"][0][1], 25.0, places=3)
+        self.assertAlmostEqual(z["runs"][1][0], 10.0, places=3)
+        self.assertAlmostEqual(z["runs"][1][1], 3000.0, places=3)
+        self.assertAlmostEqual(z["total_ms"], 3025.0, places=3)
+        self.assertAlmostEqual(z["max_ms"], 3000.0, places=3)
+        self.assertAlmostEqual(z["head_ms"], 200.0, places=3)
+        # 閾値未満の 0 の連続の最長 = 入れた 5 ms（自然な 0 はそれより短い）
+        self.assertAlmostEqual(z["short_max_ms"], 5.0, places=3)
+        self.assertEqual(
+            r["flags"], ["0 の区間（10 ms 以上、先頭を除く）2 回"], r["flags"]
+        )
+        text = tc.report(r)
+        self.assertIn("2 回、合計 3025 ms、最長 3000 ms", text)
+        self.assertIn("5.00 秒、10.00 秒", text)
+        self.assertIn("先頭の 0 200 ms", text)
+        self.assertIn("使わない目安に当たる", text)
+        print(
+            f"\n  k8 合成（{tc.ZERO_RUN_MS} ms）: 0 の区間 {z['count']} 回、合計 "
+            f"{z['total_ms']:.1f} ms、最長 {z['max_ms']:.1f} ms、位置 "
+            f"{[round(t, 3) for t, _ in z['runs']]} 秒、先頭 {z['head_ms']:.1f} ms、"
+            f"閾値未満の最長 {z['short_max_ms']:.2f} ms"
+        )
+        # 有線の iface では数えて表示するだけで、使わない目安に入れない
+        self.make_zero_session("sh12jk-wired-unoq-usbaudio")
+        r = tc.check(tc.load_session(self.dir))
+        self.assertEqual(r["zero"]["count"], 2)
+        self.assertEqual(r["flags"], [])
+        self.assertIn("この iface では表示だけ", tc.report(r))
+        self.assertIn("使わない目安: 当たらない", tc.report(r))
+        # 末尾の区間は回数に入れる
+        x = np.zeros((48000, 2), dtype="<i2")
+        x[:24000] = 7
+        z = tc.zero_runs(x, FS)
+        self.assertEqual((z["count"], z["head_ms"]), (1, 0.0))
+        self.assertAlmostEqual(z["max_ms"], 500.0)
+
+    def test_k9_stall_and_link_check_flags(self):
+        bad = {
+            "overrun_lines": None,
+            "stop": "stall",
+            "pipewire": {"link_check": "ng", "link_check_note": "x"},
+        }
+        make_session(self.dir, seconds=30.0, seed=9)
+        meta = json.loads((self.dir / "meta.json").read_text(encoding="utf-8"))
+        meta["sensors"][0]["iface"] = "sh12jk-nz210c-a2dp-unoq"
+        meta["throat"].update(bad)
+        (self.dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        r = tc.check(tc.load_session(self.dir))
+        self.assertIn("受信の止まり（stop = stall）", r["flags"])
+        self.assertIn("起動後のリンクの確認が ok でない（ng）", r["flags"])
+        self.assertFalse(any("overrun" in f for f in r["flags"]))
+        self.assertIn("起動後のリンクの確認: ng", tc.report(r))
+        # link_check が無い（error 相当）も当たる
+        meta["throat"]["pipewire"] = {"link_check": "error"}
+        meta["throat"]["stop"] = "duration"
+        (self.dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        r = tc.check(tc.load_session(self.dir))
+        self.assertEqual(
+            r["flags"], ["起動後のリンクの確認が ok でない（error）"]
+        )
+        # 有線の iface では stall・link_check を目安に入れない
+        meta["sensors"][0]["iface"] = "sh12jk-wired-unoq-usbaudio"
+        meta["throat"].update(bad)
+        (self.dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        self.assertEqual(tc.check(tc.load_session(self.dir))["flags"], [])
 
 
 if __name__ == "__main__":

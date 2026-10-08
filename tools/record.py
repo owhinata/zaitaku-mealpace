@@ -70,6 +70,19 @@ S16_LE・48 kHz・2 ch の生の PCM を受けて、変換せずに throat.wav �
 --throat のときは --subject p1・--cond meal・--indicator を受けない。
 UNO Q には何も書かない（コマンドの出力先は標準出力だけ）。ミキサーは `amixer
 sget` で読むだけ。
+
+構成 B（--throat sh12jk-nz210c-a2dp-unoq、Issue #38、docs/decisions/0030）: 子は
+ssh 越しの `pw-record`（UNO Q の PipeWire の bluez_input のノードから標準出力へ。
+-P で node.dont-reconnect・node.dont-fallback・node.name = zm-throat-record）。
+--throat-device はこの iface では bluez_input.<XX_XX_XX_XX_XX_XX>.<番号> だけを
+受け（hw / plughw は USB の iface だけ）、省けば pw-dump から条件に合うノードが
+ちょうど 1 つのときだけそれを使う。子を起動する前に 1 回の ssh で PipeWire・
+WirePlumber のユーザー設定と pw-dump（ノード・プロファイル・ミュート・他の取り込み・
+pipe-tunnel）を読み取りで確かめ、当たれば記録を始めない（asoundrc の検査と
+amixer は行わない）。最初のバイトの後に pw-dump をもう 1 回読み、zm-throat-record
+のストリームが目的のノードにだけつながっているかを meta.json の
+throat.pipewire.link_check に残す。受信が THROAT_STALL_S 秒止まったら記録を止める
+（stop = stall、終了コード 1）。
 """
 
 from __future__ import annotations
@@ -748,14 +761,14 @@ THROAT_PERIOD_FRAMES = 6000
 THROAT_DEFAULT_HOST = "arduino@unoq.local"
 THROAT_DEFAULT_DEVICE = "hw:CARD=Audio,DEV=0"
 THROAT_PART = "SH-12JK"
-# 受ける iface（docs/data-schema.md、docs/decisions/0029）。値は「リモート
-# （UNO Q）か」
+# 受ける iface（docs/data-schema.md、docs/decisions/0029・0030）。値は
+# （リモート（UNO Q）か、子の種類）。alsa = arecord、a2dp = pw-record
 THROAT_IFACES = {
-    "sh12jk-wired-unoq-usbaudio": True,
-    "sh12jk-nz210c-rx-unoq-usbaudio": True,
-    "sh12jk-nz210c-a2dp-unoq": True,
-    "sh12jk-wired-pc": False,
-    "sh12jk-nz210c-rx-usbaudio": False,
+    "sh12jk-wired-unoq-usbaudio": (True, "alsa"),
+    "sh12jk-nz210c-rx-unoq-usbaudio": (True, "alsa"),
+    "sh12jk-nz210c-a2dp-unoq": (True, "a2dp"),
+    "sh12jk-wired-pc": (False, "alsa"),
+    "sh12jk-nz210c-rx-usbaudio": (False, "alsa"),
 }
 # 出力先は標準出力（-）だけ。-q は付けない（overrun の行を出させる）。-v で
 # buffer_size・period_size を標準エラーに出させる
@@ -777,6 +790,35 @@ THROAT_HOST_RE = r"[A-Za-z0-9][A-Za-z0-9_.@-]*"
 THROAT_DEVICE_RE = (
     r"(plug)?hw:(CARD=[A-Za-z0-9_]+(,DEV=[0-9]+)?|[0-9]+(,[0-9]+)?)"
 )
+# 構成 B（a2dp）で受けるノード名。PipeWire の bluez の入力ノードだけ（0030
+# 決定 3）。大文字の 16 進 6 組と .番号
+THROAT_BLUEZ_NODE_RE = r"bluez_input\.[0-9A-F]{2}(_[0-9A-F]{2}){5}\.[0-9]+"
+# pw-record のストリームの props（固定）。目的のノードが無いとき既定の入力に
+# 落ちない、途中で切れたとき別の入力につながり直さない、起動後の確認で名前で
+# 特定する（plan #38 第 3.2 節）
+PW_STREAM_NAME = "zm-throat-record"
+PW_PROPS = (
+    "{ node.dont-reconnect = true node.dont-fallback = true"
+    f" node.name = {PW_STREAM_NAME} }}"
+)
+# ssh の非対話のセッションでは XDG_RUNTIME_DIR が要る（10/8）
+PW_ENV = "env XDG_RUNTIME_DIR=/run/user/$(id -u)"
+# 起動前の確認（1 回の ssh）・起動後のリンクの確認のタイムアウト、終了時に
+# リンクの確認を待つ最長の秒数
+THROAT_PW_TIMEOUT_S = 10.0
+THROAT_LINK_TIMEOUT_S = 10.0
+THROAT_LINK_WAIT_S = 10.0
+# a2dp でこの秒数バイトが来なければ記録を止める（stall）。10/7 の到着の間隔の
+# 最大 166 ms の 10 倍以上
+THROAT_STALL_S = 2.0
+A2DP_MIXER_NOTE = "A2DP の経路ではミキサーを読まない"
+NO_BLUEZ_NODE_GUIDE = "手順は docs/unoq-setup.md の『構成 B の接続』"
+# WirePlumber の断片で許す 1 つと、その中身で許す 1 行（コメントと空行は除く）
+WP_CONF_D_ALLOWED = ["90-bluez-no-seat.conf"]
+WP_NO_SEAT_LINE_RE = (
+    r"\s*wireplumber\.profiles\.main\.monitor\.bluez\.seat-monitoring"
+    r"\s*=\s*disabled\s*"
+)
 
 
 def throat_arg_error(a) -> str | None:
@@ -792,12 +834,22 @@ def throat_arg_error(a) -> str | None:
     host, device = a.throat_host, a.throat_device
     if host != "local" and not re.fullmatch(THROAT_HOST_RE, host):
         return f"--throat-host に使えない文字があります: {host!r}"
-    if not re.fullmatch(THROAT_DEVICE_RE, device):
+    remote, kind = THROAT_IFACES[a.throat]
+    if kind == "a2dp":
+        # None は「pw-dump から自動で探す」。見つけた名前も同じ検査に通す
+        if device is not None and not re.fullmatch(
+            THROAT_BLUEZ_NODE_RE, device
+        ):
+            return (
+                f"iface {a.throat} の --throat-device は PipeWire の"
+                " bluez_input.<XX_XX_XX_XX_XX_XX>.<番号> だけ"
+                f"（hw / plughw は USB の iface だけ）: {device!r}"
+            )
+    elif device is None or not re.fullmatch(THROAT_DEVICE_RE, device):
         return (
             "--throat-device は hw:CARD=<名前>[,DEV=<番号>] / hw:<番号>[,<番号>]"
             f"（plughw: も可）だけ: {device!r}"
         )
-    remote = THROAT_IFACES[a.throat]
     if remote and host == "local":
         return f"iface {a.throat} は UNO Q の経路です。--throat-host local は使えません"
     if not remote and host != "local":
@@ -810,8 +862,36 @@ def remote_arecord(device: str) -> str:
     return f"exec arecord -D {shlex.quote(device)} {' '.join(ARECORD_ARGS)}"
 
 
-def throat_argv(host: str, device: str) -> list[str]:
-    """生の PCM を標準出力に出す子プロセスの argv。テストで差し替える口。"""
+def resolve_throat_device(a) -> tuple[str | None, str]:
+    """(device, 出どころ)。引数 > 環境変数 THROAT_DEVICE > iface ごとの既定。
+    a2dp の既定は None（起動前の pw-dump から自動で探す。出どころ auto）。
+    空文字列の環境変数は未指定として扱う（env_default と同じ）。"""
+    if a.throat_device is not None:
+        return a.throat_device, "arg"
+    env = os.environ.get("THROAT_DEVICE", "")
+    if env:
+        return env, "env"
+    if THROAT_IFACES.get(a.throat, (True, "alsa"))[1] == "a2dp":
+        return None, "auto"
+    return THROAT_DEFAULT_DEVICE, "default"
+
+
+def remote_pw_record(device: str) -> str:
+    """ssh で UNO Q に渡す pw-record の文字列（標準出力へ出すだけ）。"""
+    return (
+        f"exec {PW_ENV} pw-record --target {shlex.quote(device)}"
+        " --rate 48000 --channels 2 --format s16"
+        f" -P {shlex.quote(PW_PROPS)} --raw -"
+    )
+
+
+def throat_argv(host: str, device: str, kind: str = "alsa") -> list[str]:
+    """生の PCM を標準出力に出す子プロセスの argv。テストで差し替える口。
+    kind = a2dp は ssh 越しの pw-record だけ（local は無い）。"""
+    if kind == "a2dp":
+        if host == "local":
+            raise ValueError("a2dp の経路は UNO Q（ssh）だけ")
+        return ["ssh", *SSH_OPTS, host, remote_pw_record(device)]
     if host == "local":
         return ["arecord", "-D", device, *ARECORD_ARGS]
     return ["ssh", *SSH_OPTS, host, remote_arecord(device)]
@@ -897,6 +977,437 @@ def read_mixer(host: str, device: str) -> tuple[str | None, str | None]:
     if r.returncode != 0:
         return None, f"終了コード {r.returncode}: {r.stderr.strip()[-200:]}"
     return r.stdout, None
+
+
+# --- 構成 B（a2dp）の PipeWire の確認（plan #38 第 3.3・3.4 節。読み取りのみ）
+# 1 回の ssh で、ユーザーの設定の有無と中身、/etc の一覧、pw-dump を区切りの行
+# （@@<名前>）の後ろに出す。pw-dump は最後で、その終了コードが全体の終了コード
+PW_SECTIONS = ("pipewire_dir", "wireplumber_conf", "conf_d", "no_seat", "etc")
+PW_CHECK_SCRIPT = "; ".join(
+    [
+        "echo @@pipewire_dir",
+        "test -e ~/.config/pipewire && echo present",
+        "echo @@wireplumber_conf",
+        "test -e ~/.config/wireplumber/wireplumber.conf && echo present",
+        "echo @@conf_d",
+        "ls -A ~/.config/wireplumber/wireplumber.conf.d 2>/dev/null",
+        "echo @@no_seat",
+        "cat ~/.config/wireplumber/wireplumber.conf.d/90-bluez-no-seat.conf"
+        " 2>/dev/null",
+        "echo @@etc",
+        "ls -AR /etc/pipewire /etc/wireplumber 2>/dev/null",
+        "echo @@pw_dump",
+        f"exec {PW_ENV} pw-dump",
+    ]
+)
+
+
+def pipewire_check_argv(host: str) -> list[str]:
+    """起動前の確認の argv（読み取りのみ）。テストで差し替える口。"""
+    return [
+        "ssh",
+        *SSH_OPTS,
+        host,
+        f"exec sh -c {shlex.quote(PW_CHECK_SCRIPT)}",
+    ]
+
+
+def pw_dump_argv(host: str) -> list[str]:
+    """起動後のリンクの確認の argv（読み取りのみ）。テストで差し替える口。"""
+    return ["ssh", *SSH_OPTS, host, f"exec {PW_ENV} pw-dump"]
+
+
+def split_pw_check(text: str) -> dict | None:
+    """PW_CHECK_SCRIPT の出力を区切りごとに分ける。pw_dump は残り全部の文字列、
+    他は行のリスト。区切りがそろわなければ None。"""
+    secs: dict = {}
+    cur = None
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if line == "@@pw_dump":
+            secs["pw_dump"] = "\n".join(lines[i + 1 :])
+            break
+        if line.startswith("@@") and line[2:] in PW_SECTIONS:
+            cur = line[2:]
+            secs[cur] = []
+        elif cur is not None:
+            secs[cur].append(line)
+    if "pw_dump" not in secs or any(k not in secs for k in PW_SECTIONS):
+        return None
+    return secs
+
+
+def _ls_r_paths(lines: list[str]) -> list[str]:
+    """ls -AR の出力をパスの一覧にする（ディレクトリも含む）。"""
+    out, cur = [], None
+    for line in lines:
+        if not line.strip():
+            continue
+        if line.endswith(":") and line.startswith("/"):
+            cur = line[:-1]
+            continue
+        out.append(f"{cur}/{line}" if cur else line)
+    return out
+
+
+def pipewire_config_error(secs: dict) -> tuple[str | None, dict]:
+    """ユーザーの PipeWire・WirePlumber の設定の検査。(止める理由か None,
+    throat.pipewire.config)。/etc は一覧を残すだけで止めない（Q8）。"""
+    conf_d = [s for s in secs["conf_d"] if s.strip()]
+    config = {
+        "wireplumber_conf_d": conf_d,
+        "etc": _ls_r_paths(secs["etc"]),
+    }
+    why = "記録を始めません（docs/decisions/0030）"
+    if any(s.strip() == "present" for s in secs["pipewire_dir"]):
+        return f"UNO Q に ~/.config/pipewire があるので{why}", config
+    if any(s.strip() == "present" for s in secs["wireplumber_conf"]):
+        return (
+            f"UNO Q に ~/.config/wireplumber/wireplumber.conf があるので{why}",
+            config,
+        )
+    if conf_d != WP_CONF_D_ALLOWED:
+        return (
+            "UNO Q の ~/.config/wireplumber/wireplumber.conf.d の中身が"
+            f" {WP_CONF_D_ALLOWED} だけではないので{why}: {conf_d}",
+            config,
+        )
+    body = [
+        s
+        for s in secs["no_seat"]
+        if s.strip() and not s.strip().startswith("#")
+    ]
+    if len(body) != 1 or not re.fullmatch(WP_NO_SEAT_LINE_RE, body[0]):
+        return (
+            f"UNO Q の {WP_CONF_D_ALLOWED[0]} に seat-monitoring を止める 1 行"
+            f"以外の行があるので{why}",
+            config,
+        )
+    return None, config
+
+
+def _info(o: dict) -> dict:
+    return o.get("info") or {}
+
+
+def _props(o: dict) -> dict:
+    return _info(o).get("props") or {}
+
+
+def _param(o: dict, key: str) -> list:
+    p = (_info(o).get("params") or {}).get(key) or []
+    return [x for x in p if isinstance(x, dict)]
+
+
+def _by_type(objs: list, t: str) -> list[dict]:
+    return [
+        o
+        for o in objs
+        if isinstance(o, dict) and o.get("type") == f"PipeWire:Interface:{t}"
+    ]
+
+
+def _link_ends(link: dict) -> tuple:
+    """(出力側のノードの id, 入力側のノードの id)。"""
+    i, p = _info(link), _props(link)
+    out = i.get("output-node-id", p.get("link.output.node"))
+    inp = i.get("input-node-id", p.get("link.input.node"))
+    return out, inp
+
+
+def _bluez_prop(node: dict, devices: dict, key: str):
+    """api.bluez5.* をノードの props から、無ければデバイスの props から。"""
+    v = _props(node).get(key)
+    if v is None:
+        dev = devices.get(_props(node).get("device.id"))
+        if dev is not None:
+            v = _props(dev).get(key)
+    return v
+
+
+def pipewire_state(
+    objs: list, device: str | None, config: dict
+) -> tuple[str | None, str | None, dict]:
+    """pw-dump の結果の検査。(止める理由か None, 使うノード名, throat.pipewire)。
+    device が None なら条件に合うノードがちょうど 1 つのときだけそれを使う。"""
+    nodes = _by_type(objs, "Node")
+    devices = {d.get("id"): d for d in _by_type(objs, "Device")}
+    by_id = {n.get("id"): n for n in nodes}
+    info: dict = {}
+    for m in _by_type(objs, "Module"):
+        if "pipe-tunnel" in str(_info(m).get("name", "")):
+            return (
+                "PipeWire に libpipewire-module-pipe-tunnel が読み込まれている"
+                "ので記録を始めません（docs/decisions/0030）",
+                None,
+                info,
+            )
+
+    def name(n):
+        return str(_props(n).get("node.name", ""))
+
+    def is_a2dp_source(n):
+        return (
+            _props(n).get("media.class") == "Audio/Source"
+            and _bluez_prop(n, devices, "api.bluez5.profile") == "a2dp-source"
+        )
+
+    no_node = "送信機が接続されていません（bluez_input のノードがありません）。"
+    if device is None:
+        found = [
+            n
+            for n in nodes
+            if re.fullmatch(THROAT_BLUEZ_NODE_RE, name(n)) and is_a2dp_source(n)
+        ]
+        if not found:
+            return no_node + NO_BLUEZ_NODE_GUIDE, None, info
+        if len(found) > 1:
+            names = "、".join(sorted(name(n) for n in found))
+            return (
+                f"条件に合う bluez_input のノードが {len(found)} 個あります（{names}）。"
+                "--throat-device で指定してください",
+                None,
+                info,
+            )
+        node = found[0]
+        device = name(node)
+        if not re.fullmatch(THROAT_BLUEZ_NODE_RE, device):
+            return f"見つけたノード名の形が違います: {device!r}", None, info
+    else:
+        hit = [n for n in nodes if name(n) == device]
+        if not hit:
+            return (
+                f"送信機が接続されていません（{device} のノードがありません）。"
+                + NO_BLUEZ_NODE_GUIDE,
+                None,
+                info,
+            )
+        node = hit[0]
+    mclass = _props(node).get("media.class")
+    profile = _bluez_prop(node, devices, "api.bluez5.profile")
+    if mclass != "Audio/Source":
+        return (
+            f"{device} の media.class が Audio/Source ではありません: {mclass!r}",
+            None,
+            info,
+        )
+    if profile != "a2dp-source":
+        return (
+            f"{device} のプロファイルが a2dp-source ではありません: {profile!r}",
+            None,
+            info,
+        )
+    mute = vols = None
+    for p in _param(node, "Props"):
+        if "mute" in p and mute is None:
+            mute = p.get("mute")
+        if "channelVolumes" in p and vols is None:
+            vols = p.get("channelVolumes")
+    if mute is True:
+        return (
+            f"{device} がミュートなので記録を始めません（全部 0 になる）",
+            None,
+            info,
+        )
+    links = []
+    nid = node.get("id")
+    for lk in _by_type(objs, "Link"):
+        out, inp = _link_ends(lk)
+        if out != nid:
+            continue
+        dst = by_id.get(inp)
+        dclass = str(_props(dst).get("media.class", "")) if dst else ""
+        if dclass.startswith("Stream/Input/Audio"):
+            return (
+                f"{device} に他の取り込み（{name(dst)}）がつながっているので"
+                "記録を始めません（record.py の外で録っている疑い）",
+                None,
+                info,
+            )
+        links.append(name(dst) if dst else str(inp))
+    fmt = (_param(node, "Format") or [{}])[0]
+    driver = by_id.get(_props(node).get("node.driver-id"))
+    info = {
+        "profile": profile,
+        "codec": _bluez_prop(node, devices, "api.bluez5.codec"),
+        "node_rate_hz": fmt.get("rate"),
+        "node_channels": fmt.get("channels"),
+        "node_format": fmt.get("format"),
+        "codec_rate_hz": None,
+        "codec_rate_note": "SBC のレートは確かめていない",
+        "mute": mute,
+        "channel_volumes": vols,
+        "driver": name(driver) if driver else None,
+        "links": links,
+        "config": config,
+    }
+    return None, device, info
+
+
+def pipewire_check(
+    host: str, device: str | None
+) -> tuple[str | None, str | None, dict]:
+    """子を起動する前の確認（1 回の ssh）。(止める理由か None, 使うノード名,
+    throat.pipewire)。確かめられなければ止める。"""
+    try:
+        r = subprocess.run(
+            pipewire_check_argv(host),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=THROAT_PW_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            "PipeWire の状態を確かめられませんでした"
+            f"（タイムアウト {THROAT_PW_TIMEOUT_S:g} 秒）。記録を始めません",
+            None,
+            {},
+        )
+    except OSError as e:
+        return (
+            f"PipeWire の状態を確かめられませんでした（{e}）。記録を始めません",
+            None,
+            {},
+        )
+    if r.returncode != 0:
+        return (
+            f"PipeWire の状態を確かめられませんでした（終了コード {r.returncode}: "
+            f"{r.stderr.strip()[-200:]}）。記録を始めません",
+            None,
+            {},
+        )
+    secs = split_pw_check(r.stdout)
+    if secs is None:
+        return (
+            "PipeWire の状態を確かめられませんでした（出力の形が違う）。記録を始めません",
+            None,
+            {},
+        )
+    err, config = pipewire_config_error(secs)
+    if err:
+        return err, None, {}
+    try:
+        objs = json.loads(secs["pw_dump"])
+    except ValueError:
+        objs = None
+    if not isinstance(objs, list):
+        return (
+            "pw-dump の JSON が読めませんでした。記録を始めません",
+            None,
+            {},
+        )
+    return pipewire_state(objs, device, config)
+
+
+def link_check_result(objs: list, target: str) -> tuple[str, str]:
+    """起動後の確認。zm-throat-record のストリームがちょうど 1 つで、その入力が
+    目的のノードにだけつながっていれば ok。"""
+    nodes = _by_type(objs, "Node")
+    by_id = {n.get("id"): n for n in nodes}
+    tids = {n.get("id") for n in nodes if _props(n).get("node.name") == target}
+    streams = [n for n in nodes if _props(n).get("node.name") == PW_STREAM_NAME]
+    if len(streams) != 1:
+        return "ng", f"{PW_STREAM_NAME} のストリームが {len(streams)} 個"
+    sid = streams[0].get("id")
+    srcs = set()
+    for lk in _by_type(objs, "Link"):
+        out, inp = _link_ends(lk)
+        if inp == sid:
+            srcs.add(out)
+    if not srcs:
+        return "ng", f"{PW_STREAM_NAME} がどのノードにもつながっていない"
+    if not tids or srcs != tids:
+        names = sorted(
+            str(_props(by_id[s]).get("node.name", s)) if s in by_id else str(s)
+            for s in srcs
+        )
+        return (
+            "ng",
+            f"{PW_STREAM_NAME} が目的のノード以外につながっている: {names}",
+        )
+    return "ok", ""
+
+
+class LinkCheck:
+    """起動後のリンクの確認を別のスレッドで 1 回だけ行う（記録の読み取りを
+    止めない）。finish() は最長 THROAT_LINK_WAIT_S 秒待ち、必ず ok / ng /
+    error のどれかを返す。"""
+
+    def __init__(self, host: str, target: str):
+        self.host = host
+        self.target = target
+        self.result: tuple[str, str] | None = None
+        self.proc = None
+        self._lock = threading.Lock()
+        self._gave_up = False
+        self._t = threading.Thread(target=self._run, daemon=True)
+        self._t.start()
+
+    def _run(self) -> None:
+        res = self._check()
+        with self._lock:
+            if self._gave_up:
+                return
+            self.result = res
+        if res[0] == "ng":
+            print(
+                f"警告: 起動後のリンクの確認が ng（記録は続ける）: {res[1]}",
+                flush=True,
+            )
+
+    def _check(self) -> tuple[str, str]:
+        try:
+            with self._lock:
+                if self._gave_up:
+                    return "error", "確認を打ち切った"
+                self.proc = subprocess.Popen(
+                    pw_dump_argv(self.host),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            try:
+                out, err = self.proc.communicate(timeout=THROAT_LINK_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.communicate()
+                return (
+                    "error",
+                    f"pw-dump のタイムアウト（{THROAT_LINK_TIMEOUT_S:g} 秒）",
+                )
+        except (OSError, ValueError) as e:
+            return "error", f"pw-dump を実行できない: {e}"
+        if self.proc.returncode != 0:
+            return (
+                "error",
+                f"pw-dump の終了コード {self.proc.returncode}: {err.strip()[-200:]}",
+            )
+        try:
+            objs = json.loads(out)
+        except ValueError:
+            objs = None
+        if not isinstance(objs, list):
+            return "error", "pw-dump の JSON が読めない"
+        return link_check_result(objs, self.target)
+
+    def finish(self) -> tuple[str, str]:
+        self._t.join(timeout=THROAT_LINK_WAIT_S)
+        with self._lock:
+            if self.result is not None:
+                return self.result
+            self._gave_up = True
+            proc = self.proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        return (
+            "error",
+            f"確認が記録の終了までに終わらなかった（{THROAT_LINK_WAIT_S:g} 秒待った）",
+        )
 
 
 class ThroatStream:
@@ -1122,17 +1633,32 @@ def run_throat(a) -> None:
     """--throat の記録（第 3 節）。異常は sys.exit で終わる。"""
     if os.name == "nt":
         sys.exit("--throat は POSIX のみ")
+    a.throat_device, device_source = resolve_throat_device(a)
     err = throat_arg_error(a)
     if err:
         sys.exit(err)
     host, device = a.throat_host, a.throat_device
-    err = asoundrc_error(host)
-    if err:
-        sys.exit(err)
-    mixer, mixer_error = read_mixer(host, device)
+    kind = THROAT_IFACES[a.throat][1]
+    pw_info = None
+    if kind == "a2dp":
+        # asoundrc の検査と amixer の代わりに PipeWire の状態を確かめる
+        err, device, pw_info = pipewire_check(host, device)
+        if err:
+            sys.exit(err)
+        if device_source == "auto":
+            print(f"bluez のノードを自動で選んだ: {device}")
+        mixer, mixer_error = None, A2DP_MIXER_NOTE
+    else:
+        err = asoundrc_error(host)
+        if err:
+            sys.exit(err)
+        mixer, mixer_error = read_mixer(host, device)
     # SIGTERM でも下の後始末（子を止める）を通る
     signal.signal(signal.SIGTERM, raise_system_exit)
-    argv = throat_argv(host, device)
+    if kind == "a2dp":
+        argv = throat_argv(host, device, "a2dp")
+    else:
+        argv = throat_argv(host, device)
     t_launch = time.monotonic()
     try:
         stream = ThroatStream(argv)
@@ -1171,6 +1697,9 @@ def run_throat(a) -> None:
         RAW_DIR, a.subject, a.cond, a.position, a.band, a.throat, t0
     )
     sess.feed(first, t0)
+    # 起動後のリンクの確認（a2dp だけ。別のスレッドで 1 回）
+    link = LinkCheck(host, device) if kind == "a2dp" else None
+    stall_s = THROAT_STALL_S if kind == "a2dp" else None
     print(f"咽喉マイク: {a.throat}（{host}、{device}）")
     deadline = t0 + a.duration if a.duration > 0 else None
 
@@ -1202,15 +1731,22 @@ def run_throat(a) -> None:
             )
             thread = threading.Thread(target=reader.run, daemon=True)
             thread.start()
+        last_data = t0
         while True:
             if deadline is not None and time.monotonic() >= deadline:
                 stop = "duration"
                 break
             d = stream.read(0.05)
             if d:
-                sess.feed(d, time.monotonic())
+                last_data = time.monotonic()
+                sess.feed(d, last_data)
             elif stream.eof:
                 stop = "child-exit"
+                break
+            elif (
+                stall_s is not None and time.monotonic() - last_data >= stall_s
+            ):
+                stop = "stall"
                 break
     except KeyboardInterrupt:
         stop = "interrupt"
@@ -1224,9 +1760,16 @@ def run_throat(a) -> None:
             if thread is not None:
                 thread.join(timeout=1.0)
         est = sess.est_diff_frames()
-        info = {
-            "host": host,
-            "device": device,
+        if link is not None:
+            # ThroatSession.close() の前に確認を待つ（必ず ok / ng / error）
+            link_res, link_note = link.finish()
+            pw_info = dict(pw_info or {})
+            pw_info["link_check"] = link_res
+            pw_info["link_check_note"] = link_note
+        info = {"host": host, "device": device}
+        if kind == "a2dp":
+            info["device_source"] = device_source
+        info |= {
             "format": "S16_LE",
             "channels": THROAT_CHANNELS,
             "rate_hz": THROAT_RATE_HZ,
@@ -1244,30 +1787,57 @@ def run_throat(a) -> None:
         }
         if mixer_error is not None:
             info["mixer_error"] = mixer_error
+        if kind == "a2dp":
+            # pw-record は overrun の行を出さない（0 と書くと取りこぼし 0 と
+            # 読まれる）
+            info["overrun_lines"] = None
+            info["pipewire"] = pw_info
         sess.close(info)
         how = "SIGTERM で止めた" if stream.terminated else "子が自分で終わった"
+        overrun = (
+            "overrun なし（pw-record は出さない）"
+            if kind == "a2dp"
+            else f"overrun の行 {stream.overrun_lines}"
+        )
         print(
             f"咽喉マイク: フレーム {sess.frames:,}（{sess.frames / THROAT_RATE_HZ:.3f} 秒）"
             f" / 経過 {sess.elapsed_s():.2f} 秒"
             f" / 推定差（診断値）{est:+,} フレーム（{1000 * est / THROAT_RATE_HZ:+.0f} ms）"
-            f" / overrun の行 {stream.overrun_lines}"
+            f" / {overrun}"
             f" / 子の終了コード {stream.proc.returncode}（{how}）"
         )
         print(
             f"  推定差は到着の揺れ・滞留・クロックの差を含む診断値。1 ピリオド"
             f"（{1000 * THROAT_PERIOD_FRAMES // THROAT_RATE_HZ} ms）未満は取りこぼしと言わない目安"
         )
-        if stream.first_overrun is not None:
+        if stream.first_overrun is not None and kind != "a2dp":
             print(f"  最初の overrun の行: {stream.first_overrun}")
-        if mixer_error is not None:
+        if mixer_error is not None and kind != "a2dp":
             print(
                 f"  ミキサーを読めませんでした（記録は続けた）: {mixer_error}"
             )
+        if kind == "a2dp":
+            note = (
+                f"（{pw_info['link_check_note']}）"
+                if pw_info.get("link_check_note")
+                else ""
+            )
+            print(
+                f"  ノードの形式のレート {pw_info.get('node_rate_hz')} Hz"
+                f" / 起動後のリンクの確認 {pw_info.get('link_check')}{note}"
+                f" / 止まり方 {stop}"
+            )
+            print("  0 の区間は tools/throat_check.py で確かめる")
     if stop == "child-exit":
         sys.exit(
             "警告: 子プロセスが記録の途中で終わりました"
             f"（終了コード {stream.proc.returncode}、標準エラーの末尾）\n"
             f"{stream.stderr_tail()}"
+        )
+    if stop == "stall":
+        sys.exit(
+            f"警告: 受信が {THROAT_STALL_S:g} 秒止まったので記録を止めました"
+            "（stop = stall。この記録は使わない）"
         )
 
 
@@ -1306,12 +1876,15 @@ def main():
     ap.add_argument(
         "--throat-host",
         default=env_default("THROAT_HOST", THROAT_DEFAULT_HOST),
-        help="arecord を動かす ssh の宛先（user@host）か local。--throat のときだけ効く",
+        help="arecord / pw-record を動かす ssh の宛先（user@host）か local。--throat のときだけ効く",
     )
     ap.add_argument(
         "--throat-device",
-        default=env_default("THROAT_DEVICE", THROAT_DEFAULT_DEVICE),
-        help="ALSA の PCM 名。--throat のときだけ効く",
+        default=None,
+        help="USB の iface では ALSA の PCM 名（hw / plughw）、"
+        "sh12jk-nz210c-a2dp-unoq では bluez_input.<XX_XX_XX_XX_XX_XX>.<番号>。"
+        "省けば環境変数 THROAT_DEVICE、無ければ USB は "
+        f"{THROAT_DEFAULT_DEVICE}、a2dp は pw-dump から自動で探す。--throat のときだけ効く",
     )
     a = ap.parse_args()
     if a.subject not in ("self", "p1"):

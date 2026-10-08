@@ -25,6 +25,7 @@ POSIX = os.name == "posix"
 #   sizes: 1 回の書き込みのバイト数（繰り返す）、interval: 書き込みの間の秒数
 #   total: 出すバイト数（null なら止められるまで出し続ける）
 #   exit_code: 出し終えた後の終了コード
+#   hang: 出し終えた後に黙って待つ秒数
 # バイトの中身は通し番号 j から (j * 7 + 3) & 0xFF（pattern() と同じ）
 FAKE_CHILD = r"""
 import json, os, sys, time
@@ -54,6 +55,8 @@ try:
         time.sleep(interval)
 except BrokenPipeError:
     sys.exit(141)
+# hang: 出し終えた後、終わらずに黙っている秒数（受信の止まりの確かめ、h16）
+time.sleep(cfg.get("hang", 0))
 for line in cfg.get("stderr_after", []):
     sys.stderr.write(line + "\n")
     sys.stderr.flush()
@@ -85,6 +88,112 @@ def pid_alive(pid: int) -> bool:
 
 MIXER_OK = "Simple mixer control 'Mic',0\n  Front Left: Capture 58 [100%] [4.00dB] [on]\n"
 
+# --- 構成 B（a2dp）の偽の pw-dump（plan #38 第 9.1 節。アドレスは架空） ---
+A2DP = ("--throat", "sh12jk-nz210c-a2dp-unoq")
+BT_NODE = "bluez_input.00_11_22_33_44_55.2"
+BT_NODE2 = "bluez_input.00_11_22_33_44_66.3"
+SINK = "alsa_output.usb-foo.analog-stereo"
+NO_SEAT_OK = (
+    "# arduino の WirePlumber の bluez の監視を seat に結ばない\n"
+    "\n"
+    "  wireplumber.profiles.main.monitor.bluez.seat-monitoring = disabled  \n"
+)
+
+
+def pw_node(
+    nid,
+    name,
+    mclass="Audio/Source",
+    profile="a2dp-source",
+    mute=False,
+    rate=48000,
+    driver=None,
+):
+    props = {"node.name": name, "media.class": mclass}
+    if profile is not None:
+        props["api.bluez5.profile"] = profile
+        props["api.bluez5.codec"] = "sbc"
+    if driver is not None:
+        props["node.driver-id"] = driver
+    params = {
+        "Props": [{"mute": mute, "channelVolumes": [1.0, 1.0]}],
+        "Format": [{"format": "S16LE", "rate": rate, "channels": 2}],
+    }
+    return {
+        "id": nid,
+        "type": "PipeWire:Interface:Node",
+        "info": {"props": props, "params": params},
+    }
+
+
+def pw_link(lid, out, inp):
+    return {
+        "id": lid,
+        "type": "PipeWire:Interface:Link",
+        "info": {"output-node-id": out, "input-node-id": inp, "props": {}},
+    }
+
+
+def pw_module(mid, name):
+    return {
+        "id": mid,
+        "type": "PipeWire:Interface:Module",
+        "info": {"name": name},
+    }
+
+
+def pw_before(*extra) -> list:
+    """起動前の pw-dump（bluez のノード → 再生側への自動リンク）。"""
+    return [
+        pw_module(1, "libpipewire-module-protocol-native"),
+        pw_node(50, BT_NODE, driver=60),
+        pw_node(60, SINK, mclass="Audio/Sink", profile=None),
+        pw_link(81, 50, 60),
+        *extra,
+    ]
+
+
+def pw_after(*extra, streams=1, src=50) -> list:
+    """起動後の pw-dump（zm-throat-record のストリームが src につながる）。"""
+    objs = pw_before()
+    for k in range(streams):
+        objs.append(
+            pw_node(
+                70 + k,
+                record.PW_STREAM_NAME,
+                mclass="Stream/Input/Audio",
+                profile=None,
+            )
+        )
+        objs.append(pw_link(90 + k, src, 70 + k))
+    return objs + list(extra)
+
+
+def pw_check_text(
+    objs,
+    pipewire_dir=False,
+    wp_conf=False,
+    conf_d=("90-bluez-no-seat.conf",),
+    no_seat=NO_SEAT_OK,
+    etc="/etc/pipewire:\npipewire.conf.d\n\n/etc/pipewire/pipewire.conf.d:\n10-qcom.conf\n",
+) -> str:
+    """PW_CHECK_SCRIPT と同じ区切りの出力。"""
+    parts = ["@@pipewire_dir"]
+    if pipewire_dir:
+        parts.append("present")
+    parts.append("@@wireplumber_conf")
+    if wp_conf:
+        parts.append("present")
+    parts.append("@@conf_d")
+    parts += list(conf_d)
+    parts.append("@@no_seat")
+    parts.append(no_seat.rstrip("\n"))
+    parts.append("@@etc")
+    parts.append(etc.rstrip("\n"))
+    parts.append("@@pw_dump")
+    parts.append(json.dumps(objs, indent=2))
+    return "\n".join(parts) + "\n"
+
 
 @unittest.skipUnless(POSIX, "POSIX のみ")
 class ThroatMainTest(unittest.TestCase):
@@ -113,16 +222,49 @@ class ThroatMainTest(unittest.TestCase):
         start_wait: float = 5.0,
         throat_argv=None,
         asound_code: int = 0,
+        pw_check: list[str] | None = None,
+        pw_dump: list[str] | None = None,
+        env: dict | None = None,
+        no_alsa_checks: bool = False,
     ) -> tuple[int, str]:
         if throat_argv is None:
             cargv = self.child_argv(**(child or {}))
 
-            def throat_argv(host, device):
-                self.argv_seen.append((host, device))
+            def throat_argv(host, device, *kind):
+                self.argv_seen.append((host, device, *kind))
                 return cargv
 
         if mixer is None:
             mixer = [sys.executable, "-I", "-c", f"print({MIXER_OK!r}, end='')"]
+
+        def mixer_argv(h, d):
+            if no_alsa_checks:
+                raise AssertionError("amixer を起動した")
+            return mixer
+
+        def asoundrc_check_argv(h):
+            if no_alsa_checks:
+                raise AssertionError("asoundrc の検査を起動した")
+            return [
+                sys.executable,
+                "-I",
+                "-c",
+                f"import sys; sys.exit({asound_code})",
+            ]
+
+        def pipewire_check_argv(h):
+            self.pw_check_calls += 1
+            if pw_check is None:
+                raise AssertionError("PipeWire の確認を起動した")
+            return pw_check
+
+        def pw_dump_argv(h):
+            self.pw_dump_calls += 1
+            return pw_dump if pw_dump is not None else self.pw_dump_ok()
+
+        self.pw_check_calls = self.pw_dump_calls = 0
+        environ = {k: v for k, v in os.environ.items() if k != "THROAT_DEVICE"}
+        environ.update(env or {})
         argv = ["record.py", *args]
         out = io.StringIO()
         code = 0
@@ -130,17 +272,15 @@ class ThroatMainTest(unittest.TestCase):
             mock.patch.object(record, "RAW_DIR", self.raw),
             mock.patch.object(record, "THROAT_START_WAIT_S", start_wait),
             mock.patch.object(record, "throat_argv", throat_argv),
-            mock.patch.object(record, "mixer_argv", lambda h, d: mixer),
+            mock.patch.object(record, "mixer_argv", mixer_argv),
             mock.patch.object(
-                record,
-                "asoundrc_check_argv",
-                lambda h: [
-                    sys.executable,
-                    "-I",
-                    "-c",
-                    f"import sys; sys.exit({asound_code})",
-                ],
+                record, "asoundrc_check_argv", asoundrc_check_argv
             ),
+            mock.patch.object(
+                record, "pipewire_check_argv", pipewire_check_argv
+            ),
+            mock.patch.object(record, "pw_dump_argv", pw_dump_argv),
+            mock.patch.dict(os.environ, environ, clear=True),
             mock.patch.object(sys, "argv", argv),
             mock.patch.object(sys, "stdin", io.StringIO()),
             contextlib.redirect_stdout(out),
@@ -477,8 +617,456 @@ class ThroatMainTest(unittest.TestCase):
                 (MIXER_OK, None),
             )
 
+    # --- 構成 B（a2dp。plan #38 第 9.1 節 h12〜h17） ---
+    def fake_cmd(self, text: str, code: int = 0, delay: float = 0.0):
+        """text を標準出力に出して code で終わる偽の ssh（delay 秒待ってから）。"""
+        self._n_fake = getattr(self, "_n_fake", 0) + 1
+        p = self.tmp / f"fake_out_{self._n_fake}.txt"
+        p.write_text(text, encoding="utf-8")
+        src = (
+            f"import sys, time; time.sleep({delay}); "
+            f"sys.stdout.write(open({str(p)!r}, encoding='utf-8').read()); "
+            f"sys.exit({code})"
+        )
+        return [sys.executable, "-I", "-c", src]
+
+    def pw_ok(self, *extra):
+        return self.fake_cmd(pw_check_text(pw_before(*extra)))
+
+    def pw_dump_ok(self):
+        return self.fake_cmd(json.dumps(pw_after()))
+
+    def fresh_raw(self) -> None:
+        """subTest ごとに出力先を分ける（フォルダ名の秒の重なりを避ける）。"""
+        self._n_raw = getattr(self, "_n_raw", 0) + 1
+        self.raw = self.tmp / f"raw{self._n_raw}"
+        self.raw.mkdir()
+
+    def boom(self, host, device, *kind):
+        raise AssertionError("子を起動した")
+
+    def test_h12_iface_and_device_form(self):
+        import argparse
+
+        for dev in (BT_NODE, "bluez_input.00_11_22_33_44_55.10"):
+            with self.subTest(accept=dev):
+                a = argparse.Namespace(
+                    subject="self",
+                    cond="water",
+                    indicator=None,
+                    throat="sh12jk-nz210c-a2dp-unoq",
+                    throat_host="arduino@unoq.local",
+                    throat_device=dev,
+                )
+                self.assertIsNone(record.throat_arg_error(a))
+        bad = [
+            (*A2DP, "--throat-device", "hw:CARD=Audio,DEV=0"),
+            (*A2DP, "--throat-device", "plughw:0,0"),
+            (*self.W, "--throat-device", BT_NODE),
+            (*A2DP, "--throat-device", "bluez_output.00_11_22_33_44_55.1"),
+            (*A2DP, "--throat-device", "alsa_input.usb-foo"),
+            (*A2DP, "--throat-device", "bluez_input.00_11_22_33_44_55"),
+            (*A2DP, "--throat-device", "bluez_input.00_11_22_33_44.2"),
+            (*A2DP, "--throat-device", "bluez_input.aa_bb_cc_dd_ee_ff.2"),
+            (*A2DP, "--throat-device", "bluez_input.00_11_22_33_44_55.2;rm"),
+            (*A2DP, "--throat-device", "bluez_input.00_11_22_33_44_55.2 x"),
+            (*A2DP, "--throat-device=-Dfoo"),
+            (*A2DP, "--throat-device", "tee:SLAVE=hw:0,FILE=x"),
+            (*A2DP, "--throat-device", BT_NODE, "--throat-host", "local"),
+        ]
+        for args in bad:
+            with self.subTest(reject=args):
+                code, out = self.run_main(
+                    *args, throat_argv=self.boom, pw_check=self.pw_ok()
+                )
+                self.assertEqual(code, 1, out)
+                self.assertNotIn("子を起動した", out)
+                self.assertEqual(self.pw_check_calls, 0, out)
+                self.assertEqual(self.sessions(), [])
+        # 環境変数に hw の値が入ったまま構成 B を選ぶと形の検査で止まる
+        code, out = self.run_main(
+            *A2DP,
+            throat_argv=self.boom,
+            pw_check=self.pw_ok(),
+            env={"THROAT_DEVICE": "hw:CARD=Audio,DEV=0"},
+        )
+        self.assertEqual(code, 1, out)
+        self.assertIn("bluez_input", out)
+        self.assertEqual(self.sessions(), [])
+
+    def test_h14_pipewire_checks_stop_before_child(self):
+        def replace50(**kw):
+            return [
+                o if o.get("id") != 50 else pw_node(50, BT_NODE, **kw)
+                for o in pw_before()
+            ]
+
+        tunnel = pw_module(9, "libpipewire-module-pipe-tunnel")
+        other = [
+            pw_node(71, "other-rec", mclass="Stream/Input/Audio", profile=None),
+            pw_link(82, 50, 71),
+        ]
+        no_node = [o for o in pw_before() if o.get("id") != 50]
+        ok = pw_check_text(pw_before())
+        cases = {
+            "no-node": (
+                pw_check_text(no_node),
+                0,
+                0.0,
+                "送信機が接続されていません",
+            ),
+            "profile": (
+                pw_check_text(replace50(profile="hfp-hf")),
+                0,
+                0.0,
+                "a2dp-source ではありません",
+            ),
+            "class": (
+                pw_check_text(replace50(mclass="Audio/Sink")),
+                0,
+                0.0,
+                "Audio/Source ではありません",
+            ),
+            "mute": (pw_check_text(replace50(mute=True)), 0, 0.0, "ミュート"),
+            "other-capture": (
+                pw_check_text(pw_before(*other)),
+                0,
+                0.0,
+                "他の取り込み",
+            ),
+            "pipe-tunnel": (
+                pw_check_text(pw_before(tunnel)),
+                0,
+                0.0,
+                "pipe-tunnel",
+            ),
+            "pipewire-dir": (
+                pw_check_text(pw_before(), pipewire_dir=True),
+                0,
+                0.0,
+                "~/.config/pipewire",
+            ),
+            "wireplumber-conf": (
+                pw_check_text(pw_before(), wp_conf=True),
+                0,
+                0.0,
+                "wireplumber.conf があるので",
+            ),
+            "conf-d-extra": (
+                pw_check_text(
+                    pw_before(),
+                    conf_d=("90-bluez-no-seat.conf", "99-file.conf"),
+                ),
+                0,
+                0.0,
+                "wireplumber.conf.d の中身",
+            ),
+            "conf-d-empty": (
+                pw_check_text(pw_before(), conf_d=()),
+                0,
+                0.0,
+                "wireplumber.conf.d の中身",
+            ),
+            "no-seat-extra-line": (
+                pw_check_text(
+                    pw_before(),
+                    no_seat=NO_SEAT_OK + "context.modules = [ ]\n",
+                ),
+                0,
+                0.0,
+                "seat-monitoring を止める 1 行",
+            ),
+            "exit-code": (ok, 255, 0.0, "終了コード 255"),
+            "timeout": (ok, 0, 5.0, "タイムアウト"),
+            "broken-json": (ok[:-20], 0, 0.0, "JSON が読めません"),
+            "no-sections": ("[]\n", 0, 0.0, "出力の形が違う"),
+        }
+        for name, (text, rc, delay, msg) in cases.items():
+            with self.subTest(case=name):
+                with mock.patch.object(record, "THROAT_PW_TIMEOUT_S", 0.5):
+                    code, out = self.run_main(
+                        *A2DP,
+                        "--throat-device",
+                        BT_NODE,
+                        throat_argv=self.boom,
+                        pw_check=self.fake_cmd(text, rc, delay),
+                        no_alsa_checks=True,
+                    )
+                self.assertEqual(code, 1, out)
+                self.assertIn(msg, out)
+                if name == "no-node":
+                    self.assertIn("docs/unoq-setup.md", out)
+                self.assertNotIn("子を起動した", out)
+                self.assertEqual(self.pw_dump_calls, 0)
+                self.assertEqual(self.sessions(), [])
+        # コメントと空行は許す（NO_SEAT_OK に含む）。中身が 1 行だけでも通る
+        for no_seat in (
+            NO_SEAT_OK,
+            "wireplumber.profiles.main.monitor.bluez.seat-monitoring=disabled",
+        ):
+            with self.subTest(no_seat=no_seat):
+                secs = record.split_pw_check(
+                    pw_check_text(pw_before(), no_seat=no_seat)
+                )
+                self.assertIsNone(record.pipewire_config_error(secs)[0])
+
+    def test_h14_normal_records_pipewire_meta(self):
+        code, out = self.run_main(
+            *A2DP,
+            "--throat-device",
+            BT_NODE,
+            "--duration",
+            "0.6",
+            pw_check=self.pw_ok(),
+            no_alsa_checks=True,
+        )
+        self.assertEqual(code, 0, out)
+        self.assertEqual(
+            self.argv_seen, [("arduino@unoq.local", BT_NODE, "a2dp")]
+        )
+        th = self.meta(self.one_session())["throat"]
+        self.assertEqual(th["device"], BT_NODE)
+        self.assertEqual(th["device_source"], "arg")
+        self.assertIsNone(th["mixer"])
+        self.assertEqual(th["mixer_error"], "A2DP の経路ではミキサーを読まない")
+        self.assertIsNone(th["overrun_lines"])
+        self.assertIsNone(th["alsa_buffer_size"])
+        self.assertIsNone(th["alsa_period_size"])
+        self.assertEqual(th["stop"], "duration")
+        pw = th["pipewire"]
+        self.assertEqual(pw["profile"], "a2dp-source")
+        self.assertEqual(pw["codec"], "sbc")
+        self.assertEqual(pw["node_rate_hz"], 48000)
+        self.assertEqual(pw["node_channels"], 2)
+        self.assertEqual(pw["node_format"], "S16LE")
+        self.assertIsNone(pw["codec_rate_hz"])
+        self.assertTrue(pw["codec_rate_note"])
+        self.assertIs(pw["mute"], False)
+        self.assertEqual(pw["channel_volumes"], [1.0, 1.0])
+        self.assertEqual(pw["driver"], SINK)
+        self.assertEqual(pw["links"], [SINK])
+        self.assertEqual(
+            pw["config"]["wireplumber_conf_d"], ["90-bluez-no-seat.conf"]
+        )
+        self.assertIn(
+            "/etc/pipewire/pipewire.conf.d/10-qcom.conf", pw["config"]["etc"]
+        )
+        self.assertEqual(pw["link_check"], "ok")
+        self.assertEqual(pw["link_check_note"], "")
+        self.assertNotIn("api.bluez5.address", json.dumps(th))
+        self.assertIn("overrun なし（pw-record は出さない）", out)
+        self.assertIn("0 の区間は tools/throat_check.py で確かめる", out)
+        self.assertNotIn("ミキサーを読めませんでした", out)
+
+    def test_h15_auto_find_node(self):
+        no_node = [o for o in pw_before() if o.get("id") != 50]
+        cases = [
+            ("one", pw_before(), 0, None),
+            ("zero", no_node, 1, "送信機が接続されていません"),
+            (
+                "two",
+                pw_before(pw_node(51, BT_NODE2)),
+                1,
+                "--throat-device で指定してください",
+            ),
+        ]
+        for name, objs, want, msg in cases:
+            with self.subTest(case=name):
+                self.fresh_raw()
+                code, out = self.run_main(
+                    *A2DP,
+                    "--duration",
+                    "0.3",
+                    pw_check=self.fake_cmd(pw_check_text(objs)),
+                    throat_argv=None if want == 0 else self.boom,
+                    no_alsa_checks=True,
+                )
+                self.assertEqual(code, want, out)
+                if want == 0:
+                    th = self.meta(self.one_session())["throat"]
+                    self.assertEqual(th["device"], BT_NODE)
+                    self.assertEqual(th["device_source"], "auto")
+                else:
+                    self.assertIn(msg, out)
+                    self.assertEqual(self.sessions(), [])
+                    if name == "two":
+                        self.assertIn(BT_NODE, out)
+                        self.assertIn(BT_NODE2, out)
+        # 環境変数で指したとき
+        self.fresh_raw()
+        code, out = self.run_main(
+            *A2DP,
+            "--duration",
+            "0.3",
+            pw_check=self.pw_ok(),
+            env={"THROAT_DEVICE": BT_NODE},
+            no_alsa_checks=True,
+        )
+        self.assertEqual(code, 0, out)
+        self.assertEqual(
+            self.meta(self.one_session())["throat"]["device_source"], "env"
+        )
+        # 有線の iface は今までどおり hw:CARD=Audio,DEV=0（pw-dump を起動しない）
+        self.fresh_raw()
+        self.argv_seen = []
+        code, out = self.run_main(*self.W, "--duration", "0.3")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(
+            self.argv_seen, [("arduino@unoq.local", "hw:CARD=Audio,DEV=0")]
+        )
+        self.assertEqual((self.pw_check_calls, self.pw_dump_calls), (0, 0))
+        th = self.meta(self.one_session())["throat"]
+        self.assertNotIn("device_source", th)
+        self.assertNotIn("pipewire", th)
+        self.assertEqual(th["overrun_lines"], 0)
+
+    def test_h16_stall_stops_a2dp_only(self):
+        # 0.5 秒分出した後、終わらずに黙る
+        child = {
+            "sizes": [19200],
+            "interval": 0.1,
+            "total": 19200 * 5,
+            "hang": 30,
+        }
+        with mock.patch.object(record, "THROAT_STALL_S", 0.3):
+            code, out = self.run_main(
+                *A2DP,
+                "--throat-device",
+                BT_NODE,
+                child=child,
+                pw_check=self.pw_ok(),
+            )
+        self.assertEqual(code, 1, out)
+        self.assertIn("stall", out)
+        sd = self.one_session()
+        th = self.meta(sd)["throat"]
+        self.assertEqual(th["stop"], "stall")
+        self.assertEqual(th["frames"], 19200 * 5 // 4)
+        self.assertTrue((sd / "throat.wav").exists())
+        self.assertFalse(pid_alive(self.child_pid()))
+        # 有線の iface では止まらない（--duration で止まる。今の動作）
+        self.fresh_raw()
+        with mock.patch.object(record, "THROAT_STALL_S", 0.3):
+            code, out = self.run_main(*self.W, "--duration", "1.2", child=child)
+        self.assertEqual(code, 0, out)
+        th = self.meta(self.one_session())["throat"]
+        self.assertEqual(th["stop"], "duration")
+        self.assertFalse(pid_alive(self.child_pid()))
+
+    def test_h17_link_check_after_start(self):
+        other_src = pw_node(52, "alsa_input.usb-bar", profile=None)
+        cases = {
+            "ok": (json.dumps(pw_after()), 0, 0.0, "ok"),
+            "other-node": (
+                json.dumps(pw_after(other_src, src=52)),
+                0,
+                0.0,
+                "ng",
+            ),
+            "two-streams": (json.dumps(pw_after(streams=2)), 0, 0.0, "ng"),
+            "zero-streams": (json.dumps(pw_after(streams=0)), 0, 0.0, "ng"),
+            "pw-dump-fails": ("", 1, 0.0, "error"),
+            "late": (json.dumps(pw_after()), 0, 3.0, "error"),
+        }
+        for name, (text, rc, delay, want) in cases.items():
+            with self.subTest(case=name):
+                self.fresh_raw()
+                with mock.patch.object(record, "THROAT_LINK_WAIT_S", 0.5):
+                    code, out = self.run_main(
+                        *A2DP,
+                        "--throat-device",
+                        BT_NODE,
+                        "--duration",
+                        "0.8" if name != "late" else "0.2",
+                        pw_check=self.pw_ok(),
+                        pw_dump=self.fake_cmd(text, rc, delay),
+                    )
+                # ng でも記録は止めない
+                self.assertEqual(code, 0, out)
+                th = self.meta(self.one_session())["throat"]
+                self.assertEqual(th["stop"], "duration")
+                pw = th["pipewire"]
+                self.assertEqual(pw["link_check"], want, pw)
+                self.assertEqual(self.pw_dump_calls, 1)
+                if want == "ok":
+                    self.assertEqual(pw["link_check_note"], "")
+                else:
+                    self.assertTrue(pw["link_check_note"])
+                if want == "ng":
+                    self.assertIn("警告: 起動後のリンクの確認が ng", out)
+                if name == "late":
+                    self.assertIn("終わらなかった", pw["link_check_note"])
+
 
 class ThroatArgvTest(unittest.TestCase):
+    def test_h13_pw_record_command_is_fixed(self):
+        argv = record.throat_argv("arduino@unoq.local", BT_NODE, "a2dp")
+        self.assertEqual(
+            argv,
+            [
+                "ssh",
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "ServerAliveInterval=2",
+                "-o",
+                "ServerAliveCountMax=3",
+                "arduino@unoq.local",
+                "exec env XDG_RUNTIME_DIR=/run/user/$(id -u) pw-record"
+                " --target bluez_input.00_11_22_33_44_55.2 --rate 48000"
+                " --channels 2 --format s16 -P '{ node.dont-reconnect = true"
+                " node.dont-fallback = true node.name = zm-throat-record }'"
+                " --raw -",
+            ],
+        )
+        self.assertEqual(
+            record.PW_PROPS,
+            "{ node.dont-reconnect = true node.dont-fallback = true"
+            " node.name = zm-throat-record }",
+        )
+        remote = argv[-1]
+        self.assertEqual(remote.split()[-1], "-")
+        self.assertIn("--raw", remote.split())
+        for bad in (">", "tee", "|", ".wav", ".raw", "/tmp"):
+            self.assertNotIn(bad, remote)
+        for want in (
+            "node.dont-reconnect = true",
+            "node.dont-fallback = true",
+            "node.name = zm-throat-record",
+        ):
+            self.assertIn(want, remote)
+        # a2dp に local は無い
+        with self.assertRaises(ValueError):
+            record.throat_argv("local", BT_NODE, "a2dp")
+        # 既定の kind は alsa（h10 の文字列のまま）
+        self.assertEqual(
+            record.throat_argv("arduino@unoq.local", "hw:CARD=Audio,DEV=0"),
+            record.throat_argv(
+                "arduino@unoq.local", "hw:CARD=Audio,DEV=0", "alsa"
+            ),
+        )
+        # 確認のコマンドも読み取りだけで、ファイルに書かない
+        for a in (
+            record.pipewire_check_argv("arduino@unoq.local"),
+            record.pw_dump_argv("arduino@unoq.local"),
+        ):
+            self.assertEqual(a[:11], argv[:11])
+            text = a[-1].replace("2>/dev/null", "")
+            for bad in (
+                ">",
+                "tee",
+                "|",
+                ".wav",
+                ".raw",
+                "/tmp",
+                "rm ",
+                "pw-record",
+            ):
+                self.assertNotIn(bad, text)
+
     def test_h10c_asoundrc_check_command_is_fixed(self):
         self.assertEqual(
             record.asoundrc_check_argv("arduino@unoq.local"),

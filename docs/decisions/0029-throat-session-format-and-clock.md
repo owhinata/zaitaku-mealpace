@@ -56,7 +56,7 @@ plan #36（PLAN-SHA `d590741fcf4c6a26`。Codex の 3 面レビューを通した
 
 - `fw` = `pc-throat`（装置の申告値ではなく `record.py` が書く）。トップレベルの `imu_hz`・`audio_hz` は無い。`sample_rates` は `imu_hz` 0、`audio_hz` 48000、`analog_hz` 0。
 - `sensors` = `[{"id": "throat", "part": "SH-12JK", "iface": <iface>}]`。`iface` は `sh12jk-wired-unoq-usbaudio`・`sh12jk-nz210c-rx-unoq-usbaudio`（#37）、
-  `sh12jk-nz210c-a2dp-unoq`（予約。#38）、`sh12jk-wired-pc`・`sh12jk-nz210c-rx-usbaudio`（予約。PC 上の `arecord`、`--throat-host local`）。
+  `sh12jk-nz210c-a2dp-unoq`（予約。#38 → 0030 で記録の経路にした（`pw-record`、`throat.pipewire`、0 の区間の検査））、`sh12jk-wired-pc`・`sh12jk-nz210c-rx-usbaudio`（予約。PC 上の `arecord`、`--throat-host local`）。
   名前に `unoq` を含む `iface` は `local` 以外、他は `local` だけを受ける。
 - `throat` に、宛先・PCM 名・形式・UNO Q に渡したコマンド・`buffer_size`/`period_size`・最初のバイトまでの秒数・フレーム数・経過・推定差・overrun の行・止まり方・
   子の終了コード・ミキサーの読み取り（`amixer -c <CARD> sget Mic` の標準出力。読み取りのみ）を書く。各キーは `docs/data-schema.md`。

@@ -60,6 +60,8 @@ data/raw/20261008-101500_self_water/
 
 - SH-12JK（docs/decisions/0025）の音声。`tools/record.py` が子プロセス（`arecord`。UNO Q では ssh 越し。docs/decisions/0028）から受けた S16_LE を
   変換せずに書く。サンプリング周波数とチャンネル数は `meta.json` の `sample_rates.audio_hz` と `throat.channels`（2026-10 の構成では 48000 Hz・2 ch）。
+- 構成 B（iface `sh12jk-nz210c-a2dp-unoq`。子は ssh 越しの `pw-record`、docs/decisions/0030）では、PipeWire のノードの形式のレートが 48000 でなければ
+  PipeWire が 48000 に変換したもの（ノードの形式のレートは `throat.pipewire.node_rate_hz`、SBC の符号化のレートは裏が取れたときだけ `throat.pipewire.codec_rate_hz`）。
 - **解析の基準は 16 kHz・1 ch**。解析は L（ch0）を 16 kHz に落として使う（落とし方は解析のコード。#36 では `scipy.signal.resample_poly(x, 1, 3)`）。
   この文書の他の節の「16 kHz」（`audio.wav`）は記録ファームウェアの基板マイクの値で、変わらない。
 - 生の計測データ。`data/raw/` の外に出さず、コミットしない。`self` のみ（docs/decisions/0028）。
@@ -182,17 +184,69 @@ data/raw/20261008-101500_self_water/
 | `iface` | 経路 | `--throat-host` | 状態 |
 |---|---|---|---|
 | `sh12jk-wired-unoq-usbaudio` | SH-12JK を有線で UNO Q の USB オーディオアダプタに挿す | `local` 以外 | #37 の有線 |
-| `sh12jk-nz210c-rx-unoq-usbaudio` | NZ-210C の受信機の出力を UNO Q の USB オーディオアダプタへ | `local` 以外 | #37 の NZ-210C 経由 |
-| `sh12jk-nz210c-a2dp-unoq` | NZ-210C の送信機を UNO Q が A2DP で受ける | `local` 以外 | 予約（#38） |
+| `sh12jk-nz210c-rx-unoq-usbaudio` | NZ-210C の受信機の出力を UNO Q の USB オーディオアダプタへ | `local` 以外 | 予約（構成 A は使わない。人の決定 10/8） |
+| `sh12jk-nz210c-a2dp-unoq` | NZ-210C の送信機 → UNO Q の A2DP シンク（PipeWire）→ `pw-record` の標準出力 → ssh → PC | `local` 以外 | #37 の構成 B（#38、docs/decisions/0030） |
 | `sh12jk-wired-pc` | SH-12JK を PC のマイク端子に挿す（PC 内蔵の入力） | `local` | 予約 |
 | `sh12jk-nz210c-rx-usbaudio` | NZ-210C の受信機 → PC に挿した USB オーディオアダプタ | `local` | 予約（PC がアダプタを認識しない） |
 
-- `throat` の各キー: `host`（ssh の宛先か `local`）、`device`（ALSA の PCM 名。許す形は hw/plughw の CARD/DEV 指定だけ（0028 の決定 2 を守るため。A2DP は #38 で決める））、`format`・`channels`・`rate_hz`（受けた形式）、`remote_command`（UNO Q に渡した文字列。
+- `throat` の各キー: `host`（ssh の宛先か `local`）、`device`（`alsa` の iface（下の構成 B 以外）では ALSA の PCM 名。許す形は hw/plughw の CARD/DEV 指定だけ（0028 の決定 2 を守るため）。
+  `a2dp` の iface（`sh12jk-nz210c-a2dp-unoq`）では PipeWire の `bluez_input.<アドレス>.<番号>` だけ（0030）。hw / plughw は `alsa` の iface だけ）、`format`・`channels`・`rate_hz`（受けた形式）、`remote_command`（UNO Q に渡した文字列。
   `local` では `null`）、`alsa_buffer_size`・`alsa_period_size`（`arecord -v` の値。拾えなければ `null`）、`first_byte_wait_s`（子の起動から最初のバイトまで）、
   `frames`（`throat.wav` のフレーム数）、`elapsed_s`（最初の到着から最後の到着までの PC の時間）、`est_diff_frames`（推定差。
   `(elapsed_s × 48000 + 最初の読み取りのフレーム数) − frames`。到着の揺れ・滞留・クロックの差を含む診断値で、取りこぼしの数そのものではない）、
   `overrun_lines`（`arecord` の標準エラーで `overrun` を含む行の数）、`stop`（`duration` / `interrupt` / `child-exit`）、`child_returncode`、
   `mixer`（`amixer -c <CARD> sget Mic` の標準出力そのまま。読み取りのみ。読めなければ `null` で、理由を `mixer_error` に書く）。
+- 構成 B（`a2dp` の iface。docs/decisions/0030）で変わる・足すキー: `device_source`（`arg` / `env` / `auto`。`--throat-device` で指した、環境変数 `THROAT_DEVICE` で指した、
+  `pw-dump` から自動で探した。`a2dp` だけ。`alsa` では書かない）、`overrun_lines` は `null`（`pw-record` は overrun の行を出さない。0 ではない）、
+  `alsa_buffer_size`・`alsa_period_size` は `null`、`stop` に `stall`（受信が 2 秒止まって記録を止めた。使わない）、`mixer` は `null`（`mixer_error` は「A2DP の経路ではミキサーを読まない」）、
+  `pipewire`（子を起動する前と後の PipeWire の確認。読み取りのみ）:
+  `profile`・`codec`（`api.bluez5.profile`・`api.bluez5.codec`）、`node_rate_hz`・`node_channels`・`node_format`（ノードの形式 `params.Format` の値。SBC の符号化のレートと同じとは限らない。
+  無ければ `null`）、`codec_rate_hz`（SBC の符号化のレート。裏が取れたときだけ。分からなければ `null`）と `codec_rate_note`（その理由）、`mute`・`channel_volumes`（ノードの `params.Props`）、
+  `driver`（ノードのドライバのノード名。分からなければ `null`）、`links`（起動前に目的のノードの出力がつながっていた先のノード名。再生側への自動リンク）、
+  `config`（`wireplumber_conf_d` = `~/.config/wireplumber/wireplumber.conf.d` の一覧、`etc` = `/etc/pipewire`・`/etc/wireplumber` の一覧。一覧を残すだけで中身の安全は保証しない）、
+  `link_check`（`ok` / `ng` / `error`。起動後に `node.name` = `zm-throat-record` のストリームがちょうど 1 つあり、目的のノードにだけつながっていれば `ok`）と `link_check_note`（理由。`ok` なら空）。
+  BD アドレスを別のキーには入れない（`device` の名前に含まれる分だけ）。
+
+構成 B の `meta.json` の例（`<addr>` は実物では BD アドレス。`meta.json` は `data/raw/` にだけあり、コミットしない）:
+
+```json
+{
+  "subject": "self",
+  "cond": "water",
+  "position": "lateral-below-cricoid",
+  "band": "elastic-25mm",
+  "firmware_sha": "abc1234",
+  "sample_rates": {"imu_hz": 0, "audio_hz": 48000, "analog_hz": 0},
+  "sensors": [{"id": "throat", "part": "SH-12JK", "iface": "sh12jk-nz210c-a2dp-unoq"}],
+  "notes": "",
+  "fw": "pc-throat",
+  "throat": {
+    "host": "arduino@unoq.local",
+    "device": "bluez_input.<addr>.2",
+    "device_source": "auto",
+    "format": "S16_LE", "channels": 2, "rate_hz": 48000,
+    "remote_command": "exec env XDG_RUNTIME_DIR=/run/user/$(id -u) pw-record --target bluez_input.<addr>.2 --rate 48000 --channels 2 --format s16 -P '{ node.dont-reconnect = true node.dont-fallback = true node.name = zm-throat-record }' --raw -",
+    "alsa_buffer_size": null, "alsa_period_size": null,
+    "first_byte_wait_s": 1.2,
+    "frames": 4800000, "elapsed_s": 100.0, "est_diff_frames": -300,
+    "overrun_lines": null,
+    "stop": "duration", "child_returncode": 255,
+    "mixer": null, "mixer_error": "A2DP の経路ではミキサーを読まない",
+    "pipewire": {
+      "profile": "a2dp-source", "codec": "sbc",
+      "node_rate_hz": 48000, "node_channels": 2, "node_format": "S16LE",
+      "codec_rate_hz": null, "codec_rate_note": "SBC のレートは確かめていない",
+      "mute": false, "channel_volumes": [1.0, 1.0],
+      "driver": "<ドライバのノード名>",
+      "links": ["<再生側のノード名>"],
+      "config": {"wireplumber_conf_d": ["90-bluez-no-seat.conf"], "etc": ["<一覧>"]},
+      "link_check": "ok", "link_check_note": ""
+    }
+  }
+}
+```
+
+- 構成 B の追記（`device` の形、`device_source`、`stall`、`pipewire`）も既存のファイル・列・単位・フレーム形式を変えていないので、記録済みのセッションの変換は要らない（docs/decisions/0030）。
 
 ## シリアルのフレーム形式（装置 → PC）
 

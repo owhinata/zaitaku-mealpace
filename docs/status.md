@@ -1,6 +1,6 @@
 # 現在地
 
-更新: 2026-10-08
+更新: 2026-10-09
 
 ## 段階
 
@@ -289,6 +289,11 @@ M0 準備の関門は 9/20 に通過（docs/decisions/0010、`gate-M0`）。
   10/7 の規則のまま集計した: `s` の振幅の比の中央値 137.66（IQR 103.65〜193.95）、`quiet` 1.10（1.08〜1.44）、`c` 405.35・`n` 40.12・`t` 22.60。条件 1〜3 は 3 つとも満たす（条件 3 は 6 回のうち 6 回）。**信号の有無の判定は人**。NZ-210C 経由は未（変換ケーブル待ち）で、経路の差もその後。docs/log/2026-10-08.md。
 - #38（10/8、plan の前の実機の試し）: NZ-210C の直接ペアリング（A2DP）は**構成 B（送信機 → UNO Q）で動いた**（SBC、`pw-record` の標準出力に 48 kHz・2 ch、マイクの音が乗る）。要ったのは Class of Device を Audio/Video に（人、sudo）、lightdm 側の bluez の監視を止める（人、sudo）、arduino 側の seat-monitoring を disabled、鍵を消してからエージェント NoInputNoOutput で承認。
   3 秒の 0 の区間（原因未確認）、`JustWorksRepairing = always`（未適用）、記録の経路にする手順は plan で。構成 A は試していない。UNO Q のホームと `/tmp` に音声のファイルは無い（確認の方法は log）。#38 の他の項目（LED の RPC、PD 電源、arduino-cli）は未着手。docs/log/2026-10-08.md。
+- #38（10/9、main）: plan #38（Codex の 3 面 LGTM）を実装した。**実装済み・実測待ち。** `tools/record.py --throat sh12jk-nz210c-a2dp-unoq` で、UNO Q の bluez_input のノードから ssh 越しの `pw-record`（標準出力だけ、`-P` で node.dont-reconnect・node.dont-fallback・node.name = zm-throat-record）を受ける。
+  `--throat-device` は iface と形を結ぶ（構成 B は bluez_input だけ、USB は hw / plughw だけ）、省けば自動で探す。起動前の PipeWire の確認（設定・ノード・ミュート・他の取り込み・pipe-tunnel）、起動後のリンクの確認（`throat.pipewire.link_check`）、2 秒の受信の止まり（`stall`）。
+  `tools/throat_check.py` に 0 の区間（構成 B だけ使わない目安）。`alsa` の経路は変えていない。`docs/data-schema.md`、0029 に 1 行、`docs/unoq-setup.md`（新規）。テストは tools 75 → 84、analysis 261（不変）。
+  **実測 E1〜E9 は未実測**（UNO Q に届かない。10/8 と同じ）。`ZERO_RUN_MS` = 10 ms は仮置きで、合成と疎通にだけ使う。E3 → 人の閾値決定 → 規則の log のコミット → E7 (b)（6b）→ 疎通の後でなければ #37 の構成 B の正式な記録に進まない。
+  #38 の従の項目（LED の RPC、PD 電源、arduino-cli）は #38 の未完として残し、次の plan #38b で扱う。docs/log/2026-10-09.md。
 - ロボセンサー技研への問い合わせ未送付（代替センサ、docs/decisions/0002、#5）。
 
 ## 次にやること
@@ -327,8 +332,8 @@ M3 の判定の数字に使う記録（#39）と評価（#40）は、#28 の後�
 | Issue | 内容 | 依存 |
 |---|---|---|
 | #36 | 試用: PC 録音の準備（`throat.wav` の同時録音、時刻合わせ、集計スクリプト、判定の条件の固定）。**実装済み（10/7、main。経路は UNO Q 経由、0028・0029）。close は人** | なし |
-| #37 | 試用: PC での信号の確認（有線と NZ-210C 経由。5 条件。人）。**有線 5 本の集計まで（10/8。条件 1〜3 の値は log、判定は人）。NZ-210C 経由は構成 B（A2DP）で録る（人の決定 10/8。構成 A は使わない）。`record.py` の構成 B 対応（#38 の plan）の後** | #36、#38（構成 B の記録） |
-| #38 | 試用: UNO Q の立ち上げ（USB オーディオ、LED の RPC、PD 電源、A2DP の直接ペアリング）。**A2DP の直接ペアリングは構成 B で動いた（10/8、plan の前の試し）。他の項目は未着手** | なし（#36・#37 と並行可） |
+| #37 | 試用: PC での信号の確認（有線と NZ-210C 経由。5 条件。人）。**有線 5 本の集計まで（10/8。条件 1〜3 の値は log、判定は人）。NZ-210C 経由は構成 B（A2DP）で録る（人の決定 10/8。構成 A は使わない）。`record.py` の構成 B 対応は実装済み（10/9）。正式な記録は #38 の実測・規則の固定・E7 (b) の後** | #36、#38（構成 B の記録） |
+| #38 | 試用: UNO Q の立ち上げ（USB オーディオ、LED の RPC、PD 電源、A2DP の直接ペアリング）。**構成 B を記録の経路にした（10/9、`record.py`・`throat_check.py` 実装済み）。実測 E1〜E9・E7 (b)・疎通は UNO Q に届かず未。未完: LED の RPC、PD 電源、arduino-cli（#38b の plan）** | なし（#36・#37 と並行可） |
 | #39 | 記録の経路を決め、咽喉マイクで `self` の嚥下・非嚥下を 3 収集日以上録る | #37 で信号が見えてから。CLAUDE.md の差し替えの後 |
 | #43 | 咽喉マイクの特徴量と後処理の比較と可視化（組は人が指定、10/4。学習側 CV だけで選ぶ） | #39。main（#28 の後） |
 | #40 | 咽喉マイクの音のみでの分岐点の評価（70% / 3 回/分） | #39、#43 |
