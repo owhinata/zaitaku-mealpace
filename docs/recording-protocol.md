@@ -1,6 +1,7 @@
 # 記録手順（self）
 
 対象は `self` のみ。M1 の収集（#12）用の手順と、M2 の通し記録（#27）用の手順（「M2 の通し記録（`meal`）」の節）。
+M3 の咽喉マイクの記録（#39）の手順は「咽喉マイク（M3）」の節にある（M1 の手順との違いだけを書く。決定は docs/decisions/0031）。
 `p1` の手順は M3 の前に別に決める。
 `docs/evaluation.md`・`docs/data-schema.md` の定義と合格線はこの文書では変えていない。
 
@@ -37,6 +38,12 @@
 | # | コマンド | やること | 打つマーカー | 目安 |
 |---|---|---|---|---|
 | M2 | `.venv/bin/python tools/record.py --cond meal --duration 1800` | 実際の食事（固形物を含む）を普段どおり食べる。食べ終わったら Ctrl-C（30 分で自動的に打ち切られる） | 食べ物・飲み物を意識して飲み込むごとに `s`（無意識の小さな唾液の嚥下は押せなくてよい。docs/decisions/0023）、咳・咳払いごとに `c`、話し始めに `t`。`b`・`n`・`q` は打たない | 1 セッション = 1 食（食べ終わるまで。ただし 30 分で打ち切る）、3 セッション以上、合計 `s` 50 以上、会話なし 1・会話あり 1、収集日 2 日以上が望ましい。2026-10-04 の終わりで打ち切る（届かなくても延ばさない。docs/decisions/0023） |
+
+### 早見表（咽喉マイク（M3）、#39）
+
+| # | コマンド | やること | 打つマーカー | 目安 |
+|---|---|---|---|---|
+| M3 | `.venv/bin/python tools/record.py --throat sh12jk-wired-unoq-usbaudio --position lateral-below-cricoid --band sh12jk-strap --cond <cond> --duration 210` | M1 と同じ 7 本を同じ順（`quiet` → `water` → `talk` → `saliva` → `neck` → `water` → `cough`）。各セッションの冒頭に叩き 5 回 → 装着 → `o start`、その後に条件の動作 | 叩きは `o` の note `tap`、区切りは `o` の note `start`。`o start` の後は M1 と同じ | 1 セッション 210 秒（`o start` の後が約 180 秒）。詳しくは「咽喉マイク（M3）」の節 |
 
 ## 装着と環境
 
@@ -252,3 +259,132 @@ docs/decisions/0005 のとおり、生の音声波形は装置の中で特徴量
   押せた嚥下がはっきりしたものに偏っていれば検出率は高めに出るおそれがある。#27 の報告にこの読み方を書く。
 - 記録の範囲は `detect.csv` の最初の窓の開始から、最後の窓の終端か最後に届いたフレーム（DETECT / FEAT）の送信時刻の遅いほうまで。送信の遅れが 1 秒を超えるセッションはエラー（docs/decisions/0021。docs/decisions/0011 の読み替え）。
 - 合格線に届かなくても、定義・閾値・モデルを動かさない（#27）。届かなかったときの扱いは #28 で人が決める。
+
+## 咽喉マイク（M3）
+
+対象は `self` のみ、M3 の咽喉マイクの記録（#39）用。M3 の (3) の数字（#40）に使う（docs/decisions/0024）。決定と根拠は docs/decisions/0031（plan #39）。
+M1 の手順（上の各節）を土台にし、この節には違いだけを書く。書いていないことは M1 のまま。
+`docs/evaluation.md`・`docs/data-schema.md` の定義と合格線はこの節でも変えていない。
+
+- 経路は有線（`--throat sh12jk-wired-unoq-usbaudio`）: 咽喉マイク SH-12JK → UNO Q の USB オーディオアダプタ → `arecord` の生の PCM → ssh → PC の `data/raw/`
+  （docs/decisions/0028）。形式と時計は docs/decisions/0029 のまま（`throat.wav` 48 kHz・2 ch・int16、PC の単調時計、`fw` = `pc-throat`）。
+- 無線（構成 B、`sh12jk-nz210c-a2dp-unoq`）は使わない（人の決定 10/10。送信機のノイズゲート。docs/log/2026-10-10.md）。
+- 記録は `data/raw/` の直下に置く（docs/decisions/0007）。コミットしない。`data/raw/trial-throat/` は試用の置き場（#37）で、M3 の数字に使わない。
+
+### 装着と環境
+
+- 位置: 気管の脇・輪状軟骨の直下（`--position lateral-below-cricoid`。#37 の実際の位置）。左右の側は最初の収集日に人が決めてその日の log に書き、
+  全収集日で同じ側にする（`--position` の値は変えない。側は log だけに書く）。
+- バンド: SH-12JK の付属のバンド（`--band sh12jk-strap`）。`record.py` の既定 `elastic-25mm` は M1 の基板のバンドの名前なので、必ず `--band` を渡す。
+  首を圧迫しない強さで留める。苦しければ外す。マイクのケーブルは衣服に留め、マイクを引っ張らせない。
+- 環境: M1 の「装着と環境」と同じ（椅子に座り背を起こす、静かな部屋、他の人の声・テレビ・音楽を入れない）。
+- 機材: UNO Q は PC の近くに置き、アダプタとマイクのケーブルを動かさない。UNO Q で検出器のプログラムを動かさない（docs/decisions/0028 決定 3）。
+  UNO Q と PC に `~/.asoundrc`・`/etc/asound.conf` を置かない（docs/decisions/0029）。UNO Q のミキサーは変えない（`Mic Capture` 58、on。#37 と同じ）。
+- **セッションごとに外して付け直す**（叩きでマイクを手に持つため。#37 と同じ）。同じ日の中でも位置・側・バンドの締め方を変えない。
+  M1 の「同じ日のセッションの間は外さない」は咽喉マイクには当てない。
+
+### 1 収集日 = 7 セッション
+
+- M1 と同じ 7 本を同じ順で録る: `quiet` → `water` → `talk` → `saliva` → `neck` → `water` → `cough`（咳は最後）。各条件のやること・打つマーカー・回数の目安は
+  M1 の「条件ごとのセッション」の表のまま。1 セッションで行う条件は 1 つだけ。
+- **収集日は日付で分ける。** 1 収集日の 7 本は同じ日付（フォルダ名の `YYYYMMDD`）の中で録る（`analysis/train_eval.py` は名前の先頭 8 文字で収集日を数える。
+  docs/decisions/0014）。日付をまたぎそうなら始めない。
+- リポジトリのルートで、端末から直接実行する（tty が要る。M1 の「記録の実行」と同じ）。
+
+| # | コマンド |
+|---|---|
+| 1 | `.venv/bin/python tools/record.py --throat sh12jk-wired-unoq-usbaudio --position lateral-below-cricoid --band sh12jk-strap --cond quiet --duration 210` |
+| 2 | `.venv/bin/python tools/record.py --throat sh12jk-wired-unoq-usbaudio --position lateral-below-cricoid --band sh12jk-strap --cond water --duration 210` |
+| 3 | `.venv/bin/python tools/record.py --throat sh12jk-wired-unoq-usbaudio --position lateral-below-cricoid --band sh12jk-strap --cond talk --duration 210` |
+| 4 | `.venv/bin/python tools/record.py --throat sh12jk-wired-unoq-usbaudio --position lateral-below-cricoid --band sh12jk-strap --cond saliva --duration 210` |
+| 5 | `.venv/bin/python tools/record.py --throat sh12jk-wired-unoq-usbaudio --position lateral-below-cricoid --band sh12jk-strap --cond neck --duration 210` |
+| 6 | `.venv/bin/python tools/record.py --throat sh12jk-wired-unoq-usbaudio --position lateral-below-cricoid --band sh12jk-strap --cond water --duration 210` |
+| 7 | `.venv/bin/python tools/record.py --throat sh12jk-wired-unoq-usbaudio --position lateral-below-cricoid --band sh12jk-strap --cond cough --duration 210` |
+
+### 1 セッション 210 秒（叩き・装着の分 約 30 秒 + 条件 約 180 秒）
+
+- 冒頭に、叩き 5 回（約 3 秒おき、約 15 秒）→ 装着 → 区切りの `o start` が入る。合わせて約 30 秒の見込み（#37 の実際の所要は確かめていない）。
+- `--duration 210` にして、`o start` から後の条件の時間を M1 と同じ約 180 秒にする（1 収集日の記録時間 24.5 分）。叩きを込みで 180 秒にすると、
+  条件の時間が約 150 秒に減り、M1 の 1 日あたりの量と比べられなくなる。
+- `--duration 210` で自動終了させる。Ctrl-C で早く止めた記録は使わない（下の「捨てる条件」）。条件の動作は終わりの 5 秒前までにやめる。
+
+### 叩き（#37 と同じ）
+
+1. `recording... keys:` の表示を確かめる。「tty が無いので…」と出たら止め、できたフォルダを消してからやり直す。
+2. マイクを指で持ち、`o` を押して note に `tap` と打ち、**Enter をマイクのケースで押す**。約 3 秒おきに 5 回。
+3. 代替の手順（`--tap-mode finger`。docs/log/2026-10-07.md）は使わない（#37 では Enter の叩きが 5 本とも 5 / 5 見つかった。finger では `Δ` が出ず、
+   下の「捨てる条件」の 9 を当てられない）。
+
+### 区切り `o start` と打つマーカー
+
+- 叩きの後、マイクを装着し、**落ち着いてから** `o` を押し、note に `start` と打って Enter。**`o start` から後が記録の範囲**（docs/decisions/0031。
+  docs/decisions/0011「記録の範囲」の咽喉マイクのセッションでの読み替え）。叩きと装着の音は評価にも学習にも入れない。
+- `o start` の後、最初のマーカーまで 5 秒以上あける。`quiet` は `o start` の後に `q` を 1 回。
+- 打つマーカーは M1 の「マーカーの打ち方」のまま: 嚥下ごとに `s`（どの条件でも。`talk`・`neck`・`quiet` 中の自然な嚥下も）、`t`・`c`・`n` は動作の開始と同時。
+  打ち遅れ・打ち忘れ・打ち間違いは `o` の note（`late s`・`missed s`・`wrong key`）。`b` は打たない。
+- `o` の note の決まった語は `tap`・`start` の 2 つ。綴りを間違えたら、そのセッションは使わない。
+
+### 各セッションの直後にすること（採否は人。数字を見る前に決める）
+
+1. `.venv/bin/python tools/throat_check.py data/raw/<セッション> --tap-mode enter` を実行する（M1 の `check_session.py` の代わり）。
+2. `meta.json` の `fw`・`position`・`band`・`sensors[0].iface`・`throat.mixer`・`throat.stop` を確かめる（`grep` で読む。中身の音声は見ない）。
+3. 下の「捨てる条件」に当たるかを、**マーカーごとの振幅の比・特徴量・分類器の結果を見る前に**その場で決める。捨てるものはフォルダごと消して録り直す。
+   `throat_check.py` の出力（フレーム数、overrun、推定差、時刻の対応、段差、L と R の相関と RMS の比、0 の区間、叩き）は採否の材料として見てよい。
+   L と R の RMS の比は 2 つのチャンネルが同じかを見る値で（#37 では 1.000）、条件ごと・マーカーごとの振幅ではない。
+   `throat_check.py` は叩きの印の行に「使うかは人」と出すが、下の 9・10 の規則（人が記録の前に決めた）がこの表示より優先する。
+4. log の集計表（下の「log に書くこと」）の行を書く（数字はメインまたは subagent が `throat_check.py` の出力と `events.csv` から写す）。
+
+### 捨てる条件（どれかに当たれば使わない。記録の直後に人が決める）
+
+`throat_check.py` の使わない目安（docs/log/2026-10-07.md。有線の iface の規則のまま）:
+
+1. overrun の行 > 0。
+2. `|推定差|` > 125 ms。
+3. 段差あり（隣り合う 10 秒の区間の最小の差 > 50 ms）。
+
+記録の形:
+
+4. `meta.json` の `fw` が `pc-throat` でない、`sensors[0].iface` が `sh12jk-wired-unoq-usbaudio` でない、`position` が `lateral-below-cricoid` でない、`band` が `sh12jk-strap` でない。
+5. `throat.stop` が `duration` でない（Ctrl-C・子の終了・エラー）。tty なし・中断・起動失敗でできたフォルダ（M1 と同じ）。
+6. `throat.mixer` の `Mic` が 58・on でない。
+7. `o start` が無い、2 つ以上ある、綴りが違う。`o start` より前に `s`・`t`・`c`・`n`・`q` がある。
+
+M1 の「捨てる」（そのまま）:
+
+8. `s` の打ち忘れが 1 回でもある、`s` の遅れが 0.5 秒を超えたと思う、他の人の声が入った。
+
+叩き:
+
+9. 叩き（Enter）が 3 回未満しか見つからない、または `|Δ の中央値|` > 125 ms → 使わない（録り直す）。
+10. 叩きが 3 回以上見つかり 50 ms < `|Δ の中央値|` ≤ 125 ms → **印を付けたまま使う**（`throat_check.py` の 50 ms の印の表示は変えない。#37 の 5 本は −55〜−74 ms でここに当たる）。
+    `|Δ の中央値|` ≤ 50 ms は印なしで使う。どの場合も `Δ` で時刻の対応を直さない（docs/decisions/0029）。
+
+- 採否は数字（振幅の比・特徴量・分類器の結果）を見る前に人が決める。後から採否を変えない。
+- 捨てた記録は消す（`trial-throat/` へは移さない）。`data/raw/` の直下には使うセッションだけを残す。
+
+### 収集日の数と評価側
+
+- **4 収集日を 2026-10-18 までに**録る。Issue #39 の完了の条件は 3 収集日以上。4 日に届かなかったら、その数字を log に書いて人が決める。
+- **評価に回すのは最後の 2 収集日のセッション全部。学習はそれより前の収集日の全部**（M1 と同じ規則。docs/decisions/0014）。
+- 「各 50 回以上」の数え方は M1 の「『各50回以上』の数え方」のまま、**咽喉マイクの採用セッションだけで数える**（M1 の 28 本は足さない）:
+  `s` の合計 50 以上、`t`+`c`+`n` 50 以上かつ各 10 以上、`quiet` の合計 5 分以上（`o start` から後の分で数える）。評価側だけ・学習側だけでも `s` が 20 以上。
+  足りなければ収集日を足す。
+- 評価側の数字を一度でも見た後は、評価側を動かさない（M1 と同じ）。
+
+### `trial-throat/` の扱い
+
+- `data/raw/trial-throat/` はそのまま残す（消すかは人）。新しい試用の記録を `trial-throat/` へ入れない。
+- `analysis/split.py` は今は `trial-throat/` があると止まる（止まる向き。docs/log/2026-10-07.md）。`analysis/` の対応（docs/decisions/0031）が入るまで、
+  記録の間は `split.py` を走らせない。
+
+### log に書くこと（収集日ごと）
+
+`docs/log/<日付>.md` に「#39 収集日 N」の節を作り、M1 の集計表（docs/log/2026-09-21.md など）と同じ形に咽喉マイクの列を足した表を書く。
+
+| セッション | 条件 | 長さ（秒） | 止まり方 | `s` | `t` | `c` | `n` | `q` | `o`（tap / start / その他の note） | overrun の行 | 推定差（ms） | 段差 | 叩き 見つかった数 / `Δ` 中央値 | 使わない目安 | 採否と理由 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+
+- 表の下: 位置の側・バンド・ミキサーの値・付け直しの回数・`firmware_sha`（PC の HEAD）・クロックの差（ppm）、`o start` から後の `quiet` の分数、
+  その日の合計（`s`、`t`+`c`+`n`、各ラベル、`quiet` 分）と累計、`s` の間隔 10 秒未満の数、非嚥下の条件の中の `s` の数、終わりの 1.5 秒以内の `s` の数。
+- 採否は人の決定として書く（数字を見る前に決めたこと）。振幅の比・特徴量・分類器の数字は書かない（#40 の前）。
+- 被験者は `self` のみ。音声・写真は載せない。
