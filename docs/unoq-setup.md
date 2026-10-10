@@ -21,31 +21,49 @@
 | 場所 | 中身 | 置いた人 | 理由 | 確かめ方（読み取り） |
 |---|---|---|---|---|
 | `/etc/bluetooth/main.conf` | `Class = 0x240414`（Audio/Video・Loudspeaker） | 人（sudo） | 送信機が Audio/Video の機器だけを探すため | `grep -n '^Class' /etc/bluetooth/main.conf`、`bluetoothctl show` の Class |
-| `/etc/bluetooth/main.conf` | `JustWorksRepairing = always` | 人（sudo） | 送信機は電源を入れるたびに新規ペアリングで来る。既定（`never`）では鍵が残っていると拒む。**人が適用すると決めた（10/8）。適用の確認（E9）とエージェントの要否は未確認** | `grep -n JustWorksRepairing /etc/bluetooth/main.conf` |
+| `/etc/bluetooth/main.conf` | `JustWorksRepairing = always` | 人（sudo） | 送信機は電源を入れるたびに新規ペアリングで来る。既定（`never`）では鍵が残っていると拒む。**適用済み（人、10/9〜10）**。これと送信機の trust（1 回）で、承認のエージェントは要らない（E9、10/10） | `grep -n JustWorksRepairing /etc/bluetooth/main.conf` |
 | `/var/lib/lightdm/.config/wireplumber/wireplumber.conf.d/90-disable-bluez.conf` | lightdm の WirePlumber で bluez の監視を止める | 人（sudo） | A2DP のエンドポイントは先に登録した WirePlumber が持ち、ログイン画面（lightdm）側に音が流れていた | `ls` |
-| `~/.config/wireplumber/wireplumber.conf.d/90-bluez-no-seat.conf`（arduino） | `wireplumber.profiles.main.monitor.bluez.seat-monitoring = disabled` | メイン（ssh、sudo 不要） | ssh のセッションは seat0 の active ではなく、arduino の WirePlumber が bluez の監視を始めない | `cat` |
+| `~/.config/wireplumber/wireplumber.conf.d/90-bluez-no-seat.conf`（arduino） | コメント 1 行と、`wireplumber.profiles = { main = { monitor.bluez.seat-monitoring = disabled } }` の入れ子の 5 行（下） | メイン（ssh、sudo 不要） | ssh のセッションは seat0 の active ではなく、arduino の WirePlumber が bluez の監視を始めない | `cat` |
+| arduino の linger（`loginctl enable-linger arduino`） | ssh のセッションが無くても arduino の user manager（PipeWire・WirePlumber）を動かしたままにする | メイン（10/10） | linger が無いと、最後の ssh が閉じて約 10 秒で PipeWire が止まり、送信機の A2DP が切れる（10/10 の実測） | `loginctl show-user arduino -p Linger` |
+
+`90-bluez-no-seat.conf` の中身（コメントを除く。10/10 の実物）:
+
+```
+wireplumber.profiles = {
+  main = {
+    monitor.bluez.seat-monitoring = disabled
+  }
+}
+```
 
 - ここに無い PipeWire・WirePlumber の設定を足さない（docs/decisions/0030「塞がっていない経路」）。`record.py` は構成 B の記録の前に、`~/.config/pipewire` と
-  `~/.config/wireplumber/wireplumber.conf` が無いこと、`~/.config/wireplumber/wireplumber.conf.d/` が `90-bluez-no-seat.conf` だけで中身が上の 1 行（とコメント・空行）だけであることを確かめ、
+  `~/.config/wireplumber/wireplumber.conf` が無いこと、`~/.config/wireplumber/wireplumber.conf.d/` が `90-bluez-no-seat.conf` だけで、中身がコメント行と空行を除き空白を正規化して上の 5 行と一致することを確かめ、
   違えば記録を始めない。`/etc/pipewire`・`/etc/wireplumber` は一覧を `meta.json` に残すだけ（中身は確かめない）。
 
 ## 構成 B の接続（記録の座の初めに 1 回）
 
 送信機を切らなければ、5 条件の間は接続が保たれる見込み。送信機は接続が無いと約 3 分で自動 OFF。
 
-### 主の手順（`JustWorksRepairing = always` を適用した後）
+### 主の手順（`JustWorksRepairing = always` を適用した後。10/9〜10 に適用済み）
 
-1. 人が `/etc/bluetooth/main.conf` の `[General]` に `JustWorksRepairing = always` を書き、bluetooth を再起動する（sudo。1 回だけ）。
+1. 人が `/etc/bluetooth/main.conf` の `[General]` に `JustWorksRepairing = always` を書き、bluetooth を再起動する（sudo。1 回だけ。済み）。
    適用の確かめ（読み取り）: `grep -n JustWorksRepairing /etc/bluetooth/main.conf`。
 2. UNO Q の電源を入れ、ssh が通ることを確かめる。受信機 NZ-W210R は電源を切ったまま。
-3. 送信機の電源を入れる（ペアリングモードで来る）。鍵の削除（`bluetoothctl remove`）は要らない見込み。
-4. `record.py` を起動する。子を起動する前に `pw-dump` で接続を確かめる。ノードが無ければ「送信機が接続されていません」と出て止まるので、下のエージェントを起動して 3 からやり直す。
+   **UNO Q を再起動した後は**（10/10 に分かった）:
+   - Pairable は再起動で off に戻るので `bluetoothctl pairable on`。
+   - 起動直後は A2DP Sink のエンドポイントが登録されていないことがあるので `systemctl --user restart wireplumber` を行い、
+     `bluetoothctl show` の UUID に Audio Sink があることを確かめる。
+   - linger（上の表）が有効なことを `loginctl show-user arduino -p Linger` で確かめる。
+3. 送信機の電源を入れる（ペアリングモードで来る）。鍵の削除（`bluetoothctl remove`）は要らない。
+   **初めての送信機（または鍵を消した後）は 1 回だけ** `bluetoothctl trust <addr>` を行う。trust が無いと、再ペアリングは通るが A2DP のサービスの認可が
+   拒まれる（bluetoothd「Authentication attempt without agent」）。trust の後は、送信機の次の試行で A2DP がつながる。
+4. `record.py` を起動する。子を起動する前に `pw-dump` で接続を確かめる。ノードが無ければ「送信機が接続されていません」と出て止まるので、3 からやり直す。
 
    ```
    .venv/bin/python tools/record.py --throat sh12jk-nz210c-a2dp-unoq --position lateral-below-cricoid --cond quiet --duration 100
    ```
 
-- **エージェントの要否は分からない**（bluez が Just Works の確認をエージェントなしで受けるか。適用の後に確かめて、ここと log に書く）。要るなら 3 の前に次を起動したままにする
+- **エージェントは要らない**（E9、10/10: `JustWorksRepairing = always` ＋ trust 1 回）。下のエージェントは、適用の前の手順と、trust の前につながらないときにだけ使う
   （PC の端末で前面に置く。ペアリングが済んだら Ctrl-C で止めてよい）:
 
   ```
@@ -63,7 +81,7 @@
 
 ### `record.py` が確かめること
 
-- 子を起動する前（1 回の ssh。読み取りのみ）: ユーザーの PipeWire・WirePlumber の設定（上）、目的のノード（`bluez_input.<addr>.<番号>`、`Audio/Source`、`a2dp-source`）の有無、
+- 子を起動する前（1 回の ssh。読み取りのみ）: ユーザーの PipeWire・WirePlumber の設定（上）、目的のノード（`bluez_input.<addr>.<番号>`、`media.class` が `Stream/Output/Audio`（実物、10/10）か `Audio/Source`、`api.bluez5.profile` が `a2dp-source`）の有無、
   ミュート、他の取り込みのストリームがつながっていないこと、`libpipewire-module-pipe-tunnel` が無いこと。`--throat-device` を省くと、条件に合うノードがちょうど 1 つのときだけそれを使う。
 - 起動後: `pw-record`（`node.name` = `zm-throat-record`）が目的のノードにだけつながっているか（`meta.json` の `throat.pipewire.link_check`）。受信が 2 秒止まれば記録を止める（`stall`）。
 - 記録の直後に `tools/throat_check.py <セッション>` で 0 の区間を確かめる。
@@ -78,6 +96,7 @@ ssh arduino@<UNO Q> 'find ~ /tmp -xdev -type f \( -iname "*.wav" -o -iname "*.ra
 ```
 
 新しいファイルに音声の形式のものが無く、音声の拡張子のファイルが 0 件であること（docs/log/2026-10-08.md と同じ方法）。
+`~/.local/state/wireplumber/stream-properties` は確認から除く。`pw-record` のストリームが来ると WirePlumber が音量・ミュートの復元の状態を書くテキストで、音声ではない（10/10 の実測）。
 
 ## 構成 A は使わない
 

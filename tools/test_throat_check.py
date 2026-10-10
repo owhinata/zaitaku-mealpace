@@ -227,8 +227,8 @@ class ThroatCheckTest(unittest.TestCase):
     # --- 0 の区間（plan #38 第 9.2 節 k8・k9） ---
     def make_zero_session(self, iface: str, throat_extra=None) -> None:
         """20 秒の合成（雑音 RMS 約 60 LSB、L と R は別の雑音）に、L と R が両方
-        ちょうど 0 の区間を 5 ms（2 秒）・25 ms（5 秒）・3 s（10 秒）、先頭に
-        200 ms、L だけ 0 の区間を 50 ms（15 秒）入れる。"""
+        ちょうど 0 の区間を 5 ms（2 秒）・25 ms（5 秒）・64 ms（7 秒）・3 s（10 秒）、
+        先頭に 200 ms、L だけ 0 の区間を 150 ms（15 秒）入れる。"""
         make_session(self.dir, seconds=20.0, tap_times_s=(), seed=8)
         with wave.open(str(self.dir / "throat.wav"), "rb") as w:
             n = w.getnframes()
@@ -243,8 +243,9 @@ class ThroatCheckTest(unittest.TestCase):
         zero(0.0, 200)
         zero(2.0, 5)
         zero(5.0, 25)
+        zero(7.0, 64)
         zero(10.0, 3000)
-        zero(15.0, 50, 0)
+        zero(15.0, 150, 0)
         with wave.open(str(self.dir / "throat.wav"), "wb") as w:
             w.setnchannels(2)
             w.setsampwidth(2)
@@ -256,7 +257,7 @@ class ThroatCheckTest(unittest.TestCase):
         (self.dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
 
     def test_k8_zero_runs(self):
-        self.assertEqual(tc.ZERO_RUN_MS, 10)
+        self.assertEqual(tc.ZERO_RUN_MS, 100)
         a2dp_ok = {
             "overrun_lines": None,
             "pipewire": {"link_check": "ok"},
@@ -264,22 +265,21 @@ class ThroatCheckTest(unittest.TestCase):
         self.make_zero_session("sh12jk-nz210c-a2dp-unoq", a2dp_ok)
         r = tc.check(tc.load_session(self.dir))
         z = r["zero"]
-        self.assertEqual(z["count"], 2, z)
-        self.assertAlmostEqual(z["runs"][0][0], 5.0, places=3)
-        self.assertAlmostEqual(z["runs"][0][1], 25.0, places=3)
-        self.assertAlmostEqual(z["runs"][1][0], 10.0, places=3)
-        self.assertAlmostEqual(z["runs"][1][1], 3000.0, places=3)
-        self.assertAlmostEqual(z["total_ms"], 3025.0, places=3)
+        # 5 ms・25 ms・64 ms は数えず、3 s だけ数える。先頭は別
+        self.assertEqual(z["count"], 1, z)
+        self.assertAlmostEqual(z["runs"][0][0], 10.0, places=3)
+        self.assertAlmostEqual(z["runs"][0][1], 3000.0, places=3)
+        self.assertAlmostEqual(z["total_ms"], 3000.0, places=3)
         self.assertAlmostEqual(z["max_ms"], 3000.0, places=3)
         self.assertAlmostEqual(z["head_ms"], 200.0, places=3)
-        # 閾値未満の 0 の連続の最長 = 入れた 5 ms（自然な 0 はそれより短い）
-        self.assertAlmostEqual(z["short_max_ms"], 5.0, places=3)
+        # 閾値未満の 0 の連続の最長 = 入れた 64 ms（自然な 0 はそれより短い）
+        self.assertAlmostEqual(z["short_max_ms"], 64.0, places=3)
         self.assertEqual(
-            r["flags"], ["0 の区間（10 ms 以上、先頭を除く）2 回"], r["flags"]
+            r["flags"], ["0 の区間（100 ms 以上、先頭を除く）1 回"], r["flags"]
         )
         text = tc.report(r)
-        self.assertIn("2 回、合計 3025 ms、最長 3000 ms", text)
-        self.assertIn("5.00 秒、10.00 秒", text)
+        self.assertIn("1 回、合計 3000 ms、最長 3000 ms", text)
+        self.assertIn("位置 10.00 秒", text)
         self.assertIn("先頭の 0 200 ms", text)
         self.assertIn("使わない目安に当たる", text)
         print(
@@ -291,7 +291,7 @@ class ThroatCheckTest(unittest.TestCase):
         # 有線の iface では数えて表示するだけで、使わない目安に入れない
         self.make_zero_session("sh12jk-wired-unoq-usbaudio")
         r = tc.check(tc.load_session(self.dir))
-        self.assertEqual(r["zero"]["count"], 2)
+        self.assertEqual(r["zero"]["count"], 1)
         self.assertEqual(r["flags"], [])
         self.assertIn("この iface では表示だけ", tc.report(r))
         self.assertIn("使わない目安: 当たらない", tc.report(r))

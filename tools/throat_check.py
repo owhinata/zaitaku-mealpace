@@ -52,9 +52,10 @@ TAP_MAD_K = 8.0
 TAP_MIN_LSB = 5.0
 TAP_MIN_FOUND = 3
 TAP_MAX_ABS_MEDIAN_MS = 50.0
-# 0 の区間の閾値（ms）。仮の値（plan #38 第 4.2 節）。E3 の実測の後に人が決めた
-# 値をここで置き換え、規則を docs/log/ に固定してから構成 B の正式な記録に進む
-ZERO_RUN_MS = 10
+# 0 の区間の閾値（ms）。人が 10/10 に決めた（plan #38 第 4.2 節、
+# docs/log/2026-10-10.md。E3 の自然な 0 の最長 0.06 ms、63.8 ms の途切れ 1 回は
+# 許し、3 秒級は拾う）
+ZERO_RUN_MS = 100
 # 0 の区間・stall・リンクの確認を使わない目安に入れる iface（構成 B）
 A2DP_IFACES = ("sh12jk-nz210c-a2dp-unoq",)
 

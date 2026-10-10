@@ -813,12 +813,28 @@ THROAT_LINK_WAIT_S = 10.0
 THROAT_STALL_S = 2.0
 A2DP_MIXER_NOTE = "A2DP の経路ではミキサーを読まない"
 NO_BLUEZ_NODE_GUIDE = "手順は docs/unoq-setup.md の『構成 B の接続』"
-# WirePlumber の断片で許す 1 つと、その中身で許す 1 行（コメントと空行は除く）
+# WirePlumber の断片で許す 1 つと、その中身（コメント行と空行を除き、空白を
+# 正規化して比べる。10/10 の実物（E5）の入れ子の 5 行）
 WP_CONF_D_ALLOWED = ["90-bluez-no-seat.conf"]
-WP_NO_SEAT_LINE_RE = (
-    r"\s*wireplumber\.profiles\.main\.monitor\.bluez\.seat-monitoring"
-    r"\s*=\s*disabled\s*"
+WP_NO_SEAT_BODY = (
+    "wireplumber.profiles = {\n"
+    "  main = {\n"
+    "    monitor.bluez.seat-monitoring = disabled\n"
+    "  }\n"
+    "}\n"
 )
+# bluez の入力ノードの media.class として受けるもの。実物（10/10 の E1）は
+# Stream/Output/Audio。Audio/Source も受ける
+BLUEZ_NODE_CLASSES = ("Stream/Output/Audio", "Audio/Source")
+
+
+def conf_body(lines) -> str:
+    """コメント行（# で始まる）と空行を除き、空白の並びを 1 つの空白にして
+    つなぐ。"""
+    body = [
+        s.strip() for s in lines if s.strip() and not s.strip().startswith("#")
+    ]
+    return " ".join(" ".join(body).split())
 
 
 def throat_arg_error(a) -> str | None:
@@ -1072,15 +1088,10 @@ def pipewire_config_error(secs: dict) -> tuple[str | None, dict]:
             f" {WP_CONF_D_ALLOWED} だけではないので{why}: {conf_d}",
             config,
         )
-    body = [
-        s
-        for s in secs["no_seat"]
-        if s.strip() and not s.strip().startswith("#")
-    ]
-    if len(body) != 1 or not re.fullmatch(WP_NO_SEAT_LINE_RE, body[0]):
+    if conf_body(secs["no_seat"]) != conf_body(WP_NO_SEAT_BODY.split("\n")):
         return (
-            f"UNO Q の {WP_CONF_D_ALLOWED[0]} に seat-monitoring を止める 1 行"
-            f"以外の行があるので{why}",
+            f"UNO Q の {WP_CONF_D_ALLOWED[0]} の中身が seat-monitoring を止める"
+            f"設定だけではないので{why}",
             config,
         )
     return None, config
@@ -1148,7 +1159,7 @@ def pipewire_state(
 
     def is_a2dp_source(n):
         return (
-            _props(n).get("media.class") == "Audio/Source"
+            _props(n).get("media.class") in BLUEZ_NODE_CLASSES
             and _bluez_prop(n, devices, "api.bluez5.profile") == "a2dp-source"
         )
 
@@ -1185,9 +1196,10 @@ def pipewire_state(
         node = hit[0]
     mclass = _props(node).get("media.class")
     profile = _bluez_prop(node, devices, "api.bluez5.profile")
-    if mclass != "Audio/Source":
+    if mclass not in BLUEZ_NODE_CLASSES:
         return (
-            f"{device} の media.class が Audio/Source ではありません: {mclass!r}",
+            f"{device} の media.class が {' / '.join(BLUEZ_NODE_CLASSES)}"
+            f" ではありません: {mclass!r}",
             None,
             info,
         )

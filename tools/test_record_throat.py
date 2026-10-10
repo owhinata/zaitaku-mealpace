@@ -93,22 +93,29 @@ A2DP = ("--throat", "sh12jk-nz210c-a2dp-unoq")
 BT_NODE = "bluez_input.00_11_22_33_44_55.2"
 BT_NODE2 = "bluez_input.00_11_22_33_44_66.3"
 SINK = "alsa_output.usb-foo.analog-stereo"
+# 実物（10/10 の E5）と同じ形: コメント 1 行と入れ子の 5 行
 NO_SEAT_OK = (
     "# arduino の WirePlumber の bluez の監視を seat に結ばない\n"
     "\n"
-    "  wireplumber.profiles.main.monitor.bluez.seat-monitoring = disabled  \n"
+    "wireplumber.profiles = {\n"
+    "  main = {\n"
+    "    monitor.bluez.seat-monitoring = disabled\n"
+    "  }\n"
+    "}\n"
 )
 
 
 def pw_node(
     nid,
     name,
-    mclass="Audio/Source",
+    mclass="Stream/Output/Audio",
     profile="a2dp-source",
     mute=False,
-    rate=48000,
+    rate=44100,
     driver=None,
 ):
+    """実物（10/10 の E1）の形: bluez のノードは media.class が
+    Stream/Output/Audio、api.bluez5.* はノードの props、形式は 44100 Hz。"""
     props = {"node.name": name, "media.class": mclass}
     if profile is not None:
         props["api.bluez5.profile"] = profile
@@ -725,7 +732,7 @@ class ThroatMainTest(unittest.TestCase):
                 pw_check_text(replace50(mclass="Audio/Sink")),
                 0,
                 0.0,
-                "Audio/Source ではありません",
+                "ではありません: 'Audio/Sink'",
             ),
             "mute": (pw_check_text(replace50(mute=True)), 0, 0.0, "ミュート"),
             "other-capture": (
@@ -774,7 +781,27 @@ class ThroatMainTest(unittest.TestCase):
                 ),
                 0,
                 0.0,
-                "seat-monitoring を止める 1 行",
+                "seat-monitoring を止める設定だけではない",
+            ),
+            # 10/9 の見込みの 1 行の形は受けない（実物の中身との一致だけ）
+            "no-seat-one-line": (
+                pw_check_text(
+                    pw_before(),
+                    no_seat="wireplumber.profiles.main.monitor.bluez"
+                    ".seat-monitoring = disabled\n",
+                ),
+                0,
+                0.0,
+                "seat-monitoring を止める設定だけではない",
+            ),
+            "no-seat-enabled": (
+                pw_check_text(
+                    pw_before(),
+                    no_seat=NO_SEAT_OK.replace("disabled", "enabled"),
+                ),
+                0,
+                0.0,
+                "seat-monitoring を止める設定だけではない",
             ),
             "exit-code": (ok, 255, 0.0, "終了コード 255"),
             "timeout": (ok, 0, 5.0, "タイムアウト"),
@@ -799,10 +826,11 @@ class ThroatMainTest(unittest.TestCase):
                 self.assertNotIn("子を起動した", out)
                 self.assertEqual(self.pw_dump_calls, 0)
                 self.assertEqual(self.sessions(), [])
-        # コメントと空行は許す（NO_SEAT_OK に含む）。中身が 1 行だけでも通る
+        # コメントと空行は許す（NO_SEAT_OK に含む）。空白の違いは正規化する
         for no_seat in (
             NO_SEAT_OK,
-            "wireplumber.profiles.main.monitor.bluez.seat-monitoring=disabled",
+            "wireplumber.profiles  =  {\n\tmain = {\n"
+            "monitor.bluez.seat-monitoring = disabled }\n\n  }\n# c\n",
         ):
             with self.subTest(no_seat=no_seat):
                 secs = record.split_pw_check(
@@ -836,7 +864,7 @@ class ThroatMainTest(unittest.TestCase):
         pw = th["pipewire"]
         self.assertEqual(pw["profile"], "a2dp-source")
         self.assertEqual(pw["codec"], "sbc")
-        self.assertEqual(pw["node_rate_hz"], 48000)
+        self.assertEqual(pw["node_rate_hz"], 44100)
         self.assertEqual(pw["node_channels"], 2)
         self.assertEqual(pw["node_format"], "S16LE")
         self.assertIsNone(pw["codec_rate_hz"])
@@ -857,6 +885,24 @@ class ThroatMainTest(unittest.TestCase):
         self.assertIn("overrun なし（pw-record は出さない）", out)
         self.assertIn("0 の区間は tools/throat_check.py で確かめる", out)
         self.assertNotIn("ミキサーを読めませんでした", out)
+
+    def test_h15b_audio_source_class_is_accepted(self):
+        objs = [
+            o
+            if o.get("id") != 50
+            else pw_node(50, BT_NODE, mclass="Audio/Source", driver=60)
+            for o in pw_before()
+        ]
+        code, out = self.run_main(
+            *A2DP,
+            "--duration",
+            "0.3",
+            pw_check=self.fake_cmd(pw_check_text(objs)),
+            no_alsa_checks=True,
+        )
+        self.assertEqual(code, 0, out)
+        th = self.meta(self.one_session())["throat"]
+        self.assertEqual((th["device"], th["device_source"]), (BT_NODE, "auto"))
 
     def test_h15_auto_find_node(self):
         no_node = [o for o in pw_before() if o.get("id") != 50]
