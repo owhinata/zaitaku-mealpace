@@ -98,6 +98,9 @@ ssh arduino@<UNO Q> 'find ~ /tmp -xdev -type f \( -iname "*.wav" -o -iname "*.ra
 新しいファイルに音声の形式のものが無く、音声の拡張子のファイルが 0 件であること（docs/log/2026-10-08.md と同じ方法）。
 `~/.local/state/wireplumber/stream-properties` は確認から除く。`pw-record` のストリームが来ると WirePlumber が音量・ミュートの復元の状態を書くテキストで、音声ではない（10/10 の実測）。
 
-## 構成 A は使わない
+## 構成 A は使わない。構成 B も記録には使わない
 
-送信機 → 受信機 NZ-W210R → USB オーディオ → UNO Q（構成 A）は使わない（人の決定、10/8）。iface `sh12jk-nz210c-rx-unoq-usbaudio` は予約のまま。
+- 送信機 → 受信機 NZ-W210R → USB オーディオ → UNO Q（構成 A）は使わない（人の決定、10/8）。iface `sh12jk-nz210c-rx-unoq-usbaudio` は予約のまま。
+- 構成 B（送信機 → UNO Q の A2DP）は動くが、送信機 NZ-W210C は入力がごく小さいとき無音（ちょうど 0）を送るノイズゲートを持ち（取説に切替なし。docs/log/2026-10-10.md）、
+  装着して静止した咽喉マイクの `quiet` が成り立たない。人の決定（10/10）で学習用の記録には使わず、記録と検出器は有線（USB オーディオアダプタ）で進める。
+  上の設定と `record.py` の構成 B の実装は残す（再び使うときの手順はこの文書のとおり）。
