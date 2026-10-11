@@ -25,6 +25,7 @@
 | `/var/lib/lightdm/.config/wireplumber/wireplumber.conf.d/90-disable-bluez.conf` | lightdm の WirePlumber で bluez の監視を止める | 人（sudo） | A2DP のエンドポイントは先に登録した WirePlumber が持ち、ログイン画面（lightdm）側に音が流れていた | `ls` |
 | `~/.config/wireplumber/wireplumber.conf.d/90-bluez-no-seat.conf`（arduino） | コメント 1 行と、`wireplumber.profiles = { main = { monitor.bluez.seat-monitoring = disabled } }` の入れ子の 5 行（下） | メイン（ssh、sudo 不要） | ssh のセッションは seat0 の active ではなく、arduino の WirePlumber が bluez の監視を始めない | `cat` |
 | arduino の linger（`loginctl enable-linger arduino`） | ssh のセッションが無くても arduino の user manager（PipeWire・WirePlumber）を動かしたままにする | メイン（10/10） | linger が無いと、最後の ssh が閉じて約 10 秒で PipeWire が止まり、送信機の A2DP が切れる（10/10 の実測） | `loginctl show-user arduino -p Linger` |
+| rfkill の soft block（`sudo rfkill block bluetooth`） | Bluetooth の無線を止める（`/sys/class/rfkill/rfkill0/soft` = 1、`bluetoothctl show` の Powered: no） | 人（sudo、10/11） | 構成 B を記録に使わないと決めた（10/10）後、Discoverable が yes のまま残っていた。有線の記録と M4 の間は Bluetooth を使わないので止める。`main.conf` と WirePlumber の設定は残す。systemd-rfkill が状態を保存するので再起動後も無効のまま。`all` は付けない（rfkill1 は Wi-Fi で、ssh が落ちる） | `cat /sys/class/rfkill/rfkill0/soft`（1）、`bluetoothctl show | grep Powered`（no）。`rfkill` は `/usr/sbin` にあり一般ユーザーの PATH に無い |
 
 `90-bluez-no-seat.conf` の中身（コメントを除く。10/10 の実物）:
 
@@ -45,6 +46,8 @@ wireplumber.profiles = {
 送信機を切らなければ、5 条件の間は接続が保たれる見込み。送信機は接続が無いと約 3 分で自動 OFF。
 
 ### 主の手順（`JustWorksRepairing = always` を適用した後。10/9〜10 に適用済み）
+
+**10/11 から Bluetooth は rfkill で無効（上の表）。構成 B を再び試すときは、先に人が `sudo rfkill unblock bluetooth` を行い、`bluetoothctl show` で Powered: yes を確かめてから下へ進む。** `record.py --throat sh12jk-nz210c-a2dp-unoq` は Bluetooth が無効だと起動前の検査で止まる（意図どおり）。
 
 1. 人が `/etc/bluetooth/main.conf` の `[General]` に `JustWorksRepairing = always` を書き、bluetooth を再起動する（sudo。1 回だけ。済み）。
    適用の確かめ（読み取り）: `grep -n JustWorksRepairing /etc/bluetooth/main.conf`。
