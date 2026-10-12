@@ -48,12 +48,23 @@ project(zaitaku_mealpace NONE)
 # 1200 bps のタッチの後もポート名は変わらない。ls -l /dev/serial/by-id/ で表示器（名前に UNO_WiFi_R4）の実体を確かめてから渡す（検出器に書き込まないため）。
 #   遅れの計測: -DBUILD_FLAGS="-DINDICATOR_PROFILE=1"（受けるたびに 1 バイト返す）。led_rule.h は firmware/detector/ へのリンク。
 #   detector と indicator のビルドは同時に走らせない（リンク先のソースを共有する）。
+# UNO Q の MCU 側（firmware/unoq_mcu/、#38、docs/decisions/0035）。SKETCH_NAME=unoq_mcu のとき FQBN は自動で
+# arduino:zephyr:unoq になる（コア arduino:zephyr@1.0.0 と Arduino_RouterBridge@0.4.3 は deps で入る。版は UNO Q の上の版に合わせて固定）。
+# 基底フラグは付かない。書き込みは USB-C を PC に直につなぎ、arduino-cli board list で見えたポート（adb のシリアル番号の見込み）を渡す:
+#   cmake -S . -B build-unoq -DSKETCH_NAME=unoq_mcu -DPORT=<ポート> -DPYTHON3=$PWD/.venv/bin/python3
+#   cmake --build build-unoq --target build && cmake --build build-unoq --target upload
+# Linux 側の Python（device/unoq/）は deploy-unoq で UNO Q の ~/zaitaku-mealpace-device/ に配る（DEPLOY_FILES の一覧だけ。rsync）。
+# 宛先は -DUNOQ_HOST=arduino@unoq.local（既定）。つながらなければ ssh の設定か IP で:
+#   cmake --build build-unoq --target deploy-unoq
+#   ssh arduino@unoq.local 'python3 -B ~/zaitaku-mealpace-device/led_check.py on'
 
 set(SKETCH_NAME "logger" CACHE STRING "firmware/ の下のスケッチ名")
-# FQBN はスケッチ名で決める（人が渡す値は無い）。表示器（indicator）だけが UNO R4 WiFi、他は Nano RP2040 Connect。
+# FQBN はスケッチ名で決める（人が渡す値は無い）。表示器（indicator）は UNO R4 WiFi、unoq_mcu は UNO Q、他は Nano RP2040 Connect。
 # 普通の変数なので、前の configure で CACHE に残った FQBN（#29 までの build-indicator には Nano の値が残っている）は使わない。
 if(SKETCH_NAME STREQUAL "indicator")
   set(FQBN "arduino:renesas_uno:unor4wifi")
+elseif(SKETCH_NAME STREQUAL "unoq_mcu")
+  set(FQBN "arduino:zephyr:unoq")
 else()
   set(FQBN "arduino:mbed_nano:nanorp2040connect")
 endif()
@@ -80,6 +91,8 @@ add_custom_target(deps
   COMMAND ${ARDUINO_CLI} core install arduino:renesas_uno
   COMMAND ${ARDUINO_CLI} lib install Arduino_LSM6DSOX
   COMMAND ${ARDUINO_CLI} lib install WiFiNINA
+  COMMAND ${ARDUINO_CLI} core install arduino:zephyr@1.0.0
+  COMMAND ${ARDUINO_CLI} lib install Arduino_RouterBridge@0.4.3
   COMMAND ${PYTHON3} -m pip install -r ${CMAKE_SOURCE_DIR}/tools/requirements.txt
   COMMENT "ボードコアとライブラリ、Python 依存の導入")
 
@@ -107,3 +120,16 @@ add_custom_target(record
           ${PYTHON3} ${CMAKE_SOURCE_DIR}/tools/record.py
           --port ${PORT}
   COMMENT "記録（PC 側）。SUBJECT=self COND=water POSITION=midline-below-thyroid DURATION=10")
+
+# UNO Q の Linux 側への配置（#38、docs/decisions/0035）。device/unoq/DEPLOY_FILES に書いたファイルだけを
+# UNO Q の ~/zaitaku-mealpace-device/ に rsync で送る。一覧に絶対パス・".."・data/ の行があれば送らずに止まる。
+# --delete は使わない（一覧の外は消さない。配った後に ls で一覧と一致するかを見る）。
+# 記録（record）の間は配ったプログラムを動かさない（0028 決定 3）。消すときは ssh で rm -r ~/zaitaku-mealpace-device。
+set(UNOQ_HOST "arduino@unoq.local" CACHE STRING "deploy-unoq の宛先（ssh の user@host）")
+set(UNOQ_DEPLOY_LIST "${CMAKE_SOURCE_DIR}/device/unoq/DEPLOY_FILES")
+find_program(RSYNC rsync)
+add_custom_target(deploy-unoq
+  COMMAND sh -c "if grep -n -E '^/|[.][.]|(^|/)data/' \"$1\"; then echo 'DEPLOY_FILES に配れない行がある（絶対パス、..、data/）' >&2; exit 1; fi" sh ${UNOQ_DEPLOY_LIST}
+  COMMAND ${RSYNC} -a --files-from=${UNOQ_DEPLOY_LIST} ${CMAKE_SOURCE_DIR}/device/unoq/ ${UNOQ_HOST}:zaitaku-mealpace-device/
+  COMMENT "UNO Q の Linux 側へ配る（${UNOQ_HOST}:zaitaku-mealpace-device/）"
+  VERBATIM)
