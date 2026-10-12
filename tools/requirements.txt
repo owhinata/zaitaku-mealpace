@@ -1,3 +1,7 @@
 pyserial>=3.5
 numpy>=1.26
 scikit-learn>=1.9
+# 咽喉マイクの経路（resample_poly。#39）と #43 の特徴量・図（docs/decisions/0033）
+scipy==1.18.1
+librosa==1.0.0
+matplotlib==3.11.2

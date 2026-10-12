@@ -7,6 +7,7 @@ PC 側の解析・評価。ファームウェアが何で書かれていても�
 - `evaluate.py`   `docs/evaluation.md` の定義でイベント単位の検出率・誤検出率を出す
 - `split.py`      セッション単位で学習／評価を分ける（窓単位の分割は実装しない）
 - `train_eval.py` M1 の分岐点: ロジスティック回帰で学習し、上の3つを使って採点した報告を出す（`--throat` で咽喉マイクのセッション。M3）
+- `features_v2.py`・`postprocess.py`・`compare.py`・`visualize.py` 咽喉マイクの特徴量の組と後処理を学習側の交差検証だけで比べ、図にする（#43、docs/decisions/0033）
 - `evaluate_detector.py` M2 の検出器のセッション（`detect.csv`・`events.csv`）を `evaluate.py` の数え方で採点した報告を出す（#23、docs/decisions/0021）
 - `led_rule.py`   `detect.csv` の `positive` と `window_t_ms` から LED の状態（1 黄 / 2 緑）を docs/decisions/0018 の規則で再計算する（#25。`firmware/detector/led_rule.h` と同じ式。評価には使わない）
 - `ei_upload.py`  M2 の特徴量ベクトル（1 窓 1 項目）を Edge Impulse に投入する（#21。生の音声・IMU は上げない）
@@ -269,6 +270,50 @@ python analysis/train_eval.py data/raw --eval-min 7 --throat --final         # �
 - 依存: 咽喉マイクの経路だけ scipy を使う（`.venv` にある）。scipy と `tools/throat_check.py` は咽喉マイクの経路の関数の中で読み込み、
   M1 の経路は numpy だけで動く。**再現の条件**は上の M1 の条件に scipy の版を足したもの（`resample_poly` が採点の経路に入る）。
 
+## 咽喉マイクの特徴量の組と後処理の比較（`features_v2.py`・`postprocess.py`・`compare.py`・`visualize.py`。#43）
+
+式・格子・選び方は `docs/decisions/0033-throat-mic-feature-set-comparison.md`（学習側の数字を見る前に固定）。手順は 0014・0032 のまま
+（ラベル、正規化、ロジスティック回帰、閾値の格子と規則、止まる条件、評価側 = 最後の 1 収集日）。**学習側（収集日 1）だけを読む。**
+評価側は `split_sessions` が返す名前だけを扱い、`throat.wav`・`throat_chunks.csv`・`events.csv` を開かない。評価側を採点する引数は無い
+（評価側の数字は #40 で、選んだ組について 1 回だけ）。
+
+```
+python analysis/compare.py data/raw --eval-min 7                                   # 比較の表（標準出力に Markdown）
+python analysis/compare.py data/raw --eval-min 7 --figures docs/log/<日付>-43       # 選んだ行の図も描く
+python analysis/visualize.py data/raw --eval-min 7 --set a52 --post hyst --out docs/log/<日付>-43 [--sessions <名前> ...]
+```
+
+- `features_v2.py`: 組 `base15`（0012 の 15 次元。`features._audio_features` と同じ値を librosa の部品で）、`a52`（MFCC 13 係数、メル 26 本
+  0〜4000 Hz の、窓内の平均・最大・標準偏差・デルタの絶対値の平均。52）、`base15_mw`・`a52_mw`（同じ式を判定の窓と中心をそろえた
+  0.5・1.0・2.0 秒に当てて並べる。45・156）、CNN の入力 `mfe40`（対数メル 40 本 0〜4000 Hz、98 × 40）。中心はメモリ上の信号から作る
+  `window_features(x16k, starts, feature_set, lo, hi)`・`features_one(seg_by_length, feature_set)`・`mfe_one(seg)` で、セッションフォルダの
+  読み込みは外側の `extract(session_dir, feature_set)`・`extract_mfe(session_dir)` だけ。窓の格子・`valid`・記録の範囲・サンプルの時刻は
+  `features._throat_windows`（`extract_throat_session` と同じもの）。CNN の numpy の順伝播 `cnn_forward` もここ（装置と PC で同じ）。
+- **`o start` より前の音**: 16 kHz の信号はセッション全体を `resample_poly` で落としてから窓を切る（`extract_throat_session` と同じ）。
+  保証するのは窓の選び方で、どの窓（0.5・2.0 秒を含む）も `[lo, hi)`（`lo` = `o start` に最も近いサンプル、`hi` = 時刻が範囲の終わりより
+  前のサンプルの数）の外を切り出さない（2.0 秒の窓は範囲の端で切り詰める）。リサンプルのフィルタの裾（数 ms）による `o start` 直前の音の
+  混入は `extract_throat_session`（基準 15 次元）と同じで、変えない。
+- 複数窓の 0.5・2.0 秒の窓の開始は、判定の窓の開始サンプルからの固定の差（+4000 / −8000 サンプル）。2.0 秒の窓は判定の窓の終端より
+  0.5 秒先の音を要るので、装置では結果が 0.5 秒遅れて出る（報告の「追加の待ち時間」。採点はこの遅れを含まない）。
+- `postprocess.py`: `threshold(prob, valid, thr)`（`train_eval.positive_windows` と同じ規則）と `hysteresis(prob, valid, enter, exit, t_start_s)`
+  （初期は陰性、陰性のとき `valid` かつ `prob >= enter` で入り、陽性のとき `prob < exit` か `valid = False` で出る）。格子 `HYST_GRID` は
+  enter 0.05〜0.95、exit = enter − 0.1 / 0.2 / 0.3（exit ≥ 0.05）の 45 点。多数決は入れない。
+- `compare.py`: 組 5 つ × 後処理 2 = 10 行。ロジスティック回帰は `train_eval.cross_validate`、CNN は同じ fold（`cv_groups`）で fold の学習側
+  だけで正規化（メルの帯域ごと）・陽性の重み・学習（PyTorch、CPU、種 0、決定的、4 スレッド）。採点の確率は numpy の順伝播。閾値は
+  `train_eval.threshold_table`・`pick_threshold`、ヒステリシスは格子の各点を同じ規則で選ぶ。**#40 の候補はロジスティック回帰の 8 行だけ**
+  （CNN の 2 行と種 1・2 は参考）。報告は標準出力だけ（ファイルを書かない）。波形・特徴量の値・個々の窓の確率は出さない。
+- `visualize.py`: 学習側のセッションだけ（評価側・`self` 以外は止まる）。PNG は `docs/log/` の下だけ（外は止まる）、100 dpi。
+  セッションごとの図（窓平均 RMS、窓平均メル（0.25 秒ごと）、マーカー、陽性確率、後処理後の陽性、検出／見逃し／誤検出）、イベントごとの
+  小図（`s` の前後 2 秒の 20 ms の包絡とフレームごとのメル。検出・見逃し・誤検出から各 4 件、1 枚に 2 件）、組の比較の散布図。
+  1 枚の細かい表示（波形と 25 ms 以下の時間分解能）の合計が 10 秒を超えたら止まる（0033 の 6）。
+- 依存: librosa・matplotlib（`tools/requirements.txt`）、PyTorch CPU（`analysis/requirements-cnn.txt`。CPU の索引から入れる）。
+  `features.py`・`evaluate.py`・`split.py`・`train_eval.py` はこれらを読まない。torch は CNN の学習の関数の中でだけ読む。
+- **再現の条件**: 同じコミット・同じ依存の版（報告の実行の条件に `.venv` の全パッケージの版を出す）・同じ実行環境で同じ報告
+  （末尾の「時間の実測」の節を除く）。CNN は PyTorch の版・CPU の命令セットをまたいだ一致を保証しない。
+  librosa のキャッシュの環境変数（`LIBROSA_CACHE_DIR`（空でも）、`LIBROSA_CACHE_VERBOSE` > 0）や import 済みの librosa のキャッシュが
+  有効なときは、特徴量をディスク・標準出力に出さないため `features_v2.py` が止まる（環境変数を外して実行し直す）。
+- 計算の時間（D8）: 1 回の実行が PC で 30 分以内の予算。CNN の学習（14 fold × 20 エポック × 種 3 つ）が大半を占める。
+
 ## 検出器の評価（`evaluate_detector.py`）
 
 M2 の数字（#27）を出す。検出器ファームウェア（#24）で録ったセッションには `imu.csv`・`audio_chunks.csv` が無く、
@@ -411,6 +456,11 @@ EI_API_KEY=... python analysis/ei_testing_result.py data/raw --project-id <ID>
 `test_features.py`・`test_features_m2.py`・`test_ei_upload.py`・`test_m2_*.py` は numpy、`test_train_eval.py` は numpy と scikit-learn を使う。
 咽喉マイクの経路のテスト（`test_features.py`・`test_evaluate.py`・`test_train_eval.py` の Throat の付くクラス）は、48 kHz・2 ch の
 合成の `throat.wav` を一時フォルダに作り、scipy と `tools/throat_check.py` を使う。
+#43 のテスト（`test_features_v2.py`・`test_postprocess.py`・`test_throat_compare.py`・`test_visualize.py`）は librosa・matplotlib・torch を使い、
+`test_throat_compare.py`・`test_visualize.py` は合成の咽喉マイクのセッション 6 本で交差検証（CNN を含む）を回すので 1 分ほど掛かる。
+`compare.py` のテストの名前が `test_compare.py` でないのは、`test_ei_upload.py` より前に並ぶテストのモジュールがあると、unittest が
+モジュールの終わりに登録済みの片付けを全部実行し、`test_ei_upload.py` が import の時点で作った一時フォルダが先に消えるため。
+図は一時フォルダに書く（`visualize.LOG_ROOT` を差し替える）。
 ほかは標準ライブラリの `unittest` だけで動く。
 合成データは一時フォルダに作り、`data/` は使わない。`test_train_eval.py` は 60 秒の合成セッションを 9 つ作って
 学習を繰り返すので、20 秒ほど掛かる。#22 のテストは実行ファイルを一時フォルダの Python スクリプトで、EI の送受信を偽の応答で差し替え、

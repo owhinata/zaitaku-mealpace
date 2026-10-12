@@ -522,14 +522,15 @@ def _check_throat_chunks(idx: np.ndarray, n: int, session: Path) -> None:
         )
 
 
-def extract_throat_session(session_dir: Path) -> WindowFeatures:
-    """咽喉マイクのセッション1つの窓ごとの音の 15 次元（正規化前）。
+def _throat_windows(session_dir: Path) -> tuple:
+    """咽喉マイクのセッションの 16 kHz の信号と窓の格子（extract_throat_session と
+    analysis/features_v2.py で共有する。plan #43 D7）。
 
-    窓は M1 の extract_session と同じ作り方（1.0 秒 / 0.25 秒、窓の開始に最も近い
-    サンプルから 16000 サンプル）で、範囲は o start から最後のサンプルの時刻まで
-    （evaluate.throat_session_span）。valid は 16000 サンプルに満たない窓だけ
-    False。throat_check.check() の flags（overrun の行・推定差・段差）に当たる
-    セッションは止まる。叩きの tap_flags では止めない（docs/decisions/0031）。
+    戻り値 (x16k, sample_t, t_start, start_idx, valid, t0_s, t1_s):
+    x16k は L（ch0）を 16 kHz に落とした float32、sample_t は 16 kHz のサンプル
+    0〜len(x16k) の時刻（秒。最後は最終サンプルの直後）、t_start は窓の開始時刻、
+    start_idx は各窓の開始に最も近いサンプルの番号、valid は 16000 サンプルが
+    そろう窓、[t0_s, t1_s) は記録の範囲（evaluate.throat_session_span と同じ）。
     """
     import evaluate  # 範囲の計算を二重に持たない
 
@@ -562,17 +563,34 @@ def extract_throat_session(session_dir: Path) -> WindowFeatures:
         else 0
     )
     t_start = t_lo + HOP_S * np.arange(nw)
-    X = np.zeros((nw, N_AUDIO_FEATURES), dtype=np.float32)
+    start_idx = np.zeros(nw, dtype=np.int64)
     valid = np.ones(nw, dtype=bool)
     for k, st in enumerate(t_start):
         # 窓の開始時刻に最も近いサンプルから 16000 サンプル固定（M1 と同じ）
         i = int(np.searchsorted(sample_t[:-1], st, side="left"))
         if i > 0 and (i == len(x) or st - sample_t[i - 1] <= sample_t[i] - st):
             i -= 1
-        seg = x[i : i + WINDOW_SAMPLES]
-        X[k] = _audio_features(seg)
-        if len(seg) < WINDOW_SAMPLES:
+        start_idx[k] = i
+        if len(x[i : i + WINDOW_SAMPLES]) < WINDOW_SAMPLES:
             valid[k] = False
+    return x, sample_t, t_start, start_idx, valid, t_lo, t_hi
+
+
+def extract_throat_session(session_dir: Path) -> WindowFeatures:
+    """咽喉マイクのセッション1つの窓ごとの音の 15 次元（正規化前）。
+
+    窓は M1 の extract_session と同じ作り方（1.0 秒 / 0.25 秒、窓の開始に最も近い
+    サンプルから 16000 サンプル）で、範囲は o start から最後のサンプルの時刻まで
+    （evaluate.throat_session_span）。valid は 16000 サンプルに満たない窓だけ
+    False。throat_check.check() の flags（overrun の行・推定差・段差）に当たる
+    セッションは止まる。叩きの tap_flags では止めない（docs/decisions/0031）。
+    信号と窓の格子は _throat_windows。
+    """
+    session_dir = Path(session_dir)
+    x, _, t_start, start_idx, valid, _, _ = _throat_windows(session_dir)
+    X = np.zeros((len(t_start), N_AUDIO_FEATURES), dtype=np.float32)
+    for k, i in enumerate(start_idx):
+        X[k] = _audio_features(x[i : i + WINDOW_SAMPLES])
     return WindowFeatures(
         session=session_dir.name, t_start_s=t_start, X=X, valid=valid
     )

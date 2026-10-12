@@ -1,0 +1,4 @@
+# #43 の案B（小さな CNN）の学習だけに使う（docs/decisions/0033）。推論は numpy なので
+# 装置には要らない。CPU 版のホイールを CPU の索引から入れる:
+#   .venv/bin/pip install -r analysis/requirements-cnn.txt --index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
