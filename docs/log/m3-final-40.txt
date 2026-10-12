@@ -1,0 +1,5 @@
+# #40 評価側の採点の印（docs/decisions/0034）。この印があれば analysis/final_eval.py は止まる
+started: 2026-10-13T05:30:25+09:00
+commit: 45f329eb43dc108a8bdf331141fcdb29ddadcbf8
+decision: docs/decisions/0034-throat-mic-final-eval-cnn-judgment.md
+command: python analysis/final_eval.py data/raw
