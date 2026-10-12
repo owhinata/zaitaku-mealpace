@@ -4,15 +4,21 @@
 手順の定義と理由は docs/decisions/0014。実データを見る前に固定し、
 結果を見てから動かさない。
 
-使い方: python analysis/train_eval.py <root> --eval-min <N> [--final]
+使い方: python analysis/train_eval.py <root> --eval-min <N> [--final] [--throat]
   既定      学習側のセッションだけを使い、交差検証の数字と閾値を出す。
             評価側は採点しない
             （評価側の imu.csv・audio.wav・audio_chunks.csv・events.csv
             を開かない）。
   --final   上に加えて、評価側を1回採点する。
+  --throat  咽喉マイクのセッション（fw = pc-throat）だけで分割・学習・評価する
+            （docs/decisions/0031）。評価側は最後の1収集日
+            （THROAT_EVAL_DAYS。docs/decisions/0032）で、M1 は最後の2収集日
+            （EVAL_DAYS）。評価側の日数は引数では選べない。既定の実行では
+            評価側の throat.wav・throat_chunks.csv・events.csv を開かない。
 
-分割は split.split_sessions、特徴量は features.extract_session、数え方は
-evaluate.event_metrics / aggregate。
+分割は split.split_sessions、特徴量は features.extract_session（--throat では
+features.extract_throat_session、記録の範囲は evaluate.throat_session_span）、
+数え方は evaluate.event_metrics / aggregate。
 報告は標準出力に Markdown で出す。ファイルは書かない（モデル・特徴量・確率を保存
 しない）。
 波形、特徴量の値、個々の窓の確率は出さない。
@@ -33,6 +39,9 @@ import evaluate, features, split
 # --- 定数（docs/decisions/0014。結果を見てから動かさない） ---
 SUBJECT = "self"  # docs/evaluation.md「M1・M2 の数字は self のみ」
 EVAL_DAYS = 2  # 評価側は最後の2収集日（docs/recording-protocol.md）
+# 咽喉マイク（--throat）の評価側は最後の1収集日（docs/decisions/0032）。
+# 実行時に選べる引数にはしない
+THROAT_EVAL_DAYS = 1
 LABEL_POS_S = 1.0  # 窓の中心が [t, t + 1.0] に入る窓が陽性
 # 中心が [t − 0.5, t) か (t + 1.0, t + 1.5] の窓は学習に使わない
 LABEL_MARGIN_S = 0.5
@@ -97,6 +106,7 @@ class Result:
     eval_total: dict | None
     eval_reference: dict | None
     eval_windows: tuple | None
+    throat: bool = False  # 咽喉マイクの経路（--throat）
 
 
 # --- 分割の検査 ---
@@ -107,22 +117,25 @@ def _day(name: str) -> str:
     return name[:8]
 
 
-def check_collection_days(train: Sequence[str], eval_: Sequence[str]) -> None:
-    """評価側がちょうど 2 収集日、学習側が 1 収集日以上で、
+def check_collection_days(
+    train: Sequence[str], eval_: Sequence[str], eval_days: int = EVAL_DAYS
+) -> None:
+    """評価側がちょうど eval_days 収集日（M1 は 2、咽喉マイクは 1。
+    docs/decisions/0032）、学習側が 1 収集日以上で、
     学習側のどの日も評価側のどの日より前。外れたら止まる。"""
-    train_days = sorted({_day(n) for n in train})
-    eval_days = sorted({_day(n) for n in eval_})
-    if len(eval_days) != EVAL_DAYS:
+    train_dates = sorted({_day(n) for n in train})
+    eval_dates = sorted({_day(n) for n in eval_})
+    if len(eval_dates) != eval_days:
         raise SystemExit(
-            f"評価側の収集日が {EVAL_DAYS} 日ではありません（{len(eval_days)} 日: "
-            f"{', '.join(eval_days)}）。--eval-min は最後の2収集日のセッション数にしてください"
+            f"評価側の収集日が {eval_days} 日ではありません（{len(eval_dates)} 日: "
+            f"{', '.join(eval_dates)}）。--eval-min は最後の{eval_days}収集日のセッション数にしてください"
         )
-    if not train_days:
+    if not train_dates:
         raise SystemExit("学習側の収集日がありません（1 日以上が必要）")
-    if train_days[-1] >= eval_days[0]:
+    if train_dates[-1] >= eval_dates[0]:
         raise SystemExit(
-            f"学習側と評価側の収集日が重なっています（学習側の最後 {train_days[-1]}、"
-            f"評価側の最初 {eval_days[0]}）。--eval-min は最後の2収集日のセッション数にしてください"
+            f"学習側と評価側の収集日が重なっています（学習側の最後 {train_dates[-1]}、"
+            f"評価側の最初 {eval_dates[0]}）。--eval-min は最後の{eval_days}収集日のセッション数にしてください"
         )
 
 
@@ -145,10 +158,16 @@ def window_labels(
     return labels
 
 
-def load_session(session_dir: Path) -> SessionData:
-    f = features.extract_session(session_dir)
+def load_session(session_dir: Path, extract=None, span=None) -> SessionData:
+    """extract（特徴量）と span（記録の範囲）を省くと M1 の
+    features.extract_session と evaluate.session_span（呼ぶ時点で引く）。"""
+    if extract is None:
+        extract = features.extract_session
+    if span is None:
+        span = evaluate.session_span
+    f = extract(session_dir)
     swallows = evaluate.load_events(session_dir)
-    t0_s, duration_s = evaluate.session_span(session_dir)
+    t0_s, duration_s = span(session_dir)
     return SessionData(
         name=session_dir.name,
         feats=f,
@@ -362,12 +381,30 @@ def _cond(name: str) -> str:
     return name.rsplit("_", 1)[-1]
 
 
-def run(root: Path, eval_min: int, final: bool = False) -> Result:
+def run(
+    root: Path, eval_min: int, final: bool = False, throat: bool = False
+) -> Result:
     root = Path(root)
-    parts = split.split_sessions(root, eval_min, subject=SUBJECT)
-    check_collection_days(parts["train"], parts["eval"])
+    if throat:
+        # 咽喉マイクのセッションだけで分割・学習・評価する（docs/decisions/0031・0032）
+        parts = split.split_sessions(
+            root, eval_min, subject=SUBJECT, kind="throat"
+        )
+        check_collection_days(parts["train"], parts["eval"], THROAT_EVAL_DAYS)
 
-    train = [load_session(root / name) for name in parts["train"]]
+        def load(p):
+            return load_session(
+                p,
+                features.extract_throat_session,
+                evaluate.throat_session_span,
+            )
+
+    else:
+        parts = split.split_sessions(root, eval_min, subject=SUBJECT)
+        check_collection_days(parts["train"], parts["eval"])
+        load = load_session
+
+    train = [load(root / name) for name in parts["train"]]
     folds, cv_scored = cross_validate(train)
     table = threshold_table(cv_scored)
     threshold, rule = pick_threshold(table)
@@ -375,7 +412,7 @@ def run(root: Path, eval_min: int, final: bool = False) -> Result:
 
     per_session = conds = total = eval_reference = eval_windows = None
     if final:
-        eval_data = [load_session(root / name) for name in parts["eval"]]
+        eval_data = [load(root / name) for name in parts["eval"]]
         eval_scored = [score(model, d) for d in eval_data]
         per_session = {
             s.data.name: session_metrics(s, threshold) for s in eval_scored
@@ -408,6 +445,7 @@ def run(root: Path, eval_min: int, final: bool = False) -> Result:
         eval_total=total,
         eval_reference=eval_reference,
         eval_windows=eval_windows,
+        throat=throat,
     )
 
 
@@ -468,17 +506,44 @@ def _meets(ok: bool | None) -> str:
 
 def format_report(r: Result) -> str:
     """Markdown の報告。波形、特徴量の値、個々の窓の確率は入れない。"""
-    out = ["# M1 分岐点: 手作り特徴量＋ロジスティック回帰", ""]
+    if r.throat:
+        import scipy  # 咽喉マイクの経路だけ（resample_poly が採点の経路に入る）
+
+        title = (
+            "# M3 咽喉マイク: 手作り特徴量（音 15 次元）＋ロジスティック回帰"
+        )
+        versions = f"- scikit-learn {sklearn.__version__}、numpy {np.__version__}、scipy {scipy.__version__}"
+        n_dims = features.N_AUDIO_FEATURES
+        target = [
+            "- 対象: 咽喉マイク（`fw` = `pc-throat`、iface `sh12jk-wired-unoq-usbaudio`、"
+            "音 15 次元、IMU なし。docs/decisions/0026・0031）",
+            "- 分割: `kind=throat`",
+            f"- 評価側の収集日: {THROAT_EVAL_DAYS}（docs/decisions/0032。M1 は {EVAL_DAYS} 収集日）",
+        ]
+        pass_heading = (
+            "## 合格線との比較（docs/evaluation.md、M1 分岐点の合格線を咽喉マイクに当てる。"
+            "docs/plan.md の M3 (3)）"
+        )
+    else:
+        title = "# M1 分岐点: 手作り特徴量＋ロジスティック回帰"
+        versions = (
+            f"- scikit-learn {sklearn.__version__}、numpy {np.__version__}"
+        )
+        n_dims = features.N_FEATURES
+        target = []
+        pass_heading = "## 合格線との比較（docs/evaluation.md、M1 分岐点）"
+    out = [title, ""]
     out += [
         "## 実行の条件",
         "",
         f"- 実行: {'--final（評価側を採点した）' if r.final else '既定（学習側だけ。評価側は採点していない）'}",
         f"- `--eval-min`: {r.eval_min}",
         f"- subject: `{SUBJECT}`",
+        *target,
         f"- コミット: {git_commit()}",
-        f"- scikit-learn {sklearn.__version__}、numpy {np.__version__}",
+        versions,
         f'- モデル: LogisticRegression(C={LR_C}, class_weight="{LR_CLASS_WEIGHT}", max_iter={LR_MAX_ITER}, '
-        f'solver="{LR_SOLVER}")、特徴量 {features.N_FEATURES} 次元、窓 {evaluate.WINDOW_S} 秒 / '
+        f'solver="{LR_SOLVER}")、特徴量 {n_dims} 次元、窓 {evaluate.WINDOW_S} 秒 / '
         f"ホップ {evaluate.HOP_S} 秒",
         "- 手順の定義: docs/decisions/0014",
         "",
@@ -573,7 +638,7 @@ def format_report(r: Result) -> str:
     )
     det, fp = t["detection_rate"], t["false_positives_per_min"]
     out += [
-        "## 合格線との比較（docs/evaluation.md、M1 分岐点）",
+        pass_heading,
         "",
         f"- 検出率 {_rate(det)}（合格線 {PASS_DETECTION_RATE:.2f} 以上）: "
         f"{_meets(None if det is None else det >= PASS_DETECTION_RATE)}",
@@ -596,9 +661,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--eval-min",
         type=int,
         required=True,
-        help="最後の2収集日のセッション数",
+        help="評価側の収集日のセッション数（M1 は最後の 2 収集日、--throat は最後の 1 収集日）",
     )
     ap.add_argument("--final", action="store_true", help="評価側を採点する")
+    ap.add_argument(
+        "--throat",
+        action="store_true",
+        help="咽喉マイクのセッション（fw = pc-throat）だけで分割・学習・評価する"
+        "（docs/decisions/0031・0032）",
+    )
     a = ap.parse_args(argv)
     if a.final and git_dirty():
         # 評価側の数字は、コミットから再現できる状態でだけ出す（
@@ -607,7 +678,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "未コミットの変更があります（または git が使えません）。--final は、追跡しているファイルを"
             "コミットしてから実行してください。既定の実行（学習側だけ）は止めません"
         )
-    print(format_report(run(a.root, a.eval_min, a.final)))
+    print(format_report(run(a.root, a.eval_min, a.final, a.throat)))
 
 
 if __name__ == "__main__":

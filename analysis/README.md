@@ -2,11 +2,11 @@
 
 PC 側の解析・評価。ファームウェアが何で書かれていても、`docs/data-schema.md` の形式が入力。
 
-- `features.py`   窓ごとの特徴量（IMU＋音。M1 の式、docs/decisions/0012）
+- `features.py`   窓ごとの特徴量（IMU＋音。M1 の式、docs/decisions/0012。咽喉マイクは音の 15 次元だけ、docs/decisions/0031）
 - `features_m2.py`  窓ごとの特徴量（IMU＋音。M2 の式、docs/decisions/0020。IMU と窓は `features.py` を流用）
 - `evaluate.py`   `docs/evaluation.md` の定義でイベント単位の検出率・誤検出率を出す
 - `split.py`      セッション単位で学習／評価を分ける（窓単位の分割は実装しない）
-- `train_eval.py` M1 の分岐点: ロジスティック回帰で学習し、上の3つを使って採点した報告を出す
+- `train_eval.py` M1 の分岐点: ロジスティック回帰で学習し、上の3つを使って採点した報告を出す（`--throat` で咽喉マイクのセッション。M3）
 - `evaluate_detector.py` M2 の検出器のセッション（`detect.csv`・`events.csv`）を `evaluate.py` の数え方で採点した報告を出す（#23、docs/decisions/0021）
 - `led_rule.py`   `detect.csv` の `positive` と `window_t_ms` から LED の状態（1 黄 / 2 緑）を docs/decisions/0018 の規則で再計算する（#25。`firmware/detector/led_rule.h` と同じ式。評価には使わない）
 - `ei_upload.py`  M2 の特徴量ベクトル（1 窓 1 項目）を Edge Impulse に投入する（#21。生の音声・IMU は上げない）
@@ -199,7 +199,7 @@ python analysis/train_eval.py data/raw --eval-min <N>           # 既定。学�
 python analysis/train_eval.py data/raw --eval-min <N> --final   # 評価側を採点する
 ```
 
-- `--eval-min` は必須。最後の2収集日のセッション数（`docs/recording-protocol.md`）。subject は `self` 固定。
+- `--eval-min` は必須。最後の2収集日のセッション数（`docs/recording-protocol.md`。`--throat` では最後の 1 収集日、下の「咽喉マイク」）。subject は `self` 固定。
 - **既定の実行**は学習側のセッションだけを使い、交差検証の数字と閾値を出す。何度実行してもよい。評価側は
   `meta.json`（`split_sessions` が subject の検査に読む）のほかは開かず、報告にはセッション名だけを出す。
 - **`--final`** を付けたときだけ、評価側を採点する。実行した後は評価側を動かさない。
@@ -234,6 +234,40 @@ python analysis/train_eval.py data/raw --eval-min <N> --final   # 評価側を�
 コミットのハッシュと scikit-learn・numpy の版が、再現の条件。
 追跡しているファイルに未コミットの変更があると、報告のコミットに `-dirty` が付く。`--final` は、その状態では
 採点せずに止まる（先にコミットする）。既定の実行は止まらない。
+
+### 咽喉マイク（`--throat`。M3、docs/decisions/0031・0032）
+
+咽喉マイクのセッション（`meta.json` の `fw` が `pc-throat`、iface `sh12jk-wired-unoq-usbaudio`。docs/decisions/0028・0029）は、
+**咽喉マイクのセッションだけで**分割・学習・評価する（M1 の 28 本・M2 の `meal` と混ぜない）。
+
+```
+python analysis/split.py data/raw --kind throat --eval-min 7                 # 分割の一覧だけ（ファイルの中身は開かない）
+python analysis/train_eval.py data/raw --eval-min 7 --throat                 # 既定。学習側だけ
+python analysis/train_eval.py data/raw --eval-min 7 --throat --final         # 評価側を採点する
+```
+
+- 分割: `split_sessions(root, eval_min, subject="self", kind="throat")`（CLI は `split.py --kind throat`。既定の `kind="m1"` は
+  今までどおり）。`kind="throat"` は `fw` が `pc-throat` のセッションだけを分け、M1 と `detector` は戻り値の `excluded` に並べる。
+  iface が違う、`throat.wav`・`throat_chunks.csv` が無い、`imu.csv`・`audio.wav`・`audio_chunks.csv`・`detect.csv`・`feat.csv` の
+  どれかがある、のときは止まる（`meta.json` とファイルの有無だけを見る）。`kind="m1"` は咽喉マイクのセッションを `train` / `eval` に
+  入れず、戻り値の `throat` に並べる。`fw` が `pc-throat` でないのに `throat.wav` があるセッションは、どちらの `kind` でも止まる。
+  `data/raw/` の直下で名前がちょうど `trial-throat` のディレクトリ（シンボリックリンクでないもの）は読まずに飛ばし、`skipped` に並べる。
+- **評価側の収集日は最後の 1 収集日**（`train_eval.THROAT_EVAL_DAYS = 1`。docs/decisions/0032）。M1 は最後の 2 収集日
+  （`EVAL_DAYS = 2`）のまま。日数は `--throat` の有無だけで決まり、引数では選べない。`--eval-min` は最後の 1 収集日のセッション数。
+  学習側は 1 収集日なので、交差検証は1セッションごと（0014 手順 4）。
+- 特徴量: `features.extract_throat_session`。0012 の音の 15 次元（`AUDIO_FEATURE_NAMES` = `FEATURE_NAMES[14:]`）、IMU なし（0026）。
+  `throat.wav` の L（ch0）を `scipy.signal.resample_poly(x, 1, 3)` で 16 kHz に落とし、32768 で割る。16 kHz のサンプル `j` の時刻は
+  `tools/throat_check.py` の `sample_time_map` の対応で `τ(3j)`（叩きの `Δ` で直さない）。窓の作り方は M1 と同じで、
+  `valid = False` は 16000 サンプルに満たない窓だけ。入力の検査（`fw`、`sample_rates.audio_hz` と WAV のヘッダが 48000、2 ch・16 bit、
+  `sample_index` が 0 から厳密に増加して N 未満）と、`throat_check.check()` の `flags`（overrun の行・`|推定差|` > 125 ms・段差）に
+  当たるセッションは `ValueError` で止まる。叩きの `tap_flags` では止めない。
+- 記録の範囲: `evaluate.throat_session_span`。始まり = `events.csv` の `o start`（note が `start` の `o`）の `t_ms`、終わり = 最後の
+  サンプルの時刻 `τ(N)`。`o start` が無い・2 つ以上、始まりが終わり以降、`throat_chunks.csv` の `t_ms` の逆行・1 秒超の飛びは止まる。
+  `s` 以外のマーカーが `o start` より前にあっても止めない（範囲の外の `s` は `event_metrics` がエラー）。
+- 既定の実行では評価側の `throat.wav`・`throat_chunks.csv`・`events.csv` を開かない。報告の見出しは「M3 咽喉マイク」、
+  実行の条件に対象・`kind=throat`・評価側の収集日（1）・scipy の版が出る。M3 の数字を M1 と並べるときは「評価側 1 収集日」を注記する。
+- 依存: 咽喉マイクの経路だけ scipy を使う（`.venv` にある）。scipy と `tools/throat_check.py` は咽喉マイクの経路の関数の中で読み込み、
+  M1 の経路は numpy だけで動く。**再現の条件**は上の M1 の条件に scipy の版を足したもの（`resample_poly` が採点の経路に入る）。
 
 ## 検出器の評価（`evaluate_detector.py`）
 
@@ -375,6 +409,8 @@ EI_API_KEY=... python analysis/ei_testing_result.py data/raw --project-id <ID>
 `test_m2_norm_header.py`・`test_m2_scorer.py`・`test_m2_threshold.py`・`test_m2_ei_testing_result.py`・`test_led_rule.py`）で固定している。
 `test_led_rule.py` の入力の表は `firmware/detector/host/test_detector.cpp` の `test_led_rule` と同じ（値を両方に書いてある）。
 `test_features.py`・`test_features_m2.py`・`test_ei_upload.py`・`test_m2_*.py` は numpy、`test_train_eval.py` は numpy と scikit-learn を使う。
+咽喉マイクの経路のテスト（`test_features.py`・`test_evaluate.py`・`test_train_eval.py` の Throat の付くクラス）は、48 kHz・2 ch の
+合成の `throat.wav` を一時フォルダに作り、scipy と `tools/throat_check.py` を使う。
 ほかは標準ライブラリの `unittest` だけで動く。
 合成データは一時フォルダに作り、`data/` は使わない。`test_train_eval.py` は 60 秒の合成セッションを 9 つ作って
 学習を繰り返すので、20 秒ほど掛かる。#22 のテストは実行ファイルを一時フォルダの Python スクリプトで、EI の送受信を偽の応答で差し替え、

@@ -56,6 +56,52 @@ def session_span(session: Path) -> tuple[float, float]:
     return min(t_ms) / 1000.0, (max(t_ms) - min(t_ms)) / 1000.0
 
 
+def throat_span(ses: dict, tc, c0: float, s: float) -> tuple[float, float]:
+    """咽喉マイクのセッション（throat_check.load_session の戻り値）の記録の範囲
+    (t0_s, duration_s)。tc は throat_check、(c0, s) は sample_time_map の対応。
+
+    始まり = events.csv の o で note が start の行の t_ms、終わり = 最後のサンプル
+    の時刻 τ(N)（N は 48 kHz のフレーム数）（docs/decisions/0031）。o start が
+    無い・2 つ以上、始まりが終わり以降、throat_chunks.csv の t_ms の逆行・
+    MAX_GAP_MS を超える飛びは止める。s 以外のマーカーが o start より前にあっても
+    止めない（範囲の外の s は event_metrics がエラーにする。0011）。
+    """
+    where = ses["dir"]
+    ts = [float(t) for t in ses["chunk_t_ms"]]
+    for a, b in zip(ts, ts[1:]):
+        if b < a or b - a > MAX_GAP_MS:
+            raise ValueError(
+                f"throat_chunks.csv の t_ms が逆行したか {MAX_GAP_MS} ms を超えて飛んでいます: "
+                f"{a:g} → {b:g} ({where})"
+            )
+    starts = [
+        t
+        for t, label, note in ses["events"]
+        if label == "o" and note.strip() == "start"
+    ]
+    if len(starts) != 1:
+        raise ValueError(
+            f"events.csv の o start がちょうど 1 つではありません（{len(starts)} 個）: {where}"
+        )
+    t0_ms = starts[0]
+    end_ms = float(tc.sample_to_time(len(ses["wav"]), c0, s, ses["fs"]))
+    if t0_ms >= end_ms:
+        raise ValueError(
+            f"o start ({t0_ms:g} ms) が最後のサンプルの時刻 ({end_ms:.1f} ms) 以降です: {where}"
+        )
+    return t0_ms / 1000.0, (end_ms - t0_ms) / 1000.0
+
+
+def throat_session_span(session: Path) -> tuple[float, float]:
+    """咽喉マイクのセッションの記録の範囲 (t0_s, duration_s)。throat_span を参照。"""
+    import features  # tools/throat_check.py の読み込みは features に 1 つだけ置く
+
+    tc = features.throat_check_module()
+    ses = tc.load_session(session)
+    c0, s = tc.sample_time_map(ses)
+    return throat_span(ses, tc, c0, s)
+
+
 def _hits(w: float, t: float) -> bool:
     """陽性窓 [w, w+1.0] の中心が、嚥下 t の閉区間 [t-0.5, t+1.5] に入るか。
     検出と誤検出で共通。"""

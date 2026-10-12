@@ -815,5 +815,270 @@ class RunTest(SynthCase):
             train_eval.main([str(self.root)])
 
 
+# --- 咽喉マイク（--throat。docs/decisions/0031・0032。plan #39 ステップ B の
+# テスト 13〜16） ---
+
+THROAT_DAYS = ("20261011", "20261012")
+THROAT_SWALLOWS_S = (8.0, 16.0, 24.0, 32.0)  # 本当の秒。o start は 3 秒
+THROAT_EVAL_FILES = ("throat.wav", "throat_chunks.csv", "events.csv")
+
+
+def synth_throat(root: Path, name: str, swallows, seed: int) -> Path:
+    """40 秒の咽喉マイクの合成。嚥下 = マーカーから 0.8 秒の 300 Hz のバースト。"""
+    from test_features import make_throat_session
+
+    def sig(t):
+        on = np.zeros(len(t), bool)
+        for s in swallows:
+            on |= (t >= s) & (t < s + BURST_S)
+        return np.where(on, 0.3 * np.sin(2 * np.pi * 300 * t), 0.0)
+
+    return make_throat_session(
+        root,
+        name,
+        signal=sig,
+        noise_lsb=300.0,
+        events=[(s, "s", "") for s in swallows],
+        seed=seed,
+    )["dir"]
+
+
+class ThroatCase(unittest.TestCase):
+    """2 収集日 × 3 セッション（water ×2、quiet）。収集日 1 が学習側、収集日 2 が
+    評価側（最後の 1 収集日）。"""
+
+    tmp = None
+
+    @classmethod
+    def setUpClass(cls):
+        if ThroatCase.tmp is None:
+            tmp = tempfile.TemporaryDirectory()
+            unittest.addModuleCleanup(tmp.cleanup)
+            ThroatCase.tmp = Path(tmp.name)
+            ThroatCase.root = ThroatCase.tmp / "base"
+            ThroatCase.root.mkdir()
+            ThroatCase.names = []
+            for i, day in enumerate(THROAT_DAYS):
+                for j, (hms, cond, first) in enumerate(SLOTS):
+                    name = f"{day}-{hms}_self_{cond}"
+                    synth_throat(
+                        ThroatCase.root,
+                        name,
+                        THROAT_SWALLOWS_S if first is not None else (),
+                        seed=200 + 10 * i + j,
+                    )
+                    ThroatCase.names.append(name)
+            # M1・detector のセッションと trial-throat が同じ root にあっても混ざらない
+            synth_session(
+                ThroatCase.root, "20260901-100000_self_water", "water", [8.0], 1
+            )
+            (ThroatCase.root / "trial-throat").mkdir()
+            ThroatCase.train_names = ThroatCase.names[:3]
+            ThroatCase.eval_names = ThroatCase.names[3:]
+            ThroatCase.default = train_eval.run(ThroatCase.root, 3, throat=True)
+            ThroatCase.final = train_eval.run(
+                ThroatCase.root, 3, final=True, throat=True
+            )
+
+
+class ThroatRunTest(ThroatCase):
+    def guards(self, forbidden):
+        calls: dict[str, list[str]] = {}
+        stack = contextlib.ExitStack()
+        for mod, fn in (
+            (features, "extract_throat_session"),
+            (evaluate, "load_events"),
+            (evaluate, "throat_session_span"),
+        ):
+            real = getattr(mod, fn)
+
+            def guard(session, *a, _real=real, _fn=fn, **kw):
+                name = Path(session).name
+                if name in forbidden:
+                    raise AssertionError(
+                        f"評価側のセッションで {_fn} が呼ばれた: {name}"
+                    )
+                calls.setdefault(_fn, []).append(name)
+                return _real(session, *a, **kw)
+
+            stack.enter_context(mock.patch.object(mod, fn, side_effect=guard))
+        # M1 の読み込みは呼ばれない
+        for mod, fn in (
+            (features, "extract_session"),
+            (evaluate, "session_span"),
+        ):
+            stack.enter_context(
+                mock.patch.object(mod, fn, side_effect=AssertionError(fn))
+            )
+        return stack, calls
+
+    def test_t13_default_run_uses_only_train_side(self):
+        stack, calls = self.guards(self.eval_names)
+        with stack:
+            r = train_eval.run(self.root, 3, throat=True)
+        for fn in (
+            "extract_throat_session",
+            "load_events",
+            "throat_session_span",
+        ):
+            self.assertEqual(calls[fn], self.train_names, fn)
+        self.assertEqual(r.train, self.train_names)
+        self.assertEqual(r.eval, self.eval_names)
+        self.assertEqual(r.threshold, self.default.threshold)
+        # 1 セッションごとの交差検証（学習側は 1 収集日）
+        self.assertEqual(
+            [f.val_sessions for f in r.folds], [(n,) for n in self.train_names]
+        )
+        self.assertIsNone(r.eval_total)
+
+    def test_t13_default_run_works_without_eval_files(self):
+        root = self.tmp / "throat-no-eval-files"
+        root.mkdir()
+        for n in self.names:
+            shutil.copytree(self.root / n, root / n)
+        for n in self.eval_names:
+            for f in THROAT_EVAL_FILES:
+                (root / n / f).unlink()
+        # split はファイルの有無を見るので空のファイルを置く（既定の実行では
+        # 中身は開かれない。--final は読めずに止まる）
+        for n in self.eval_names:
+            for f in ("throat.wav", "throat_chunks.csv"):
+                (root / n / f).write_bytes(b"")
+        r = train_eval.run(root, 3, throat=True)
+        self.assertEqual(r.cv_table, self.default.cv_table)
+        with self.assertRaises(Exception):
+            train_eval.run(root, 3, final=True, throat=True)
+
+    def test_t13_default_report(self):
+        text = train_eval.format_report(self.default)
+        self.assertIn(
+            "# M3 咽喉マイク: 手作り特徴量（音 15 次元）＋ロジスティック回帰",
+            text,
+        )
+        self.assertIn("特徴量 15 次元", text)
+        self.assertIn("`kind=throat`", text)
+        self.assertIn(
+            "評価側の収集日: 1（docs/decisions/0032。M1 は 2 収集日）", text
+        )
+        self.assertIn("scipy ", text)
+        self.assertIn("評価側は採点していない", text)
+        self.assertNotIn("混同行列", text)
+        for n in self.names:
+            self.assertIn(n, text)
+        self.assertNotIn("20260901-100000_self_water", text)
+        for name in features.FEATURE_NAMES:
+            self.assertNotIn(name, text)
+
+    def test_t13b_final_scores_eval_side_with_15_dims(self):
+        seen = []
+        real = evaluate.aggregate
+
+        def spy(per_session):
+            seen.append(list(per_session))
+            return real(per_session)
+
+        with mock.patch.object(evaluate, "aggregate", side_effect=spy):
+            r = train_eval.run(self.root, 3, final=True, throat=True)
+        expected = split.split_sessions(
+            self.root, 3, subject="self", kind="throat"
+        )["eval"]
+        self.assertEqual(expected, self.eval_names)
+        self.assertEqual(seen, [expected])
+        self.assertEqual(r.eval_total["sessions"], expected)
+        self.assertEqual(r.model.standardizer.mean.shape, (15,))
+        self.assertEqual(r.model.clf.coef_.shape, (1, 15))
+        t = r.eval_total
+        self.assertEqual(t["swallows"], 8)
+        self.assertEqual(t["confusion"]["tp"] + t["confusion"]["fn"], 8)
+        text = train_eval.format_report(r)
+        for word in (
+            "混同行列",
+            "TP ",
+            "FN ",
+            "FP ",
+            "## 評価に使ったセッション（3）",
+            "## 合格線との比較（docs/evaluation.md、M1 分岐点の合格線を咽喉マイクに当てる。docs/plan.md の M3 (3)）",
+        ):
+            self.assertIn(word, text)
+        for n in self.eval_names:
+            self.assertIn(n, text)
+
+    def test_t13c_main_prints_the_report_and_writes_nothing(self):
+        before = sorted(p.relative_to(self.root) for p in self.root.rglob("*"))
+        buf = io.StringIO()
+        with (
+            mock.patch.object(train_eval, "git_dirty", return_value=False),
+            contextlib.redirect_stdout(buf),
+        ):
+            train_eval.main(
+                [str(self.root), "--eval-min", "3", "--final", "--throat"]
+            )
+            expected = train_eval.format_report(self.final) + "\n"
+        self.assertEqual(buf.getvalue(), expected)
+        self.assertRegex(
+            buf.getvalue(), r"- scikit-learn \S+、numpy \S+、scipy \S+\n"
+        )
+        self.assertEqual(
+            sorted(p.relative_to(self.root) for p in self.root.rglob("*")),
+            before,
+        )
+
+    def test_t14_eval_side_must_be_one_day(self):
+        root = self.tmp / "throat-three-days"
+        root.mkdir()
+        for n in self.names:
+            shutil.copytree(self.root / n, root / n)
+        for n in self.eval_names:
+            shutil.copytree(
+                self.root / n, root / n.replace("20261012", "20261013")
+            )
+        with (
+            mock.patch.object(
+                features,
+                "extract_throat_session",
+                side_effect=AssertionError("読まれた"),
+            ),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            train_eval.run(root, 6, throat=True)
+        self.assertIn("評価側の収集日が 1 日ではありません", str(cm.exception))
+        self.assertIn("最後の1収集日", str(cm.exception))
+        with self.assertRaises(SystemExit) as cm:
+            train_eval.check_collection_days(
+                [], self.eval_names, train_eval.THROAT_EVAL_DAYS
+            )
+        self.assertIn("学習側の収集日がありません", str(cm.exception))
+
+    def test_t15_m1_default_still_needs_two_days(self):
+        with self.assertRaises(SystemExit) as cm:
+            train_eval.check_collection_days(self.train_names, self.eval_names)
+        msg = str(cm.exception)
+        self.assertIn("評価側の収集日が 2 日ではありません", msg)
+        self.assertIn("最後の2収集日のセッション数にしてください", msg)
+        train_eval.check_collection_days(
+            self.train_names, self.eval_names, train_eval.THROAT_EVAL_DAYS
+        )
+
+    def test_t16_eval_days_are_constants_not_arguments(self):
+        self.assertEqual(train_eval.THROAT_EVAL_DAYS, 1)
+        self.assertEqual(train_eval.EVAL_DAYS, 2)
+        with (
+            self.assertRaises(SystemExit),
+            contextlib.redirect_stderr(io.StringIO()),
+            mock.patch.object(train_eval, "run") as run,
+        ):
+            train_eval.main(
+                [
+                    str(self.root),
+                    "--eval-min",
+                    "3",
+                    "--throat",
+                    "--eval-days",
+                    "1",
+                ]
+            )
+        run.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

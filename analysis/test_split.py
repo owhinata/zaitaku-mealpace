@@ -159,7 +159,7 @@ class SplitTest(unittest.TestCase):
 
     def test_sp11_no_window_level_split(self):
         params = list(inspect.signature(split_sessions).parameters)
-        self.assertEqual(params, ["root", "eval_min", "subject"])
+        self.assertEqual(params, ["root", "eval_min", "subject", "kind"])
 
     # --- 検出器のセッション（docs/decisions/0021） ---
 
@@ -238,6 +238,247 @@ class SplitTest(unittest.TestCase):
             meta={"subject": "p1", "fw": "detector"},
         )
         self.assertEqual(split_sessions(self.root, eval_min=3)["detector"], [])
+
+
+# --- 咽喉マイク（docs/decisions/0031・0032。plan #39 ステップ B のテスト 1〜6） ---
+
+THROAT_META = {
+    "subject": "self",
+    "fw": "pc-throat",
+    "sensors": [{"id": "throat", "iface": "sh12jk-wired-unoq-usbaudio"}],
+}
+
+
+def make_throat(root: Path, name: str, meta=None, files=None) -> Path:
+    """咽喉マイクのセッションの形（中身の無いファイル）を作る。"""
+    make_session(root, name, meta=dict(THROAT_META) if meta is None else meta)
+    d = root / name
+    for f in (
+        ("throat.wav", "throat_chunks.csv", "events.csv")
+        if files is None
+        else files
+    ):
+        (d / f).write_text("", encoding="utf-8")
+    return d
+
+
+def sp10_names() -> list[str]:
+    conds = ["quiet", "water", "talk", "saliva", "neck", "water", "cough"]
+    days = ["20260922", "20260924", "20260926"]
+    return [
+        f"{day}-19{i:02d}00_self_{c}"
+        for day in days
+        for i, c in enumerate(conds)
+    ]
+
+
+def throat_names() -> list[str]:
+    """収集日 1 に 14 本（2 セット）、収集日 2 に 7 本。"""
+    conds = ["quiet", "water", "talk", "saliva", "neck", "water", "cough"]
+    out = []
+    for hh in ("09", "18"):
+        out += [f"20261011-{hh}{i:02d}00_self_{c}" for i, c in enumerate(conds)]
+    out += [f"20261012-09{i:02d}00_self_{c}" for i, c in enumerate(conds)]
+    return out
+
+
+class ThroatSplitTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def mixed_root(self):
+        m1 = sp10_names()
+        for n in m1:
+            make_session(self.root, n)
+        det = [f"20261005-12{i:02d}00_self_meal" for i in range(3)]
+        for n in det:
+            make_session(
+                self.root, n, meta={"subject": "self", "fw": "detector"}
+            )
+        th = throat_names()
+        for n in th:
+            make_throat(self.root, n)
+        return m1, det, th
+
+    def test_t1_m1_lists_throat_sessions_separately(self):
+        m1, det, th = self.mixed_root()
+        r = split_sessions(self.root, eval_min=14)
+        self.assertEqual(r["throat"], th)
+        self.assertFalse(set(th) & set(r["train"] + r["eval"]))
+        self.assertEqual(r["skipped"], [])
+
+    def test_t2_m1_split_unchanged_by_throat_sessions(self):
+        m1 = sp10_names()
+        for n in m1:
+            make_session(self.root, n)
+        before = split_sessions(self.root, eval_min=14)
+        for n in throat_names():
+            make_throat(self.root, n)
+        after = split_sessions(self.root, eval_min=14)
+        self.assertEqual(after["train"], before["train"])
+        self.assertEqual(after["eval"], before["eval"])
+        self.assertEqual(after["train"], m1[:7])
+        self.assertEqual(after["eval"], m1[7:])
+
+    def test_t3_throat_kind_splits_only_throat_sessions(self):
+        m1, det, th = self.mixed_root()
+        # 最後の 1 収集日（20261012）の 7 本を評価側に
+        r = split_sessions(self.root, eval_min=7, kind="throat")
+        self.assertEqual(r["eval"], th[14:])
+        self.assertEqual(r["train"], th[:14])
+        self.assertTrue(all(n.startswith("20261012") for n in r["eval"]))
+        self.assertTrue(all(n.startswith("20261011") for n in r["train"]))
+        self.assertEqual(r["excluded"], sorted(m1 + det))
+        self.assertNotIn("detector", r)
+        self.assertNotIn("throat", r)
+
+    def assert_stops(self, kind="throat"):
+        with self.assertRaises(SystemExit) as cm:
+            split_sessions(self.root, eval_min=3, kind=kind)
+        return str(cm.exception)
+
+    def test_t4_throat_session_checks(self):
+        cases = {
+            "wireless_iface": dict(
+                meta={
+                    **THROAT_META,
+                    "sensors": [
+                        {"id": "throat", "iface": "sh12jk-nz210c-a2dp-unoq"}
+                    ],
+                }
+            ),
+            "no_sensors": dict(meta={"subject": "self", "fw": "pc-throat"}),
+            "no_throat_wav": dict(files=("throat_chunks.csv", "events.csv")),
+            "no_chunks": dict(files=("throat.wav", "events.csv")),
+            "imu_csv": dict(
+                files=(
+                    "throat.wav",
+                    "throat_chunks.csv",
+                    "events.csv",
+                    "imu.csv",
+                )
+            ),
+            "audio_wav": dict(
+                files=(
+                    "throat.wav",
+                    "throat_chunks.csv",
+                    "events.csv",
+                    "audio.wav",
+                )
+            ),
+            "feat_csv": dict(
+                files=(
+                    "throat.wav",
+                    "throat_chunks.csv",
+                    "events.csv",
+                    "feat.csv",
+                )
+            ),
+        }
+        ns = throat_names()[:4]
+        for label, kw in cases.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as d:
+                self.root = Path(d)
+                for n in ns[:3]:
+                    make_throat(self.root, n)
+                make_throat(self.root, ns[3], **kw)
+                self.assertIn(ns[3], self.assert_stops())
+        # fw が無いのに throat.wav がある → どちらの kind でも止まる
+        for kind in ("m1", "throat"):
+            for meta in (
+                {"subject": "self"},
+                {"subject": "self", "fw": "detector"},
+            ):
+                with (
+                    self.subTest(kind=kind, meta=meta),
+                    tempfile.TemporaryDirectory() as d,
+                ):
+                    self.root = Path(d)
+                    for n in names("self", 4):
+                        make_session(self.root, n)
+                    for n in ns[:4]:
+                        make_throat(self.root, n)
+                    bad = "20261013-090000_self_water"
+                    make_throat(self.root, bad, meta=meta)
+                    self.assertIn(bad, self.assert_stops(kind))
+
+    def test_t5_only_trial_throat_is_skipped(self):
+        m1 = sp10_names()
+        for n in m1:
+            make_session(self.root, n)
+        th = throat_names()
+        for n in th:
+            make_throat(self.root, n)
+        trial = self.root / "trial-throat"
+        trial.mkdir()
+        # 中身は読まない（形式外のフォルダやファイルがあっても止まらない）
+        (trial / "notes_x").mkdir()
+        (trial / "meta.json").write_text("{", encoding="utf-8")
+        for kind, eval_min in (("m1", 14), ("throat", 7)):
+            with self.subTest(kind=kind):
+                r = split_sessions(self.root, eval_min=eval_min, kind=kind)
+                self.assertEqual(r["skipped"], ["trial-throat"])
+        for label in ("trial-throat2", "link"):
+            with self.subTest(label), tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                for n in th:
+                    make_throat(root, n)
+                if label == "link":
+                    (root / "real").mkdir()
+                    shutil_target = root / "real"
+                    (root / "trial-throat").symlink_to(
+                        shutil_target, target_is_directory=True
+                    )
+                else:
+                    (root / label).mkdir()
+                with self.assertRaises(SystemExit):
+                    split_sessions(root, eval_min=7, kind="throat")
+
+    def test_t6_throat_split_does_not_open_wav_or_events(self):
+        import builtins, pathlib, wave
+        from unittest import mock
+
+        self.mixed_root()
+        forbidden = {"throat.wav", "events.csv", "throat_chunks.csv"}
+        real_open, real_read = builtins.open, pathlib.Path.read_text
+        real_popen, real_wave = pathlib.Path.open, wave.open
+
+        def check(p):
+            if Path(p).name in forbidden:
+                raise AssertionError(f"開かれた: {p}")
+
+        def g_open(p, *a, **kw):
+            check(p)
+            return real_open(p, *a, **kw)
+
+        def g_read(self_, *a, **kw):
+            check(self_)
+            return real_read(self_, *a, **kw)
+
+        def g_popen(self_, *a, **kw):
+            check(self_)
+            return real_popen(self_, *a, **kw)
+
+        def g_wave(p, *a, **kw):
+            check(p)
+            return real_wave(p, *a, **kw)
+
+        with (
+            mock.patch("builtins.open", g_open),
+            mock.patch.object(pathlib.Path, "read_text", g_read),
+            mock.patch.object(pathlib.Path, "open", g_popen),
+            mock.patch("wave.open", g_wave),
+        ):
+            r = split_sessions(self.root, eval_min=7, kind="throat")
+            split_sessions(self.root, eval_min=14)
+        self.assertEqual(len(r["eval"]), 7)
+
+    def test_t6b_unknown_kind_stops(self):
+        self.mixed_root()
+        with self.assertRaises(SystemExit):
+            split_sessions(self.root, eval_min=7, kind="m2")
 
 
 if __name__ == "__main__":

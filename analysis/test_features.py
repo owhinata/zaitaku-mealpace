@@ -727,5 +727,291 @@ class ValidationTest(TmpCase):
         self.assertTrue(short.valid.all())
 
 
+# --- 咽喉マイク（docs/decisions/0031。plan #39 ステップ B のテスト 7〜11） ---
+
+THROAT_FS = 48000
+THROAT_PERIOD = 6000  # arecord の 1 ピリオド（125 ms）
+THROAT_IFACE = "sh12jk-wired-unoq-usbaudio"
+
+
+def make_throat_session(
+    root: Path,
+    name: str = "20261011-100000_self_water",
+    *,
+    seconds: float = 40.0,
+    signal=None,
+    noise_lsb: float = 0.0,
+    s_true: float = -20e-6,
+    ostart_s: float | None = 3.0,
+    events=(),
+    taps=(),
+    tap_delay_ms: float = 3.0,
+    delay_jump=None,
+    wav_hz: int = THROAT_FS,
+    channels: int = 2,
+    meta: dict | None = None,
+    throat_meta: dict | None = None,
+    seed: int = 0,
+) -> dict:
+    """48 kHz・2 ch の咽喉マイクの合成のセッション（tools/test_throat_check.py と
+    同じ作り方）。時刻は「本当の秒」（サンプル i の本当の時刻 i ÷ 48000）で指定する。
+
+    signal: 本当の秒 → [-1, 1]（L と R に同じ値）。noise_lsb: 白色雑音の RMS。
+    s_true: クロックの差（取り込みの PC の時刻 = c + 1000 i/fs × (1 + s)）。
+    到着 = 各ピリオドの終端の取り込みの時刻 + 遅れ（2 ms + 指数分布 平均 3 ms）。
+    delay_jump: (本当の秒, ms)。その時刻より後の到着をすべて ms だけ遅らせる（段差）。
+    events: (本当の秒, label, note)。ostart_s が None でなければ o start を足す。
+    taps: 叩き（2 ms の減衰パルス）の本当の秒。o tap はパルスの tap_delay_ms 後。
+    戻り値: {"to_ms": 本当の秒 → events.csv の t_ms（float）, "n": フレーム数,
+    "dir": フォルダ}。
+    """
+    rng = np.random.default_rng(seed)
+    d = root / name
+    d.mkdir()
+    n = int(round(seconds * THROAT_FS))
+    t = np.arange(n) / THROAT_FS
+    x = np.zeros(n) if signal is None else 32767.0 * signal(t)
+    if noise_lsb:
+        x = x + rng.normal(0.0, noise_lsb, n)
+    tap_len = int(0.002 * THROAT_FS)
+    pulse = 4000.0 * np.exp(-np.arange(tap_len) / (0.0005 * THROAT_FS))
+    for ts in taps:
+        i = int(ts * THROAT_FS)
+        x[i : i + tap_len] += pulse
+    x = np.clip(np.round(x), -32768, 32767).astype("<i2")
+    c_true = 1234.5
+
+    def cap(i):
+        return c_true + 1000.0 * np.asarray(i, float) / THROAT_FS * (
+            1.0 + s_true
+        )
+
+    frames = np.stack([x] * channels, axis=1)
+    with wave.open(str(d / "throat.wav"), "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(2)
+        w.setframerate(wav_hz)
+        w.writeframes(frames.tobytes())
+    starts = np.arange(0, n, THROAT_PERIOD)
+    ends = np.minimum(starts + THROAT_PERIOD, n) - 1
+    delay = 2.0 + rng.exponential(3.0, len(starts))
+    if delay_jump is not None:
+        delay[ends / THROAT_FS > delay_jump[0]] += delay_jump[1]
+    arr = np.maximum.accumulate(cap(ends) + 1000.0 / THROAT_FS + delay)
+    t0 = arr[0]
+    with open(d / "throat_chunks.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["t_ms", "sample_index"])
+        for ta, s0 in zip(arr, starts):
+            w.writerow([int(ta - t0), int(s0)])
+
+    def to_ms(ts):
+        return float(cap(ts * THROAT_FS) - t0)
+
+    ev = [(to_ms(ts) + tap_delay_ms, "o", "tap") for ts in taps]
+    if ostart_s is not None:
+        ev.append((to_ms(ostart_s), "o", "start"))
+    ev += [(to_ms(ts), label, note) for ts, label, note in events]
+    ev.sort()
+    with open(d / "events.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["t_ms", "label", "note"])
+        w.writerows([int(round(tm)), label, note] for tm, label, note in ev)
+    m = {
+        "subject": name.split("_")[1],
+        "cond": name.rsplit("_", 1)[-1],
+        "fw": "pc-throat",
+        "sample_rates": {"imu_hz": 0, "audio_hz": THROAT_FS, "analog_hz": 0},
+        "sensors": [{"id": "throat", "part": "SH-12JK", "iface": THROAT_IFACE}],
+        "throat": {
+            "overrun_lines": 0,
+            "est_diff_frames": 0,
+            "stop": "duration",
+        },
+    }
+    m.update(meta or {})
+    m["throat"].update(throat_meta or {})
+    (d / "meta.json").write_text(json.dumps(m), encoding="utf-8")
+    return {"to_ms": to_ms, "n": n, "dir": d}
+
+
+def rewrite_throat_chunks(d: Path, fn) -> None:
+    """throat_chunks.csv の行 [[t_ms, sample_index], ...] を fn で書き換える。"""
+    with open(d / "throat_chunks.csv", newline="", encoding="utf-8") as f:
+        rows = [[int(v) for v in r] for r in list(csv.reader(f))[1:]]
+    with open(d / "throat_chunks.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["t_ms", "sample_index"])
+        w.writerows(fn(rows))
+
+
+class ThroatFeatureTest(TmpCase):
+    def tc(self):
+        return features.throat_check_module()
+
+    def test_t7_dims_and_window_grid(self):
+        info = make_throat_session(self.root, noise_lsb=30.0)
+        f = features.extract_throat_session(info["dir"])
+        self.assertEqual(features.N_AUDIO_FEATURES, 15)
+        self.assertEqual(features.AUDIO_FEATURE_NAMES, NAMES[14:])
+        self.assertEqual(f.X.shape[1], 15)
+        tc = self.tc()
+        ses = tc.load_session(info["dir"])
+        c0, s = tc.sample_time_map(ses)
+        t_end = float(tc.sample_to_time(info["n"], c0, s, THROAT_FS)) / 1000.0
+        t0 = round(info["to_ms"](3.0)) / 1000.0
+        n_expected = int(np.floor((t_end - t0 - 1.0) / 0.25 + 1e-9)) + 1
+        self.assertEqual(len(f.t_start_s), n_expected)
+        np.testing.assert_allclose(
+            f.t_start_s, t0 + 0.25 * np.arange(n_expected)
+        )
+        self.assertLessEqual(f.t_start_s[-1] + 1.0, t_end)
+        self.assertTrue(f.valid.all())
+        self.assertEqual(f.session, info["dir"].name)
+
+    def test_t8_centroid_matches_16k_path(self):
+        sig = sine(1000.0, amp=0.3)
+        info = make_throat_session(self.root, signal=sig)
+        f = features.extract_throat_session(info["dir"])
+        t16 = np.arange(HZ) / HZ
+        ref = features._audio_features(sig(t16).astype(np.float32))
+        k = len(f.X) // 2
+        i = features.N_MFCC  # 15 次元の中のスペクトル重心
+        self.assertAlmostEqual(
+            float(f.X[k, i]) / ref[i], 1.0, delta=0.01, msg=(f.X[k, i], ref[i])
+        )
+        self.assertAlmostEqual(float(f.X[k, i]), 1000.0, delta=30.0)
+
+    def test_t9_burst_lands_in_the_mapped_windows(self):
+        # o start の後 k 番目の窓の開始から 20 ms 後に 5 ms の塊。対応が ±15 ms
+        # 程度の内側なら、塊が入る窓はちょうど k−3〜k の 4 つ
+        ostart_s, k = 3.0, 40
+        probe = make_throat_session(
+            self.root, name="20261011-090000_self_water"
+        )
+        o_ms = round(probe["to_ms"](ostart_s))
+        burst_ms = o_ms + 1000.0 * (0.25 * k + 0.020)
+        # to_ms の逆: 本当の秒
+        burst_s = (burst_ms - probe["to_ms"](0.0)) / 1000.0 / (1.0 - 20e-6)
+
+        def sig(t):
+            return np.where(
+                (t >= burst_s) & (t < burst_s + 0.005),
+                0.3 * np.sin(2 * np.pi * 2000 * t),
+                0.0,
+            )
+
+        info = make_throat_session(self.root, signal=sig, ostart_s=ostart_s)
+        self.assertEqual(round(info["to_ms"](ostart_s)), o_ms)
+        f = features.extract_throat_session(info["dir"])
+        e = f.X[:, 0]  # 対数エネルギー（mfcc_0）
+        hit = np.nonzero(e > e.min() + 0.5)[0].tolist()
+        self.assertEqual(hit, [k - 3, k - 2, k - 1, k])
+
+    def assert_stops(self, info_or_dir, text=None):
+        d = info_or_dir["dir"] if isinstance(info_or_dir, dict) else info_or_dir
+        with self.assertRaises(ValueError) as cm:
+            features.extract_throat_session(d)
+        if text:
+            self.assertIn(text, str(cm.exception))
+
+    def test_t10_input_checks(self):
+        cases = {
+            "meta_hz": (
+                dict(
+                    meta={
+                        "sample_rates": {
+                            "imu_hz": 0,
+                            "audio_hz": 44100,
+                            "analog_hz": 0,
+                        }
+                    }
+                ),
+                "meta.json 44100",
+            ),
+            "wav_hz": (dict(wav_hz=44100), "WAV 44100"),
+            "mono": (dict(channels=1), "1 ch"),
+            "fw": (dict(meta={"fw": "logger"}), "fw"),
+            "overrun": (dict(throat_meta={"overrun_lines": 1}), "overrun"),
+            "step": (dict(delay_jump=(20.0, 100.0)), "段差"),
+        }
+        for i, (label, (kw, word)) in enumerate(cases.items()):
+            with self.subTest(label):
+                info = make_throat_session(
+                    self.root, name=f"20261011-10{i:02d}00_self_water", **kw
+                )
+                self.assert_stops(info, word)
+
+    def test_t10b_sample_index_checks(self):
+        cases = {
+            "first_not_0": lambda r: [[t, i + 1] for t, i in r],
+            "repeat": lambda r: r[:5] + [[r[5][0], r[4][1]]] + r[6:],
+            "decrease": lambda r: r[:5] + [[r[5][0], r[3][1]]] + r[6:],
+            "beyond_n": lambda r: r[:-1] + [[r[-1][0], 10**9]],
+        }
+        for i, (label, fn) in enumerate(cases.items()):
+            with self.subTest(label):
+                info = make_throat_session(
+                    self.root, name=f"20261011-11{i:02d}00_self_water"
+                )
+                rewrite_throat_chunks(info["dir"], fn)
+                self.assert_stops(info, "sample_index")
+
+    def test_t10d_each_flag_alone_stops(self):
+        tc = self.tc()
+        cases = {
+            "overrun": (dict(throat_meta={"overrun_lines": 2}), "overrun"),
+            "est_diff": (dict(s_true=4000e-6), "推定差"),
+            "step": (dict(delay_jump=(20.0, 100.0)), "段差"),
+        }
+        for i, (label, (kw, word)) in enumerate(cases.items()):
+            with self.subTest(label):
+                info = make_throat_session(
+                    self.root,
+                    name=f"20261011-12{i:02d}00_self_water",
+                    noise_lsb=30.0,
+                    **kw,
+                )
+                flags = tc.check(tc.load_session(info["dir"]))["flags"]
+                self.assertEqual(len(flags), 1, flags)
+                self.assertIn(word, flags[0])
+                self.assert_stops(info, word)
+
+    def test_t10c_tap_flags_do_not_stop(self):
+        # o tap がパルスの 150 ms 後（|Δ の中央値| ≈ 150 ms > 125 ms）
+        info = make_throat_session(
+            self.root,
+            noise_lsb=6.0,
+            taps=(4.0, 7.0, 10.0, 13.0, 16.0),
+            tap_delay_ms=150.0,
+            ostart_s=20.0,
+        )
+        tc = self.tc()
+        r = tc.check(tc.load_session(info["dir"]))
+        self.assertEqual(r["flags"], [])
+        self.assertEqual(r["taps_found"], 5)
+        self.assertTrue(r["tap_flags"], r)
+        self.assertGreater(abs(float(np.median(r["tap_deltas_ms"]))), 125.0)
+        f = features.extract_throat_session(info["dir"])
+        self.assertGreater(len(f.t_start_s), 0)
+
+    def test_t11_standardizer_with_15_dims(self):
+        info = make_throat_session(self.root, noise_lsb=30.0)
+        f = features.extract_throat_session(info["dir"])
+        s = features.Standardizer.fit([f])
+        self.assertEqual(s.mean.shape, (15,))
+        z = s.transform(f.X)
+        self.assertEqual(z.shape, f.X.shape)
+        with self.assertRaises(ValueError):
+            s.transform(np.zeros((3, 29)))
+
+    def test_t11b_scipy_is_not_imported_at_module_top(self):
+        # 咽喉マイクの経路の読み込みは関数の中だけ（features の先頭で読まない）
+        src = Path(features.__file__).read_text(encoding="utf-8")
+        head = src.split("\ndef ", 1)[0]
+        self.assertNotIn("import scipy", head)
+        self.assertNotIn("from scipy", head)
+
+
 if __name__ == "__main__":
     unittest.main()

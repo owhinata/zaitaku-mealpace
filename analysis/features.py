@@ -12,11 +12,21 @@ audio_chunks.csv、meta.json）。
 生の波形と IMU の系列は戻り値に含めない。特徴量をファイルに書く機能は置かない。
 窓へのラベル付けと学習は #13。
 
+咽喉マイクのセッション（meta.json の fw が pc-throat。docs/decisions/0031）は
+extract_throat_session で、音の 15 次元（0012 の式。IMU なし。docs/decisions/0026）
+を出す。throat.wav の L（ch0）を scipy.signal.resample_poly(x, 1, 3) で 16 kHz
+に落とし、サンプルの時刻は tools/throat_check.py の sample_time_map（受信の時刻に
+よる対応。docs/decisions/0029）で出す。範囲は evaluate.throat_session_span と同じ
+（o start から最後のサンプルの時刻まで）。
+
+依存: M1 の経路（extract_session）は numpy だけ。咽喉マイクの経路だけが scipy と
+tools/throat_check.py を使い、それらは咽喉マイクの経路の関数の中で読み込む。
+
 使い方: python analysis/features.py <セッションフォルダ>
 """
 
 from __future__ import annotations
-import argparse, csv, json, math, sys, wave
+import argparse, csv, importlib.util, json, math, sys, wave
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,6 +87,17 @@ FEATURE_NAMES: tuple[str, ...] = (
 )
 N_FEATURES = len(FEATURE_NAMES)  # 29
 N_IMU_FEATURES = 14
+# 咽喉マイクの経路（音だけ。docs/decisions/0026・0031）
+AUDIO_FEATURE_NAMES: tuple[str, ...] = FEATURE_NAMES[N_IMU_FEATURES:]
+N_AUDIO_FEATURES = len(AUDIO_FEATURE_NAMES)  # 15
+THROAT_FW = "pc-throat"
+THROAT_HZ = 48000  # throat.wav（docs/decisions/0029）
+THROAT_CHANNELS = 2
+THROAT_DECIMATE = THROAT_HZ // AUDIO_HZ  # 3
+_THROAT_CHECK_PATH = (
+    Path(__file__).resolve().parent.parent / "tools" / "throat_check.py"
+)
+_throat_check_module = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -114,10 +135,9 @@ class Standardizer:
 
     def transform(self, X: np.ndarray) -> np.ndarray:
         X = np.asarray(X)
-        if X.ndim == 0 or X.shape[-1] != N_FEATURES:
-            raise ValueError(
-                f"末尾の次元が {N_FEATURES} ではありません: {X.shape}"
-            )
+        n = len(self.mean)  # M1 は 29、咽喉マイクは 15
+        if X.ndim == 0 or X.shape[-1] != n:
+            raise ValueError(f"末尾の次元が {n} ではありません: {X.shape}")
         return ((X.astype(np.float64) - self.mean) / self.std).astype(
             np.float32
         )
@@ -438,6 +458,120 @@ def extract_session(session_dir: Path) -> WindowFeatures:
         if b - a < min_rows or len(seg) < WINDOW_SAMPLES:
             valid[k] = False
         if any(g0 < s + WINDOW_S and g1 > s for g0, g1 in gaps):
+            valid[k] = False
+    return WindowFeatures(
+        session=session_dir.name, t_start_s=t_start, X=X, valid=valid
+    )
+
+
+# --- 咽喉マイク（docs/decisions/0031。scipy と throat_check はここだけで読む） ---
+
+
+def throat_check_module():
+    """tools/throat_check.py を絶対パスから 1 回だけ読み込んで返す（時刻の対応の
+    計算を二重に持たない。docs/decisions/0029）。"""
+    global _throat_check_module
+    if _throat_check_module is None:
+        spec = importlib.util.spec_from_file_location(
+            "throat_check", _THROAT_CHECK_PATH
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _throat_check_module = mod
+    return _throat_check_module
+
+
+def _check_throat_input(session: Path) -> None:
+    """meta.json と throat.wav のヘッダ。合わなければ止まる。"""
+    meta = json.loads((session / "meta.json").read_text(encoding="utf-8"))
+    if meta.get("fw") != THROAT_FW:
+        raise ValueError(
+            f"meta.json の fw が {THROAT_FW} ではありません（{meta.get('fw')}）: {session}"
+        )
+    hz = (meta.get("sample_rates") or {}).get("audio_hz")
+    with wave.open(str(session / "throat.wav"), "rb") as w:
+        wav_hz, ch, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
+    if hz != THROAT_HZ or wav_hz != THROAT_HZ:
+        raise ValueError(
+            f"サンプルレートが {THROAT_HZ} Hz ではありません "
+            f"(meta.json {hz}, WAV {wav_hz}): {session}"
+        )
+    if ch != THROAT_CHANNELS or width != 2:
+        raise ValueError(
+            f"throat.wav が {THROAT_CHANNELS} ch・16 bit ではありません "
+            f"({ch} ch, {8 * width} bit): {session}"
+        )
+
+
+def _check_throat_chunks(idx: np.ndarray, n: int, session: Path) -> None:
+    """throat_chunks.csv の sample_index: 先頭 0・厳密に増加・すべて 0 ≤ index < N。"""
+    if len(idx) == 0:
+        raise ValueError(f"throat_chunks.csv に行がありません: {session}")
+    if idx[0] != 0:
+        raise ValueError(
+            f"throat_chunks.csv の最初の sample_index が 0 ではありません: {session}"
+        )
+    if np.any(np.diff(idx) <= 0):
+        raise ValueError(
+            f"throat_chunks.csv の sample_index が厳密に増加していません: {session}"
+        )
+    if np.any(idx < 0) or np.any(idx >= n):
+        raise ValueError(
+            f"throat_chunks.csv の sample_index が throat.wav のフレーム数 ({n}) の"
+            f"範囲の外です: {session}"
+        )
+
+
+def extract_throat_session(session_dir: Path) -> WindowFeatures:
+    """咽喉マイクのセッション1つの窓ごとの音の 15 次元（正規化前）。
+
+    窓は M1 の extract_session と同じ作り方（1.0 秒 / 0.25 秒、窓の開始に最も近い
+    サンプルから 16000 サンプル）で、範囲は o start から最後のサンプルの時刻まで
+    （evaluate.throat_session_span）。valid は 16000 サンプルに満たない窓だけ
+    False。throat_check.check() の flags（overrun の行・推定差・段差）に当たる
+    セッションは止まる。叩きの tap_flags では止めない（docs/decisions/0031）。
+    """
+    import evaluate  # 範囲の計算を二重に持たない
+
+    session_dir = Path(session_dir)
+    tc = throat_check_module()
+    _check_throat_input(session_dir)
+    ses = tc.load_session(session_dir)
+    n = len(ses["wav"])
+    _check_throat_chunks(ses["chunk_idx"], n, session_dir)
+    flags = tc.check(ses)["flags"]
+    if flags:
+        raise ValueError(
+            f"記録の健全性の目安に当たります（{'、'.join(flags)}）: {session_dir}"
+        )
+    c0, s = tc.sample_time_map(ses)
+    t0_s, duration_s = evaluate.throat_span(ses, tc, c0, s)
+    x = (tc.to_analysis(ses) / AUDIO_SCALE).astype(np.float32)
+    # 16 kHz のサンプル j の時刻 = τ(3j)。最後の要素は最終サンプルの直後
+    sample_t = (
+        tc.sample_to_time(
+            THROAT_DECIMATE * np.arange(len(x) + 1), c0, s, THROAT_HZ
+        )
+        / 1000.0
+    )
+    t_lo, t_hi = t0_s, t0_s + duration_s
+    span = t_hi - t_lo
+    nw = (
+        int(math.floor((span - WINDOW_S) / HOP_S + 1e-9)) + 1
+        if span >= WINDOW_S
+        else 0
+    )
+    t_start = t_lo + HOP_S * np.arange(nw)
+    X = np.zeros((nw, N_AUDIO_FEATURES), dtype=np.float32)
+    valid = np.ones(nw, dtype=bool)
+    for k, st in enumerate(t_start):
+        # 窓の開始時刻に最も近いサンプルから 16000 サンプル固定（M1 と同じ）
+        i = int(np.searchsorted(sample_t[:-1], st, side="left"))
+        if i > 0 and (i == len(x) or st - sample_t[i - 1] <= sample_t[i] - st):
+            i -= 1
+        seg = x[i : i + WINDOW_SAMPLES]
+        X[k] = _audio_features(seg)
+        if len(seg) < WINDOW_SAMPLES:
             valid[k] = False
     return WindowFeatures(
         session=session_dir.name, t_start_s=t_start, X=X, valid=valid

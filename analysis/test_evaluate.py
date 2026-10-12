@@ -271,5 +271,101 @@ class AggregateTest(unittest.TestCase):
         )
 
 
+class ThroatSpanTest(unittest.TestCase):
+    """咽喉マイクの記録の範囲（docs/decisions/0031。plan #39 ステップ B のテスト
+    12・12b）。合成のセッションは test_features.make_throat_session。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.k = 0
+
+    def make(self, **kw):
+        from test_features import make_throat_session
+
+        self.k += 1
+        return make_throat_session(
+            self.root, name=f"20261011-10{self.k:02d}00_self_water", **kw
+        )
+
+    def mapped_end_s(self, d):
+        import features
+
+        tc = features.throat_check_module()
+        ses = tc.load_session(d)
+        c0, s = tc.sample_time_map(ses)
+        return (
+            float(tc.sample_to_time(len(ses["wav"]), c0, s, ses["fs"])) / 1000
+        )
+
+    def test_t12_span_from_o_start_to_last_sample(self):
+        info = self.make(ostart_s=3.0)
+        t0, dur = evaluate.throat_session_span(info["dir"])
+        self.assertAlmostEqual(t0, round(info["to_ms"](3.0)) / 1000.0)
+        self.assertAlmostEqual(t0 + dur, self.mapped_end_s(info["dir"]))
+        # 本当の長さ 40 秒の終わり（取り込みの時刻）と、到着の遅れの範囲で合う
+        self.assertAlmostEqual(
+            t0 + dur, info["to_ms"](40.0) / 1000.0, delta=0.02
+        )
+
+    def assert_stops(self, d, text):
+        with self.assertRaises(ValueError) as cm:
+            evaluate.throat_session_span(d)
+        self.assertIn(text, str(cm.exception))
+
+    def test_t12_o_start_missing_or_twice_or_too_late(self):
+        self.assert_stops(self.make(ostart_s=None)["dir"], "o start")
+        two = self.make(ostart_s=3.0, events=[(5.0, "o", "start")])
+        self.assert_stops(two["dir"], "o start")
+        # 最後のサンプルより後（本当の 40 秒 + 1 秒）
+        late = self.make(ostart_s=41.0)
+        self.assert_stops(late["dir"], "最後のサンプル")
+        # note の前後の空白は無視する
+        info = self.make(ostart_s=None, events=[(3.0, "o", " start ")])
+        self.assertAlmostEqual(
+            evaluate.throat_session_span(info["dir"])[0],
+            round(info["to_ms"](3.0)) / 1000.0,
+        )
+
+    def test_t12_chunk_t_ms_reverse_or_gap_stops(self):
+        from test_features import rewrite_throat_chunks
+
+        rev = self.make()
+        rewrite_throat_chunks(
+            rev["dir"], lambda r: r[:10] + [[r[8][0], r[10][1]]] + r[11:]
+        )
+        self.assert_stops(rev["dir"], "逆行")
+        gap = self.make()
+        rewrite_throat_chunks(
+            gap["dir"],
+            lambda r: r[:10] + [[t + 1500, i] for t, i in r[10:]],
+        )
+        self.assert_stops(gap["dir"], "飛んで")
+
+    def test_t12_s_before_o_start_is_an_error_in_event_metrics(self):
+        info = self.make(ostart_s=5.0, events=[(4.0, "s", "")])
+        t0, dur = evaluate.throat_session_span(info["dir"])
+        swallows = evaluate.load_events(info["dir"])
+        with self.assertRaises(ValueError):
+            evaluate.event_metrics(swallows, [], dur, t0)
+
+    def test_t12b_other_markers_before_o_start_do_not_stop(self):
+        info = self.make(
+            ostart_s=5.0,
+            events=[
+                (2.0, "t", ""),
+                (3.0, "q", ""),
+                (4.0, "o", "tpa"),
+                (8.0, "s", ""),
+            ],
+        )
+        t0, dur = evaluate.throat_session_span(info["dir"])
+        self.assertAlmostEqual(t0, round(info["to_ms"](5.0)) / 1000.0)
+        swallows = evaluate.load_events(info["dir"])
+        m = evaluate.event_metrics(swallows, [], dur, t0)
+        self.assertEqual(m["swallows"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
