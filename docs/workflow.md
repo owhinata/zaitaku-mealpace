@@ -122,6 +122,9 @@ Codex の呼び出しは codex plugin（`/codex:*`）に一本化する。
   初回は fresh。初回から再レビューまでの間に、他の Codex task（`/codex:rescue` など）を挟まない。
   初回から再レビューまでを同じ subagent が続ける（上の「plan mode と並行作業」）。
 - Codex の生の出力は全文を Issue のコメントに貼る。要約だけを人に届けない。
+  **貼るときは `<details><summary>Codex の出力（全文）</summary>` 〜 `</details>` で折りたたむ**（人の指示 2026-10-12。コメントの冒頭には
+  PLAN-SHA・verdict・指摘の一覧と裏取りを折りたたまずに書き、生の出力はその下に折りたたんで置く。`<details>` の中の Markdown は
+  前後に空行を入れる）。
 - plan のプロンプトは外部サービスに送られる。`data/raw/` の中身と p1 の生データを入れない。
 
 **ゲートの強制**（`.claude/settings.json` と `.claude/hooks/`）
@@ -188,7 +191,7 @@ Codex の呼び出しは codex plugin（`/codex:*`）に一本化する。
 - Codex の指摘は鵜呑みにしない。リポジトリの実物と `docs/` の定義で裏を取ってから報告する。
   裏が取れない指摘はそう明記する。
 - 指摘は BLOCKING（CLAUDE.md の制約違反、評価定義からの逸脱）と CONCERN に分ける。
-- 結果は「判定」Issue のコメントに残す。Codex の生の出力も全文を貼る。
+- 結果は「判定」Issue のコメントに残す。Codex の生の出力も全文を貼る（`<details>` で折りたたむ。上の「レビュー（Codex）」と同じ）。
 - ゲートは BLOCKING だけ。BLOCKING が残ったまま関門を通さない。CONCERN は人が採否を決める。
 - 再レビューに回数の上限は置かない。止める条件は「plan 確定前」と同じ（docs/decisions/0009）。
   関門の再レビューは fresh で回す（review コマンドに resume が無い）。

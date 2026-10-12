@@ -110,6 +110,8 @@ node "$(ls -d "$HOME"/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-c
 ### 3. 結果をユーザーに報告
 
 - Codex の生の出力は、全文を担当 Issue のコメントに貼る。要約だけを人に届けない。
+  貼るときは `<details><summary>Codex の出力（全文）</summary>` 〜 `</details>` で折りたたむ（docs/workflow.md「レビュー（Codex）」。
+  冒頭の PLAN-SHA・verdict・指摘の一覧と裏取りは折りたたまない）。
 - そのうえで面ごとに verdict と根拠を並べる。Codex の指摘は鵜呑みにしない。リポジトリの実物と
   `docs/` の定義で裏を取れる指摘かどうかを確認し、裏が取れない指摘はそう明記する。
 - **ゲートは BLOCKING だけ。** CONCERN は列挙して人に渡し、採否は人が決める。
