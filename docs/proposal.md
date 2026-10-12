@@ -89,7 +89,7 @@ VEは咽頭を直接見られる唯一の実用的な手段で、誤嚥の確定
 
 ## 7. ハードウェア選定
 
-手持ちの Arduino UNO Q で作る（4GB 版を検出器、2GB 版をベンチと予備）。音は咽喉マイク（南豆無線 SH-12JK、エレクトレット、3.5 mm 3極）で取り、USB オーディオアダプタ → USB-C ハブ（PD パススルー）→ UNO Q とつなぐ。電子工作なしにマイクの入力が取れる見込みで、M3 で確かめる（docs/decisions/0025）。Linux 側は ALSA から音をメモリに取り、特徴量に変換して破棄する（ディスクに音声を書かない）。MCU 側は LED を点け、Linux 側と RPC で結合する。装置と PC の推論コードは同じ Python になる。電源は PD 対応モバイルバッテリー。IMU は使わずに始め、音だけで分岐点の合格線に届かなければ Qwiic 接続の LSM6DSOX を足す（docs/decisions/0026）。M1・M2 は Arduino Nano RP2040 Connect の基板の IMU（LSM6DSOX）とマイク（PDM）で行った（docs/decisions/0002・0017）。構成と経緯は docs/decisions/0025。代替センサ（圧電コンタクトマイク、ピエゾ電線センサ）は docs/decisions/0002 参照。
+手持ちの Arduino UNO Q で作る（4GB 版を検出器、2GB 版をベンチと予備）。音は咽喉マイク（南豆無線 SH-12JK、エレクトレット、3.5 mm 3極）で取り、USB オーディオアダプタ → USB-C ハブ（PD パススルー）→ UNO Q とつなぐ。電子工作なしにマイクの入力が取れる見込みで、M3 で確かめる（docs/decisions/0025）。Linux 側は ALSA から音をメモリに取り、特徴量に変換して破棄する（ディスクに音声を書かない）。MCU 側は LED を点け、Linux 側と RPC で結合する。装置と PC の推論コードは同じ Python になる。電源は PD 対応モバイルバッテリー。マイクと UNO Q の間を Bluetooth の送信機で無線にする構成も試したが、送信機が小さい入力を無音に置き換える（切替なし）ため、記録と検出器は有線で進める（docs/decisions/0025）。IMU は使わずに始め、音だけで分岐点の合格線に届かなければ Qwiic 接続の LSM6DSOX を足す（docs/decisions/0026）。M1・M2 は Arduino Nano RP2040 Connect の基板の IMU（LSM6DSOX）とマイク（PDM）で行った（docs/decisions/0002・0017）。構成と経緯は docs/decisions/0025。代替センサ（圧電コンタクトマイク、ピエゾ電線センサ）は docs/decisions/0002 参照。
 
 ## 8. 技術構成
 
