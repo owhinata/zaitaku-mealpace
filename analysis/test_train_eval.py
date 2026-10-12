@@ -876,7 +876,7 @@ class ThroatCase(unittest.TestCase):
             ThroatCase.train_names = ThroatCase.names[:3]
             ThroatCase.eval_names = ThroatCase.names[3:]
             ThroatCase.default = train_eval.run(ThroatCase.root, 3, throat=True)
-            ThroatCase.final = train_eval.run(
+            ThroatCase.final = train_eval._run_impl(
                 ThroatCase.root, 3, final=True, throat=True
             )
 
@@ -947,7 +947,7 @@ class ThroatRunTest(ThroatCase):
         r = train_eval.run(root, 3, throat=True)
         self.assertEqual(r.cv_table, self.default.cv_table)
         with self.assertRaises(Exception):
-            train_eval.run(root, 3, final=True, throat=True)
+            train_eval._run_impl(root, 3, final=True, throat=True)
 
     def test_t13_default_report(self):
         text = train_eval.format_report(self.default)
@@ -978,7 +978,7 @@ class ThroatRunTest(ThroatCase):
             return real(per_session)
 
         with mock.patch.object(evaluate, "aggregate", side_effect=spy):
-            r = train_eval.run(self.root, 3, final=True, throat=True)
+            r = train_eval._run_impl(self.root, 3, final=True, throat=True)
         expected = split.split_sessions(
             self.root, 3, subject="self", kind="throat"
         )["eval"]
@@ -1006,17 +1006,21 @@ class ThroatRunTest(ThroatCase):
     def test_t13c_main_prints_the_report_and_writes_nothing(self):
         before = sorted(p.relative_to(self.root) for p in self.root.rglob("*"))
         buf = io.StringIO()
+        # --final --throat の main は run を呼ばずに止まる（docs/decisions/0034）
         with (
             mock.patch.object(train_eval, "git_dirty", return_value=False),
+            mock.patch.object(train_eval, "run") as run,
             contextlib.redirect_stdout(buf),
+            self.assertRaises(SystemExit),
         ):
             train_eval.main(
                 [str(self.root), "--eval-min", "3", "--final", "--throat"]
             )
-            expected = train_eval.format_report(self.final) + "\n"
-        self.assertEqual(buf.getvalue(), expected)
+        run.assert_not_called()
+        self.assertEqual(buf.getvalue(), "")
         self.assertRegex(
-            buf.getvalue(), r"- scikit-learn \S+、numpy \S+、scipy \S+\n"
+            train_eval.format_report(self.final) + "\n",
+            r"- scikit-learn \S+、numpy \S+、scipy \S+\n",
         )
         self.assertEqual(
             sorted(p.relative_to(self.root) for p in self.root.rglob("*")),

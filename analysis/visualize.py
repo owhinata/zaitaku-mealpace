@@ -1,9 +1,14 @@
 """咽喉マイクの学習側の交差検証の結果を図にする（Issue #43、docs/decisions/0033）。
 
 描くのは学習側のセッションだけ（split_sessions の train に無い名前、subject が
-self でない名前は止まる）。評価側の図は #40 で作る。確率は交差検証の検証側の確率
-（そのセッションを学習に使っていない fold のモデル）。PNG は docs/log/ の下だけに
-書く（外のパスは止まる）。確率・特徴量をファイルに書かない。
+self でない名前は止まる）。確率は交差検証の検証側の確率（そのセッションを学習に
+使っていない fold のモデル）。PNG は docs/log/ の下だけに書く（外のパスは止まる）。
+確率・特徴量をファイルに書かない。
+
+評価側の図（#40、docs/decisions/0034）は analysis/final_eval.py からだけ
+draw(..., side="eval") で描く（評価側の名前だけを受け付ける。CLI には無い）。
+確率は final_eval.py の 1 回だけの採点の確率で、ここでは採点し直さない。
+評価側 2 点の比較の図は fig_final。
 
 図の 3 種類:
   1. セッションごと: 窓平均 RMS、窓平均メル（0.25 秒ごと）、マーカー、窓ごとの
@@ -29,7 +34,7 @@ from typing import Sequence
 
 import numpy as np
 
-import evaluate, features, features_v2, split, train_eval
+import evaluate, features, features_v2, fixed_eval, split, train_eval
 
 LOG_ROOT = Path(__file__).resolve().parent.parent / "docs" / "log"
 FINE_LIMIT_S = 10.0
@@ -92,14 +97,39 @@ def check_out_dir(out: Path) -> Path:
     return p
 
 
-def check_sessions(root: Path, eval_min: int, names: Sequence[str]) -> dict:
-    """名前がすべて学習側（subject self）にあること。"""
+def _split(root: Path, eval_min: int) -> dict:
     parts = split.split_sessions(
         root, eval_min, subject=train_eval.SUBJECT, kind="throat"
     )
     train_eval.check_collection_days(
         parts["train"], parts["eval"], train_eval.THROAT_EVAL_DAYS
     )
+    return parts
+
+
+def check_eval_sessions(
+    root: Path, eval_min: int, names: Sequence[str]
+) -> dict:
+    """名前がすべて評価側（subject self）にあり、学習側の名前が無いこと
+    （#40 の評価側の図。final_eval.py からだけ使う）。"""
+    parts = _split(root, eval_min)
+    for n in names:
+        if f"_{train_eval.SUBJECT}_" not in n:
+            raise SystemExit(
+                f"subject が {train_eval.SUBJECT} でないセッションは描きません: {n}"
+            )
+        if n in parts["train"]:
+            raise SystemExit(f"学習側のセッションは評価側の図に描きません: {n}")
+        if n not in parts["eval"]:
+            raise SystemExit(f"評価側のセッションではありません: {n}")
+    return parts
+
+
+def check_sessions(root: Path, eval_min: int, names: Sequence[str]) -> dict:
+    """名前がすべて学習側（subject self）にあること。0034 の評価側の 7 本が
+    学習側に入る分割では止まる。"""
+    parts = _split(root, eval_min)
+    fixed_eval.assert_fixed_eval_not_in(parts["train"])
     for n in names:
         if f"_{train_eval.SUBJECT}_" not in n:
             raise SystemExit(
@@ -342,7 +372,41 @@ def fig_compare(path: Path, rows: Sequence, selected=None) -> None:
     plt.close(fig)
 
 
+def fig_final(path: Path, points: Sequence[dict]) -> None:
+    """評価側の比較（#40）。points の各要素: label, fp_per_min,
+    detection_rate。評価側の点と合格線の破線だけ（学習側 CV の点は描かない）。"""
+    plt = _plt()
+    fig, ax = plt.subplots(figsize=(9, 6))
+    marks = ("o", "s", "^", "D")
+    for k, p in enumerate(points):
+        x, y = p["fp_per_min"], p["detection_rate"]
+        if x is None or y is None:
+            continue
+        ax.scatter(
+            [x], [y], marker=marks[k % len(marks)], s=80, label=p["label"]
+        )
+    ax.axhline(train_eval.PASS_DETECTION_RATE, color="0.5", ls="--", lw=1)
+    ax.axvline(train_eval.PASS_FP_PER_MIN, color="0.5", ls="--", lw=1)
+    ax.set_xlabel("誤検出（回/分、評価側）")
+    ax.set_ylabel("検出率（評価側）")
+    ax.set_ylim(0, 1.02)
+    ax.set_xlim(left=0)
+    ax.legend(fontsize=8, loc="lower right")
+    ax.set_title(
+        "評価側（#40、1 回だけの採点）。破線は合格線（70% / 3 回/分）",
+        fontsize=10,
+    )
+    fig.tight_layout()
+    fig.savefig(path, dpi=DPI)
+    plt.close(fig)
+
+
 # --- まとめて描く ---
+
+SIDE_TITLE = {
+    "train": "学習側 CV の検証側の確率",
+    "eval": "評価側（#40、1 回だけの採点の確率）",
+}
 
 
 def draw(
@@ -354,12 +418,23 @@ def draw(
     label: str,
     rows: Sequence = (),
     selected=None,
+    side: str = "train",
+    title_suffix: str | None = None,
 ) -> list:
-    """scored（交差検証の検証側の確率）と mask から 3 種類の図を描く。"""
+    """scored（交差検証の検証側の確率）と mask から 3 種類の図を描く。
+    side="eval"（final_eval.py からだけ）は評価側の名前だけを受け付け、
+    出力先が既にあれば止まる（上書きしない）。"""
+    if side not in SIDE_TITLE:
+        raise ValueError(f"side は train / eval のどちらかです: {side!r}")
     out = check_out_dir(out_dir)
     root = Path(root)
-    check_sessions(root, eval_min, [s.data.name for s in scored])
-    out.mkdir(parents=True, exist_ok=True)
+    names = [s.data.name for s in scored]
+    if side == "eval":
+        check_eval_sessions(root, eval_min, names)
+    else:
+        check_sessions(root, eval_min, names)
+    suffix = SIDE_TITLE[side] if title_suffix is None else title_suffix
+    out.mkdir(parents=True, exist_ok=side == "train")
     paths = []
     events = {"検出": [], "見逃し": [], "誤検出": []}
     for s, m in zip(scored, mask_list):
@@ -371,7 +446,7 @@ def draw(
         path = out / f"session_{d.name}.png"
         fig_session(
             path,
-            f"{d.name}（{label}、学習側 CV の検証側の確率）",
+            f"{d.name}（{label}、{suffix}）",
             dict(
                 t0=t0,
                 cells_t=cells_t,
@@ -418,7 +493,12 @@ def draw(
     for k in range(0, len(items), EVENTS_PER_FIG):
         path = out / f"events_{k // EVENTS_PER_FIG + 1:02d}.png"
         fig_events(
-            path, f"イベントごと（{label}）", items[k : k + EVENTS_PER_FIG]
+            path,
+            # 学習側の題は #43 のまま
+            f"イベントごと（{label}）"
+            if side == "train"
+            else f"イベントごと（{label}、{suffix}）",
+            items[k : k + EVENTS_PER_FIG],
         )
         paths.append(path)
     if rows:

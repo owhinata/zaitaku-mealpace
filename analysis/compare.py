@@ -25,7 +25,8 @@ from typing import Sequence
 
 import numpy as np
 
-import evaluate, features, features_v2, postprocess, split, train_eval
+import evaluate, features, features_v2, fixed_eval, postprocess, split
+import train_eval
 from train_eval import NEGATIVE, POSITIVE, UNUSED, Fold, Scored, SessionData
 
 # --- 定数（docs/decisions/0033。学習側の数字を見る前に固定） ---
@@ -89,6 +90,7 @@ class CompareResult:
     scored: dict  # 組 → [Scored]（図に使う。報告に出さない）
     train_windows: tuple
     timings: dict = field(default_factory=dict)
+    marker_note: str | None = None  # 印があるときの冒頭の 1 行（0034）
 
 
 # --- 読み込み ---
@@ -390,6 +392,8 @@ def split_train(root: Path, eval_min: int) -> dict:
     train_eval.check_collection_days(
         parts["train"], parts["eval"], train_eval.THROAT_EVAL_DAYS
     )
+    # 0034 の評価側の 7 本を学習側に入れない（データを読む前）
+    fixed_eval.assert_fixed_eval_not_in(parts["train"])
     return parts
 
 
@@ -453,6 +457,7 @@ def run(root: Path, eval_min: int) -> CompareResult:
         scored=scored_by_set,
         train_windows=train_windows,
         timings=timings,
+        marker_note=fixed_eval.marker_note(),
     )
 
 
@@ -568,6 +573,7 @@ def format_report(r: CompareResult) -> str:
     out = [
         "# M3 咽喉マイク: 特徴量の組と後処理の比較（学習側の交差検証だけ。#43）",
         "",
+        *([r.marker_note, ""] if r.marker_note else []),
         "## 実行の条件",
         "",
         "- 実行: 学習側だけ（評価側は採点していない。評価側を採点する引数は無い）",

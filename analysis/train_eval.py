@@ -15,6 +15,8 @@
             （THROAT_EVAL_DAYS。docs/decisions/0032）で、M1 は最後の2収集日
             （EVAL_DAYS）。評価側の日数は引数では選べない。既定の実行では
             評価側の throat.wav・throat_chunks.csv・events.csv を開かない。
+            --throat --final は止まる。咽喉マイクの評価側は
+            analysis/final_eval.py で 1 回だけ採点する（docs/decisions/0034）。
 
 分割は split.split_sessions、特徴量は features.extract_session（--throat では
 features.extract_throat_session、記録の範囲は evaluate.throat_session_span）、
@@ -34,7 +36,7 @@ import numpy as np
 import sklearn
 from sklearn.linear_model import LogisticRegression
 
-import evaluate, features, split
+import evaluate, features, fixed_eval, split
 
 # --- 定数（docs/decisions/0014。結果を見てから動かさない） ---
 SUBJECT = "self"  # docs/evaluation.md「M1・M2 の数字は self のみ」
@@ -54,6 +56,12 @@ LR_C = 1.0  # ハイパーパラメータは固定で、探索しない
 LR_CLASS_WEIGHT = "balanced"
 LR_MAX_ITER = 1000
 LR_SOLVER = "lbfgs"  # 乱数を使わない
+# git を呼ぶ作業ディレクトリ（リポジトリ直下。パスを指定した status のため）
+GIT_ROOT = Path(__file__).resolve().parent.parent
+THROAT_FINAL_STOP = (
+    "咽喉マイクの評価側は analysis/final_eval.py で 1 回だけ採点する"
+    "（docs/decisions/0034）。train_eval.py の --throat --final は使えません"
+)
 
 
 @dataclass(frozen=True, eq=False)
@@ -107,6 +115,8 @@ class Result:
     eval_reference: dict | None
     eval_windows: tuple | None
     throat: bool = False  # 咽喉マイクの経路（--throat）
+    # 印があるときの報告の冒頭の 1 行（咽喉マイクの経路だけ。0034）
+    marker_note: str | None = None
 
 
 # --- 分割の検査 ---
@@ -384,6 +394,17 @@ def _cond(name: str) -> str:
 def run(
     root: Path, eval_min: int, final: bool = False, throat: bool = False
 ) -> Result:
+    if final and throat:
+        # 評価側のファイルを開く前（split_sessions の前）に止める
+        raise SystemExit(THROAT_FINAL_STOP)
+    return _run_impl(root, eval_min, final, throat)
+
+
+def _run_impl(
+    root: Path, eval_min: int, final: bool = False, throat: bool = False
+) -> Result:
+    """run の中身。final と throat の組は合成データのテストからだけ呼ぶ
+    （CLI からは呼べない。docs/decisions/0034）。"""
     root = Path(root)
     if throat:
         # 咽喉マイクのセッションだけで分割・学習・評価する（docs/decisions/0031・0032）
@@ -391,6 +412,8 @@ def run(
             root, eval_min, subject=SUBJECT, kind="throat"
         )
         check_collection_days(parts["train"], parts["eval"], THROAT_EVAL_DAYS)
+        # 0034 の評価側の 7 本を学習側に入れない（データを読む前）
+        fixed_eval.assert_fixed_eval_not_in(parts["train"])
 
         def load(p):
             return load_session(
@@ -411,6 +434,7 @@ def run(
     model = fit_model(train, "最終モデル（学習側の全セッション）")
 
     per_session = conds = total = eval_reference = eval_windows = None
+    note = fixed_eval.marker_note() if throat else None
     if final:
         eval_data = [load(root / name) for name in parts["eval"]]
         eval_scored = [score(model, d) for d in eval_data]
@@ -446,6 +470,7 @@ def run(
         eval_reference=eval_reference,
         eval_windows=eval_windows,
         throat=throat,
+        marker_note=note,
     )
 
 
@@ -456,7 +481,7 @@ def _git(*args: str) -> str | None:
     try:
         out = subprocess.run(
             ["git", *args],
-            cwd=Path(__file__).resolve().parent,
+            cwd=GIT_ROOT,
             capture_output=True,
             text=True,
             check=True,
@@ -533,6 +558,8 @@ def format_report(r: Result) -> str:
         target = []
         pass_heading = "## 合格線との比較（docs/evaluation.md、M1 分岐点）"
     out = [title, ""]
+    if r.marker_note:
+        out += [r.marker_note, ""]
     out += [
         "## 実行の条件",
         "",
@@ -671,6 +698,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         "（docs/decisions/0031・0032）",
     )
     a = ap.parse_args(argv)
+    if a.final and a.throat:
+        raise SystemExit(THROAT_FINAL_STOP)
     if a.final and git_dirty():
         # 評価側の数字は、コミットから再現できる状態でだけ出す（
         # docs/decisions/0014）

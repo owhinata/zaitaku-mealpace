@@ -8,6 +8,7 @@ PC 側の解析・評価。ファームウェアが何で書かれていても�
 - `split.py`      セッション単位で学習／評価を分ける（窓単位の分割は実装しない）
 - `train_eval.py` M1 の分岐点: ロジスティック回帰で学習し、上の3つを使って採点した報告を出す（`--throat` で咽喉マイクのセッション。M3）
 - `features_v2.py`・`postprocess.py`・`compare.py`・`visualize.py` 咽喉マイクの特徴量の組と後処理を学習側の交差検証だけで比べ、図にする（#43、docs/decisions/0033）
+- `final_eval.py` 咽喉マイクの評価側を、事前に登録した 2 つの構成で 1 回だけ採点する（#40、docs/decisions/0034）
 - `evaluate_detector.py` M2 の検出器のセッション（`detect.csv`・`events.csv`）を `evaluate.py` の数え方で採点した報告を出す（#23、docs/decisions/0021）
 - `led_rule.py`   `detect.csv` の `positive` と `window_t_ms` から LED の状態（1 黄 / 2 緑）を docs/decisions/0018 の規則で再計算する（#25。`firmware/detector/led_rule.h` と同じ式。評価には使わない）
 - `ei_upload.py`  M2 の特徴量ベクトル（1 窓 1 項目）を Edge Impulse に投入する（#21。生の音声・IMU は上げない）
@@ -244,8 +245,10 @@ python analysis/train_eval.py data/raw --eval-min <N> --final   # 評価側を�
 ```
 python analysis/split.py data/raw --kind throat --eval-min 7                 # 分割の一覧だけ（ファイルの中身は開かない）
 python analysis/train_eval.py data/raw --eval-min 7 --throat                 # 既定。学習側だけ
-python analysis/train_eval.py data/raw --eval-min 7 --throat --final         # 評価側を採点する
 ```
+
+- **`--throat --final` は止まる**（CLI と `run()` の両方。評価側のファイルを開く前）。咽喉マイクの評価側は `final_eval.py` で 1 回だけ採点する
+  （下の「咽喉マイクの評価側の採点」、docs/decisions/0034）。
 
 - 分割: `split_sessions(root, eval_min, subject="self", kind="throat")`（CLI は `split.py --kind throat`。既定の `kind="m1"` は
   今までどおり）。`kind="throat"` は `fw` が `pc-throat` のセッションだけを分け、M1 と `detector` は戻り値の `excluded` に並べる。
@@ -301,7 +304,7 @@ python analysis/visualize.py data/raw --eval-min 7 --set a52 --post hyst --out d
 - `compare.py`: 組 5 つ × 後処理 2 = 10 行。ロジスティック回帰は `train_eval.cross_validate`、CNN は同じ fold（`cv_groups`）で fold の学習側
   だけで正規化（メルの帯域ごと）・陽性の重み・学習（PyTorch、CPU、種 0、決定的、4 スレッド）。採点の確率は numpy の順伝播。閾値は
   `train_eval.threshold_table`・`pick_threshold`、ヒステリシスは格子の各点を同じ規則で選ぶ。**#40 の候補はロジスティック回帰の 8 行だけ**
-  （CNN の 2 行と種 1・2 は参考）。報告は標準出力だけ（ファイルを書かない）。波形・特徴量の値・個々の窓の確率は出さない。
+  （CNN の 2 行と種 1・2 は参考。#40 で採点する構成は docs/decisions/0034 で改めた。下の節）。報告は標準出力だけ（ファイルを書かない）。波形・特徴量の値・個々の窓の確率は出さない。
 - `visualize.py`: 学習側のセッションだけ（評価側・`self` 以外は止まる）。PNG は `docs/log/` の下だけ（外は止まる）、100 dpi。
   セッションごとの図（窓平均 RMS、窓平均メル（0.25 秒ごと）、マーカー、陽性確率、後処理後の陽性、検出／見逃し／誤検出）、イベントごとの
   小図（`s` の前後 2 秒の 20 ms の包絡とフレームごとのメル。検出・見逃し・誤検出から各 4 件、1 枚に 2 件）、組の比較の散布図。
@@ -313,6 +316,48 @@ python analysis/visualize.py data/raw --eval-min 7 --set a52 --post hyst --out d
   librosa のキャッシュの環境変数（`LIBROSA_CACHE_DIR`（空でも）、`LIBROSA_CACHE_VERBOSE` > 0）や import 済みの librosa のキャッシュが
   有効なときは、特徴量をディスク・標準出力に出さないため `features_v2.py` が止まる（環境変数を外して実行し直す）。
 - 計算の時間（D8）: 1 回の実行が PC で 30 分以内の予算。CNN の学習（14 fold × 20 エポック × 種 3 つ）が大半を占める。
+
+## 咽喉マイクの評価側の採点（`final_eval.py`。#40）
+
+構成と手順は `docs/decisions/0034-throat-mic-final-eval-cnn-judgment.md`（評価側を開く前に固定し、コミットしてから実行する）。
+評価側（最後の 1 収集日の 7 本。0032）を **1 回だけ**採点し、その 1 回で事前に登録した 2 つの構成の数字を出す。
+
+- 構成 J（判定（#41）に使う）: CNN、入力 `mfe40`、種 0、0033 §2 の構成と学習、ヒステリシス 入り 0.95・出 0.85。
+- 構成 R（M1 と同じ手法の参照）: `a52` ＋ ロジスティック回帰（0014）、ヒステリシス 入り 0.85・出 0.65。
+
+どちらも学習側の全 14 本で学習し直す（正規化・陽性の重みも学習側だけ）。閾値・後処理・組・種は選び直さない。
+
+```
+python analysis/split.py data/raw --kind throat --eval-min 7   # 分割の一覧（名前だけ）を 0034 の FINAL-TRAIN・FINAL-EVAL と照らす
+python analysis/final_eval.py data/raw                          # 評価側を 1 回だけ採点する（引数は root だけ）
+```
+
+- **引数は root だけ。** 構成・閾値・後処理・種・評価側の日数・`--eval-min`（定数 `EVAL_MIN = 7`）を選ぶ引数も、再実行の引数（`--reproduce` など）も無い。
+- **止まる条件**（どれもデータを開く前。印も書かない）: 追跡しているファイルに未コミットの変更がある（`train_eval.git_dirty()`）、
+  `analysis/`・`tools/`・`docs/decisions/`・`docs/evaluation.md` に未コミットの変更か未追跡のファイルがある、git が使えない、0034 が無い・git に
+  追跡されていない、0034 の `FINAL-` で始まる行が `final_eval.py` の定数（`CONFIGS`・`EXPECTED_TRAIN`・`EXPECTED_EVAL`）と一字一句一致しない、
+  印 `docs/log/m3-final-40.txt` がある（中身は見ない）、図の出力先 `docs/log/<実行日>-40/` が既にある、torch・librosa・matplotlib を import できない・
+  librosa のキャッシュが有効。続いて `split_sessions(kind="throat")` の一覧が `EXPECTED_TRAIN`・`EXPECTED_EVAL`（順序も）と違えば止まる
+  （ここまでで開くのは `meta.json` とファイルの有無だけ）。学習側で止まる条件は 0014・0033 のまま（このときも印は書かない）。
+- **印（1 回だけにする仕組み）**: 学習が済み、評価側を開く直前に、固定のパス `docs/log/m3-final-40.txt` を `O_EXCL` で排他作成し、書き込み・fsync・
+  close（親のディレクトリも fsync）の後に評価側を開く。中身は実行の開始時刻・HEAD のコミット・0034 のパス・コマンドだけ。作成・書き込み・fsync の
+  どれかに失敗したら評価側を開かずに止まる。印は、その後の手順で止まっても消さない（評価側を開いたかもしれない実行として扱う）。
+  実行の後、印は log・図と一緒にコミットする。以後、`final_eval.py` はどのコミット・どの実行日からでも止まる。
+- **再現**: 人が、初回の採点に使ったコミット（印に書いたコミット）の別 worktree（`git worktree add <場所> <そのコミット>`）で、同じ入力
+  （元の `data/raw/` を絶対パスで渡す。`data/raw/` には何も書かない）・同じ依存の版・同じ環境で同じコマンドを走らせ、元の log に
+  「再現の実行（初回のコミットの別 worktree）」として記録する。worktree の中の印と図は worktree ごと捨てる。再現の実行の数字は、#41 の数字の
+  差し替えにも、構成・閾値・種の選択にも使わない。初回と差が出たら記録して人に渡す。
+- **出すもの**: 標準出力に Markdown（実行の条件、学習・評価のセッション一覧と cond、構成ごとの学習の要約・セッションごとの表・合算・混同行列・
+  参考値（常時陽性、陽性窓の割合）・合格線との比較（満たす / 満たさない の事実だけ。M3 の判定は #41 で人が行う）、注記、末尾に時間の実測）。
+  図は `docs/log/<実行日>-40/`（PNG、100 dpi）: 構成 J のセッションごと（`session_<名前>.png`）、イベントごとの小図（`events_NN.png`）、
+  評価側の構成 J・R の 2 点と合格線の比較（`final.png`）。図は手順 5 の確率と mask から描き、採点し直さない。
+- **出さないもの**: 波形、特徴量の値、個々の窓の確率。モデル・特徴量・確率はファイルに保存しない（書くのは印と PNG だけ）。
+- 評価側の図は `visualize.draw(..., side="eval")`（`final_eval.py` からだけ。`visualize.py` の CLI には無い）。評価側の名前だけを受け付け
+  （学習側の名前・`self` 以外は止まる）、出力先が既にあれば止まる。細かい表示の 10 秒の上限は学習側と同じ。
+- 依存と再現の条件は `compare.py` と同じ（報告の実行の条件に `.venv` の全パッケージの版、CPU、torch のスレッド数を出す）。
+- `fixed_eval.py`: 0034 の評価側の 7 本（`FINAL-EVAL`）が学習側に入る分割では、`train_eval.py --throat`・`compare.py`・`visualize.py` がデータを読む前に
+  止まる（後日セッションを足しても評価側を学習・交差検証に戻さない）。印があるときは、`--throat` と `compare.py` の報告の冒頭に「評価側は採点済み」の 1 行が出る。
+- `train_eval._git()` の作業ディレクトリはリポジトリ直下（`train_eval.GIT_ROOT`）。パスを指定した `git status` のため。
 
 ## 検出器の評価（`evaluate_detector.py`）
 
@@ -456,11 +501,14 @@ EI_API_KEY=... python analysis/ei_testing_result.py data/raw --project-id <ID>
 `test_features.py`・`test_features_m2.py`・`test_ei_upload.py`・`test_m2_*.py` は numpy、`test_train_eval.py` は numpy と scikit-learn を使う。
 咽喉マイクの経路のテスト（`test_features.py`・`test_evaluate.py`・`test_train_eval.py` の Throat の付くクラス）は、48 kHz・2 ch の
 合成の `throat.wav` を一時フォルダに作り、scipy と `tools/throat_check.py` を使う。
-#43 のテスト（`test_features_v2.py`・`test_postprocess.py`・`test_throat_compare.py`・`test_visualize.py`）は librosa・matplotlib・torch を使い、
+#43 のテスト（`test_features_v2.py`・`test_postprocess.py`・`test_throat_compare.py`・`test_visualize.py`）と #40 のテスト（`test_final_eval.py`）は
+librosa・matplotlib・torch を使い、
 `test_throat_compare.py`・`test_visualize.py` は合成の咽喉マイクのセッション 6 本で交差検証（CNN を含む）を回すので 1 分ほど掛かる。
 `compare.py` のテストの名前が `test_compare.py` でないのは、`test_ei_upload.py` より前に並ぶテストのモジュールがあると、unittest が
 モジュールの終わりに登録済みの片付けを全部実行し、`test_ei_upload.py` が import の時点で作った一時フォルダが先に消えるため。
-図は一時フォルダに書く（`visualize.LOG_ROOT` を差し替える）。
+図は一時フォルダに書く（`visualize.LOG_ROOT` を差し替える）。`test_final_eval.py` は印・図・合成の 0034 を一時フォルダに置き
+（`final_eval.REPO_ROOT` も差し替える）、git の検査は `train_eval._git` を差し替えるか、一時フォルダの git リポジトリで確かめる
+（このリポジトリの git と `docs/log/` は使わない。git が要る）。
 ほかは標準ライブラリの `unittest` だけで動く。
 合成データは一時フォルダに作り、`data/` は使わない。`test_train_eval.py` は 60 秒の合成セッションを 9 つ作って
 学習を繰り返すので、20 秒ほど掛かる。#22 のテストは実行ファイルを一時フォルダの Python スクリプトで、EI の送受信を偽の応答で差し替え、
