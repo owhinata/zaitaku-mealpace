@@ -32,6 +32,10 @@ docs/decisions/0025「0001 との関係」の「Linux 側の Python の配置の
    router は `arduino-router` 0.10.0（UNO Q の Debian パッケージ。こちらでは入れ替えない）。
 6. **LED（D6）。** この Issue の LED は MCU 側の RGB LED（LED3）の緑 1 色で、点けて消すことの確かめだけ。表示の規則（0018 の緑・黄の「目安」、
    1.0 秒で消灯）は持たない。M4 の表示の場所と規則は M4 で決める。
+7. **LED の変更（D6 を改める。人の指示 10/13）。** 点灯の確かめは MCU 側の 8×13 LED マトリクス（コア同梱の `Arduino_LED_Matrix` 0.1.3）に出す。
+   `zm_set_led(true)` で #32 の「微笑む顔」（`firmware/indicator/shapes.h` の静止画 12×8 を `firmware/unoq_mcu/shapes_unoq.h` に 1 枚だけ写し、
+   13 列の左寄せ、右端の 1 列は消灯）、`false` で全消灯。LED3 は使わない。流れる波線（動画）と表示の規則は M4。呼び出し名と Linux 側は変えない。
+   下の「確かめたこと」の LED3 の点灯と往復の遅れは、変える前（LED3 の緑）のスケッチでの値。マトリクスのスケッチは書き込み待ち。
 
 ## 理由
 

@@ -109,7 +109,8 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
 
 ## MCU のスケッチと Linux 側の配置（#38、docs/decisions/0035）
 
-- **MCU 側のスケッチ**: `firmware/unoq_mcu/`（RPC で `zm_set_led(bool)` を公開し、LED3 の緑を点けて消すだけ。表示の規則は M4）。
+- **MCU 側のスケッチ**: `firmware/unoq_mcu/`（RPC で `zm_set_led(bool)` を公開し、8×13 の LED マトリクスに #32 の微笑む顔を出す・全消灯するだけ。LED3 は使わない。波線と表示の規則は M4。0035 決定 7）。
+  10/13 に最初に書き込んだのは LED3 の緑のスケッチで、マトリクスのスケッチは書き込み待ち（P4 の計測中で USB-C を PC につなげないため）。
   コア `arduino:zephyr@1.0.0`、`Arduino_RouterBridge@0.4.3`（依存 `Arduino_RPClite` 0.3.1）、FQBN `arduino:zephyr:unoq`。版は基板の上の `~/.arduino15` と同じ。
   書き込みは UNO Q の USB-C を PC に直につなぎ、`arduino-cli board list` に出るポート（`/dev/ttyACM0`、`configuration: ADB Configuration`）で:
 
