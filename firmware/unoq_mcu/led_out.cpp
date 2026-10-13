@@ -25,9 +25,12 @@ void led_init() {
   led_set(false);  // 起動時は消灯
 }
 
+// 行は上下を反転して書く。UNO Q のマトリクスは R4 WiFi と行の向きが逆
+// （人の目視 10/13）。表（shapes_unoq.h）は #32 のまま。左右はそのまま。
 void led_set(bool on) {
   for (int y = 0; y < MATRIX_ROWS; ++y)
     for (int x = 0; x < MATRIX_COLS; ++x)
-      s_frame[y][x] = (on && x < SMILE_COLS) ? SMILE[y][x] : 0;
+      s_frame[y][x] =
+          (on && x < SMILE_COLS) ? SMILE[MATRIX_ROWS - 1 - y][x] : 0;
   s_matrix.renderBitmap(s_frame, MATRIX_ROWS, MATRIX_COLS);
 }
