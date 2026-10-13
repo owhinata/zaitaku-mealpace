@@ -25,18 +25,23 @@ docs/decisions/0025「0001 との関係」の「Linux 側の Python の配置の
    - Linux 側で router のソケットと MessagePack を扱うのは `device/unoq/mcu_rpc.py` だけ。MessagePack の符号化・復号は使う型だけをこのモジュールに書く
      （UNO Q に pip と python3-msgpack が無い。パッケージを入れない）。App Lab の `arduino.app_utils` は使わない。
    - MCU 側で `Arduino_RouterBridge` を include するのは `firmware/unoq_mcu/rpc_server.cpp` だけ。`Bridge.provide` で名前を登録する
-     （ハンドラはライブラリの別スレッドで動く。GPIO を 1 本書くだけなので `provide_safe` は使わない）。
-   - 公開する名前は `zm_set_led(bool)` だけ。M4 で表示の状態を渡す名前を足す。音声は渡さない。
+     （ハンドラはライブラリの別スレッドで動く。ハンドラは状態を渡すだけなので `provide_safe` は使わない）。
+   - 公開する名前は `zm_set_state(int)` だけ（0 消灯 / 1 流れる波線 / 2 微笑む顔。0018 の `led` の値）。範囲外は MCU が消灯にして false を返す。音声は渡さない。
+     最初は `zm_set_led(bool)` だったが、10/13 夜に `zm_set_state(int)` に替え、`zm_set_led` は残さない（人の決定。plan 38d、M4 で使うのは状態だけ）。
 5. **ビルドと版（D3・D4）。** MCU 側のスケッチ `firmware/unoq_mcu/` は 0001 の A 案（CMake が arduino-cli を呼ぶ）でビルドし、`SKETCH_NAME=unoq_mcu` のとき
    FQBN は `arduino:zephyr:unoq`。版は UNO Q の上の版に合わせて固定する: コア `arduino:zephyr@1.0.0`、`Arduino_RouterBridge@0.4.3`（依存 `Arduino_RPClite` 0.3.1）。
    router は `arduino-router` 0.10.0（UNO Q の Debian パッケージ。こちらでは入れ替えない）。
 6. **LED（D6）。** この Issue の LED は MCU 側の RGB LED（LED3）の緑 1 色で、点けて消すことの確かめだけ。表示の規則（0018 の緑・黄の「目安」、
    1.0 秒で消灯）は持たない。M4 の表示の場所と規則は M4 で決める。
-7. **LED の変更（D6 を改める。人の指示 10/13）。** 点灯の確かめは MCU 側の 8×13 LED マトリクス（コア同梱の `Arduino_LED_Matrix` 0.1.3）に出す。
-   `zm_set_led(true)` で #32 の「微笑む顔」（`firmware/indicator/shapes.h` の静止画 12×8 を `firmware/unoq_mcu/shapes_unoq.h` に 1 枚だけ写し、
-   13 列の左寄せ、右端の 1 列は消灯）、`false` で全消灯。LED3 は使わない。流れる波線（動画）と表示の規則は M4。呼び出し名と Linux 側は変えない。
-   UNO Q のマトリクスは R4 WiFi と行の向きが逆に見えたので（人の目視 10/13）、表は #32 のまま、書く側（`led_out.cpp`）で行を上下反転する。左右はそのまま。
-   マトリクス版（反転版）は 10/13 22:3x JST に書き込んだ。下の「確かめたこと」の LED3 の行と表の上 2 行は変える前（LED3 の緑）のスケッチでの値。
+7. **LED の変更（D6 を改める。人の指示・決定 10/13）。** 表示は MCU 側の 8×13 LED マトリクス（コア同梱の `Arduino_LED_Matrix` 0.1.3）に出し、LED3 は使わない。
+   状態 0 / 1 / 2 と 2 つの画（0018 の追記（2026-10-01）の表のまま）: `0` 全消灯、`1` 流れる波線（200 ms × 6 フレーム、周期 1.2 秒）、`2` 微笑む顔（静止画）。
+   図形と順序は #32 の `firmware/indicator/shapes.h`（生成物）と `shape_seq.h/.cpp` を `firmware/unoq_mcu/` からシンボリックリンクで使う（元は 1 つ。plan 38d の B1）。
+   受け取った状態をそのまま画にするだけで、表示の規則（0018 の保持、更新が 1.0 秒無ければ消灯）は持たない（M4）。
+   - 書くとき: 表の 12 列を 13 列の左寄せ（右端の 1 列は消灯）、行は上下を反転する（UNO Q のマトリクスは R4 WiFi と行の向きが逆に見えた。人の目視 10/13）。左右はそのまま。表は変えない。
+   - 上下反転の結果、UNO Q では波線が**左から右へ流れて見える**（0018 の追記は「左へ流れる」）。人が見て、このままでよいとした（10/13 夜）。
+   - スレッド: RPC のハンドラ（別スレッド）は状態を `std::atomic<uint8_t>` に書くだけで、描画は `loop()`（main スレッド）がフレームの変わったときだけ行う。
+     描画の組み立てと範囲の検査は Arduino に依存しない `matrix_frame.*` に分け、PC のホストテスト（`firmware/unoq_mcu/host/test_unoq_mcu.sh`）で確かめる。
+   - 経緯: 10/13 の午後に、LED3 の緑の版、次に `zm_set_led(bool)` で顔だけを出す版（反転版、22:3x JST）を書き込んだ。波線を入れた版（`zm_set_state`）は 22:5x JST に書き込んだ。
 
 ## 理由
 
@@ -67,13 +72,19 @@ docs/decisions/0025「0001 との関係」の「Linux 側の Python の配置の
   ACTIVE_LOW で、`digitalWrite` の LOW で点く（`led_out.cpp` の見込みどおり）。
 - マトリクス（決定 7）: 10/13 22:3x JST に USB（adb）で書き込んだ（スケッチ 88,208 B、所要 約 10 秒）。最初の版は顔が上下反転して見え（人の目視）、
   行を上下反転して書く版に直して書き込み直した。`on` で微笑む顔、`off` で全消灯（人が目で確かめた）。
-- `zm_set_led` の往復の遅れ（`led_check.py bench --n 100 --warmup 5`。送ってから応答まで。合否は付けない）:
+- 波線を入れた版（決定 7、`zm_set_state`）: 10/13 22:5x JST に USB（adb）で書き込んだ（スケッチ 89,972 B、所要 約 10 秒）。
+  リンクの `shape_seq.cpp` がビルドに入ったこと（`arduino-cli compile -v` の出力）と、`static_assert(ATOMIC_CHAR_LOCK_FREE == 2)` が通ったことを確かめた。
+  `led_check.py wave` で波線が点滅せずに流れ（左から右へ流れて見える。上の決定 7）、`smile` で微笑む顔、`off` で全消灯（人が目で確かめた）。
+- 往復の遅れ（`led_check.py bench --n 100 --warmup 5`。合否は付けない）:
 
-  | スケッチ | 電源 | 件数 | 中央値 | 95 パーセンタイル | 最大 |
-  |---|---|---|---|---|---|
-  | LED3 の緑 | USB-C を PC に直挿し | 100 | 5.103 ms | 5.239 ms | 5.377 ms |
-  | LED3 の緑 | PD（下の構成） | 100 | 5.090 ms | 5.216 ms | 5.341 ms |
-  | マトリクス（反転版） | USB-C を PC に直挿し | 100 | 5.293 ms | 5.412 ms | 5.471 ms |
+  | スケッチ（呼び出し） | 測る範囲 | 電源 | 件数 | 中央値 | 95 パーセンタイル | 最大 |
+  |---|---|---|---|---|---|---|
+  | LED3 の緑（`zm_set_led`） | 送ってから応答まで（ハンドラの中で GPIO を書く） | USB-C を PC に直挿し | 100 | 5.103 ms | 5.239 ms | 5.377 ms |
+  | LED3 の緑（`zm_set_led`） | 同上 | PD（下の構成） | 100 | 5.090 ms | 5.216 ms | 5.341 ms |
+  | 顔だけ（`zm_set_led`、反転版） | 送ってから応答まで（ハンドラの中で描画する） | USB-C を PC に直挿し | 100 | 5.293 ms | 5.412 ms | 5.471 ms |
+  | 波線と顔（`zm_set_state`） | 状態を渡して応答が返るまで。**描画は含まない**（描画は `loop()` が後で行う） | USB-C を PC に直挿し | 100 | 5.301 ms | 5.426 ms | 5.574 ms |
+
+  最後の行は、前の 3 行（ハンドラの中で書き終えてから返す）と測る範囲が違う。
 
 - PD 電源: PD 対応モバイルバッテリー（5000 mAh）→ USB-C→3.5 mm 変換アダプタ（UGREEN CM721。DAC 搭載、PD 60 W パススルー）の PD の入口 → UNO Q。
   plan のハブの代わりに、このアダプタのパススルーを使う構成。起動し、ALSA の `hw:CARD=Audio` が見え（P1）、カーネルログに電圧・過電流・USB のリセットの行は無く
@@ -94,4 +105,4 @@ docs/decisions/0025「0001 との関係」の「Linux 側の Python の配置の
 - arduino-cli で UNO Q の MCU 側のビルドと書き込みができるか → できた（上の「書き込み」）。
 - PD パススルー経由で UNO Q とアダプタが給電されたまま動くか → 動いた（上の「PD 電源」。ハブではなくアダプタのパススルー）。持ち時間は未確認。
 - RPC の遅れ → 上の表（中央値 約 5.1〜5.3 ms）。Linux 側の 1 ホップの処理時間は M4 に回す（人の決定 D7）。
-- LED をどこに出すか → この Issue は MCU 側の LED3、次に 8×13 マトリクスの微笑む顔で点灯を確かめただけ（決定 7）。M4 の表示の場所と規則は M4 で決める。
+- LED をどこに出すか → この Issue は MCU 側の 8×13 マトリクスに状態 0 / 1 / 2 の画を出すところまで（決定 7）。表示の規則は M4 で入れる。

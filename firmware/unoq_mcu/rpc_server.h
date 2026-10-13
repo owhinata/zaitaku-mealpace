@@ -4,5 +4,5 @@
 // Arduino と MsgPack の型を出さない。
 #pragma once
 
-// Bridge を始め、zm_set_led(bool) を登録する。led_init() の後に呼ぶ。
+// Bridge を始め、zm_set_state(int) を登録する。led_init() の後に呼ぶ。
 void rpc_begin();

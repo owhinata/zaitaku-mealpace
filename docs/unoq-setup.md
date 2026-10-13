@@ -109,8 +109,9 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
 
 ## MCU のスケッチと Linux 側の配置（#38、docs/decisions/0035）
 
-- **MCU 側のスケッチ**: `firmware/unoq_mcu/`（RPC で `zm_set_led(bool)` を公開し、8×13 の LED マトリクスに #32 の微笑む顔を出す・全消灯するだけ。LED3 は使わない。波線と表示の規則は M4。0035 決定 7）。
-  10/13 に最初に書き込んだのは LED3 の緑のスケッチで、マトリクスのスケッチ（行を上下反転して書く版）は 10/13 22:3x JST に書き込み済み。
+- **MCU 側のスケッチ**: `firmware/unoq_mcu/`（RPC で `zm_set_state(int)` を公開し、8×13 の LED マトリクスに状態 0 = 全消灯、1 = 流れる波線、2 = 微笑む顔を出すだけ。
+  図形と順序は `firmware/indicator/` へのシンボリックリンク。行は上下を反転して書き、UNO Q では波線が左から右へ流れて見える（人が可とした）。LED3 は使わない。表示の規則は M4。0035 決定 7）。
+  今入っているのは 10/13 22:5x JST に書き込んだ波線と顔の版（その前に LED3 の緑の版、顔だけの版を書いた）。
   コア `arduino:zephyr@1.0.0`、`Arduino_RouterBridge@0.4.3`（依存 `Arduino_RPClite` 0.3.1）、FQBN `arduino:zephyr:unoq`。版は基板の上の `~/.arduino15` と同じ。
   書き込みは UNO Q の USB-C を PC に直につなぎ、`arduino-cli board list` に出るポート（`/dev/ttyACM0`、`configuration: ADB Configuration`）で:
 
@@ -127,8 +128,10 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
   実行は `python3 -B`（`__pycache__` を作らない）:
 
   ```
-  ssh arduino@unoq.local 'python3 -B ~/zaitaku-mealpace-device/led_check.py on'      # off / bench --n 100 --warmup 5
+  ssh arduino@unoq.local 'python3 -B ~/zaitaku-mealpace-device/led_check.py wave'    # smile / off / bench --n 100 --warmup 5
   ```
+
+  `wave`・`smile` は表示したまま終わる。`bench` は顔と消灯を交互に送って往復を測る（状態を渡して応答が返るまで。描画は含まない）。最後に消灯を送る。
 
   記録（`record.py`）の間は動かさない（0028 決定 3）。消すときは `ssh arduino@unoq.local 'rm -r ~/zaitaku-mealpace-device'`。
 - **PD 給電の構成（10/13）**: PD 対応モバイルバッテリー → USB-C→3.5 mm 変換アダプタ（UGREEN CM721。DAC 搭載、PD 60 W パススルー）の PD の入口 → UNO Q。

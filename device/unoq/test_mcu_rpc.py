@@ -107,7 +107,7 @@ class TestCodec(unittest.TestCase):
         -(2**31) - 1,
         -(2**63),
         "",
-        "zm_set_led",
+        "zm_set_state",
         "あ" * 10,
         "x" * 31,
         "x" * 32,
@@ -119,7 +119,7 @@ class TestCodec(unittest.TestCase):
         b"x" * 300,
         b"x" * 70000,
         [],
-        [0, 1, "zm_set_led", [True]],
+        [0, 1, "zm_set_state", [2]],
         list(range(15)),
         list(range(16)),
         list(range(70000)),
@@ -155,19 +155,52 @@ class TestCodec(unittest.TestCase):
 
 
 class TestMcuLink(unittest.TestCase):
-    def test_set_led_sends_request_and_returns(self):
-        """2. 要求の形と、同じ msgid の応答で戻ること。"""
+    def test_set_state_sends_request_and_returns(self):
+        """2. 要求の形（[0, msgid, "zm_set_state", [n]]）と、同じ msgid の応答で戻ること。"""
         r = FakeRouter(ok)
         try:
             link = r.link()
-            self.assertIsNone(link.set_led(True))
-            link.set_led(False)
+            self.assertIsNone(link.set_state(mcu_rpc.STATE_WAVE))
+            link.set_state(mcu_rpc.STATE_SMILE)
+            link.set_state(mcu_rpc.STATE_OFF)
         finally:
             r.close()
         self.assertEqual(
             r.requests,
-            [[0, 0, "zm_set_led", [True]], [0, 1, "zm_set_led", [False]]],
+            [
+                [0, 0, "zm_set_state", [1]],
+                [0, 1, "zm_set_state", [2]],
+                [0, 2, "zm_set_state", [0]],
+            ],
         )
+        self.assertEqual(
+            (mcu_rpc.STATE_OFF, mcu_rpc.STATE_WAVE, mcu_rpc.STATE_SMILE),
+            (0, 1, 2),
+        )
+
+    def test_out_of_range_is_not_sent(self):
+        """範囲外（-1、3、True、1.0、None）は ValueError で、何も送らない。"""
+        r = FakeRouter(ok)
+        try:
+            link = r.link()
+            for bad in (-1, 3, 256, True, False, 1.0, None, "1"):
+                with self.subTest(bad=bad):
+                    with self.assertRaises(ValueError):
+                        link.set_state(bad)
+            link.set_state(0)  # この 1 件だけが届く
+        finally:
+            r.close()
+        self.assertEqual(r.requests, [[0, 0, "zm_set_state", [0]]])
+
+    def test_mcu_returns_false(self):
+        """MCU が範囲外として false を返したら McuRpcError。"""
+        r = FakeRouter(lambda req: msgpack.packb([1, req[1], None, False]))
+        try:
+            with self.assertRaises(mcu_rpc.McuRpcError) as cm:
+                r.link().set_state(2)
+            self.assertNotIsInstance(cm.exception, mcu_rpc.McuRpcTimeout)
+        finally:
+            r.close()
 
     def test_skips_other_msgid_and_reassembles_bytes(self):
         """3. 違う msgid と通知を読み飛ばす。1 バイトずつ届いても組み立てる。"""
@@ -181,7 +214,7 @@ class TestMcuLink(unittest.TestCase):
 
         r = FakeRouter(respond, chunk=1)
         try:
-            r.link().set_led(True)
+            r.link().set_state(2)
         finally:
             r.close()
 
@@ -192,7 +225,7 @@ class TestMcuLink(unittest.TestCase):
         )
         try:
             with self.assertRaises(mcu_rpc.McuRpcError) as cm:
-                r.link().set_led(True)
+                r.link().set_state(2)
             self.assertNotIsInstance(cm.exception, mcu_rpc.McuRpcTimeout)
         finally:
             r.close()
@@ -201,7 +234,7 @@ class TestMcuLink(unittest.TestCase):
         r = FakeRouter(lambda req: msgpack.packb([1, req[1], None, None]))
         try:
             with self.assertRaises(mcu_rpc.McuRpcError):
-                r.link().set_led(True)
+                r.link().set_state(2)
         finally:
             r.close()
 
@@ -210,7 +243,7 @@ class TestMcuLink(unittest.TestCase):
         r = FakeRouter(lambda req: None)
         try:
             with self.assertRaises(mcu_rpc.McuRpcTimeout):
-                r.link(timeout_s=0.2).set_led(True)
+                r.link(timeout_s=0.2).set_state(2)
         finally:
             r.close()
 
@@ -221,7 +254,7 @@ class TestMcuLink(unittest.TestCase):
         link = mcu_rpc.McuLink(mcu_rpc._SocketTransport(a), timeout_s=1.0)
         try:
             with self.assertRaises(mcu_rpc.McuRpcError) as cm:
-                link.set_led(True)
+                link.set_state(2)
             self.assertNotIsInstance(cm.exception, mcu_rpc.McuRpcTimeout)
         except BrokenPipeError:
             pass  # 送る時点で閉じていると分かる場合
@@ -242,8 +275,8 @@ class TestMcuLink(unittest.TestCase):
         try:
             link = r.link(timeout_s=0.2)
             with self.assertRaises(mcu_rpc.McuRpcTimeout):
-                link.set_led(True)
-            link.set_led(False)
+                link.set_state(2)
+            link.set_state(0)
         finally:
             r.close()
 
@@ -253,11 +286,11 @@ class FakeLink:
         self.calls = []
         self.fail_at = fail_at
 
-    def set_led(self, on):
+    def set_state(self, state):
         if self.fail_at is not None and len(self.calls) == self.fail_at:
-            self.calls.append(on)
+            self.calls.append(state)
             raise mcu_rpc.McuRpcTimeout("合成")
-        self.calls.append(on)
+        self.calls.append(state)
 
     def __enter__(self):
         return self
@@ -284,21 +317,23 @@ class TestLedCheck(unittest.TestCase):
         self.assertAlmostEqual(s["p95_ms"], float(np.percentile(ms, 95)))
         self.assertAlmostEqual(s["max_ms"], float(ms.max()))
         self.assertEqual(len(link.calls), 5 + 100 + 1)
-        self.assertEqual(link.calls[-1], False)
-        self.assertEqual(link.calls[:4], [True, False, True, False])
+        self.assertEqual(link.calls[-1], 0)
+        self.assertEqual(link.calls[:4], [2, 0, 2, 0])
+        self.assertTrue(set(link.calls) <= {0, 2})
 
     def test_bench_sends_off_on_exception(self):
         link = FakeLink(fail_at=10)
         with self.assertRaises(mcu_rpc.McuRpcTimeout):
             led_check.run_bench(link, 100, 5)
-        self.assertEqual(link.calls[-1], False)
+        self.assertEqual(link.calls[-1], 0)
         self.assertEqual(len(link.calls), 12)
 
-    def test_cli_on_off_bench(self):
-        for cmd, want_last in (
-            (["on"], True),
-            (["off"], False),
-            (["bench", "--n", "10"], False),
+    def test_cli_wave_smile_off_bench(self):
+        for cmd, want_calls in (
+            (["wave"], [1]),
+            (["smile"], [2]),
+            (["off"], [0]),
+            (["bench", "--n", "10"], None),
         ):
             with self.subTest(cmd=cmd):
                 link = FakeLink()
@@ -306,13 +341,23 @@ class TestLedCheck(unittest.TestCase):
                 with contextlib.redirect_stdout(out):
                     rc = led_check.main(cmd, open_link=lambda link=link: link)
                 self.assertEqual(rc, 0)
-                self.assertEqual(link.calls[-1], want_last)
                 text = out.getvalue()
                 self.assertNotIn("判定", text)
-                if cmd[0] == "on":
-                    self.assertEqual(link.calls, [True])
-                if cmd[0] == "bench":
+                if want_calls is not None:
+                    self.assertEqual(link.calls, want_calls)
+                else:
+                    self.assertEqual(link.calls[-1], 0)
                     self.assertIn("件数 10", text)
+                    self.assertIn("描画は含まない", text)
+
+    def test_cli_rejects_old_names(self):
+        for cmd in (["on"], ["ok"], ["wait"]):
+            with self.subTest(cmd=cmd):
+                with (
+                    contextlib.redirect_stderr(io.StringIO()),
+                    self.assertRaises(SystemExit),
+                ):
+                    led_check.main(cmd, open_link=FakeLink)
 
 
 FORBIDDEN_IMPORTS = {
@@ -384,14 +429,30 @@ class TestStatic(unittest.TestCase):
             (FIRMWARE / "rpc_server.cpp").read_text(encoding="utf-8"),
             r"(?m)^#include <Arduino_RouterBridge\.h>",
         )
-        for path in sorted(FIRMWARE.iterdir()):
-            if path.name == "rpc_server.cpp":
-                continue
-            with self.subTest(path=path.name):
-                self.assertNotRegex(
-                    path.read_text(encoding="utf-8"),
-                    r'(?m)^\s*#\s*include\s*[<"]Arduino_RouterBridge',
-                )
+        sources = sorted(p for p in FIRMWARE.rglob("*") if p.is_file())
+        names = {p.relative_to(FIRMWARE).as_posix() for p in sources}
+        # リンク（→ indicator・detector）も読めること
+        for link in ("shapes.h", "shape_seq.h", "shape_seq.cpp", "led_rule.h"):
+            self.assertIn(link, names)
+            self.assertTrue((FIRMWARE / link).is_symlink())
+        self.assertIn("host/test_unoq_mcu.cpp", names)
+        self.assertNotIn("shapes_unoq.h", names)
+        for path in sources:
+            rel = path.relative_to(FIRMWARE).as_posix()
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(path=rel):
+                if rel != "rpc_server.cpp":
+                    self.assertNotRegex(
+                        text, r'(?m)^\s*#\s*include\s*[<"]Arduino_RouterBridge'
+                    )
+                if rel != "led_out.cpp":
+                    self.assertNotRegex(
+                        text, r'(?m)^\s*#\s*include\s*[<"]Arduino_LED_Matrix'
+                    )
+                if rel.startswith("matrix_frame"):
+                    self.assertNotRegex(
+                        text, r'(?m)^\s*#\s*include\s*[<"]Arduino\.h'
+                    )
         for path in sorted(HERE.glob("*.py")):
             # テストは配らない（偽の router に socketpair を使う）
             if path.name == "mcu_rpc.py" or path.name.startswith("test_"):

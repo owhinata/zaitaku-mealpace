@@ -6,7 +6,7 @@ arduino-router（systemd のサービス）の UNIX ソケットに MessagePack-
 が Bridge.provide で名前を登録している。
 
 このプロジェクトで router のソケットと MessagePack を扱うのはこのモジュール
-だけ（CLAUDE.md「実装方針」、0025）。外に出すのは McuLink.set_led(bool) だけで、
+だけ（CLAUDE.md「実装方針」、0025）。外に出すのは McuLink.set_state(int) だけで、
 引数・戻り値に MessagePack の型を出さない。
 
 MessagePack の符号化・復号は使う型だけ（nil・bool・整数・str・bin・array・
@@ -20,8 +20,14 @@ import time
 
 # router のソケット（R0、10/13: /var/run/arduino-router.sock、srw-rw-rw-）
 SOCKET_PATH = "/var/run/arduino-router.sock"
-# MCU 側の呼び出し名（rpc_server.cpp の RPC_SET_LED と同じ）
-_METHOD_SET_LED = "zm_set_led"
+# MCU 側の呼び出し名（rpc_server.cpp の RPC_SET_STATE と同じ）
+_METHOD_SET_STATE = "zm_set_state"
+
+# 表示の状態（0018 の追記の表の値。名前は画の名前で、意味づけは 0018 に任せる）
+STATE_OFF = 0  # 消灯
+STATE_WAVE = 1  # 流れる波線
+STATE_SMILE = 2  # 微笑む顔
+_STATES = (STATE_OFF, STATE_WAVE, STATE_SMILE)
 
 _REQUEST = 0
 _RESPONSE = 1
@@ -251,7 +257,7 @@ class _SocketTransport:
 
 
 class McuLink:
-    """MCU への RPC。公開するのは set_led だけ。
+    """MCU への RPC。公開するのは set_state だけ。
 
     transport は send(bytes)・recv(n) -> bytes（閉じたら b""）を持つもの。
     settimeout(秒) があれば、応答を待つ残り時間をそのつど渡す。
@@ -285,11 +291,17 @@ class McuLink:
     def __exit__(self, *exc):
         self.close()
 
-    def set_led(self, on):
-        """MCU の LED を点ける（True）か消す（False）。応答を待って戻る。"""
-        result = self._call(_METHOD_SET_LED, [bool(on)])
+    def set_state(self, state):
+        """MCU のマトリクスの表示の状態（STATE_OFF / WAVE / SMILE）を渡す。
+
+        応答を待って戻る。応答は MCU が状態を受け取った時点で返り、描画の
+        完了は含まない。0〜2 の int でなければ（bool も）送らずに ValueError。
+        """
+        if type(state) is not int or state not in _STATES:
+            raise ValueError(f"状態は 0・1・2 の int: {state!r}")
+        result = self._call(_METHOD_SET_STATE, [state])
         if result is not True:
-            raise McuRpcError(f"zm_set_led の応答が true でない: {result!r}")
+            raise McuRpcError(f"zm_set_state の応答が true でない: {result!r}")
 
     def _call(self, method, params):
         msgid = self._msgid
