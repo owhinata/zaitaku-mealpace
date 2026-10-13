@@ -15,6 +15,10 @@
 | WirePlumber | 0.5.8-2 |
 | pulseaudio-utils | 無い（入れない。取り出しは PipeWire の `pw-record`） |
 | コーデック | SBC（UNO Q 側の A2DP シンクは sbc / opus_05 / opus_g。送信機とは SBC で合意） |
+| arduino-router | 0.10.0（Debian パッケージ。`arduino-router.service`、ソケット `/var/run/arduino-router.sock`（`srw-rw-rw-`）、MCU とはシリアル `/dev/ttyHS1` 115200。#38） |
+| arduino-cli / arduino-app-cli | 1.5.1 / 0.13.0（基板の上。App Lab の既定のアプリは無い） |
+| Python | 3.13.5（numpy・msgpack・pip は無い） |
+| rsync | 3.5.0（人が `sudo apt install rsync` で入れた。10/13、#38 の `deploy-unoq` のため） |
 
 ## 残した設定（音声ではない）
 
@@ -100,6 +104,35 @@ ssh arduino@<UNO Q> 'find ~ /tmp -xdev -type f \( -iname "*.wav" -o -iname "*.ra
 
 新しいファイルに音声の形式のものが無く、音声の拡張子のファイルが 0 件であること（docs/log/2026-10-08.md と同じ方法）。
 `~/.local/state/wireplumber/stream-properties` は確認から除く。`pw-record` のストリームが来ると WirePlumber が音量・ミュートの復元の状態を書くテキストで、音声ではない（10/10 の実測）。
+ほかに音声ではない既知のもの（10/13）: `~/.bash_history`（人の対話のシェルの履歴）、`/tmp/.X0-lock`（起動のたびに X が作る）、`~/zaitaku-mealpace-device/` の配ったファイル（下）。
+UNO Q の時計は起動の後に進むことがある（10/13、ファイルの日時と `date -u` がずれた。NTP によると見ているが未確認）。`-newermt` の基準時刻が曖昧なときも、音声の拡張子の検索が 0 件であることで補う。
+
+## MCU のスケッチと Linux 側の配置（#38、docs/decisions/0035）
+
+- **MCU 側のスケッチ**: `firmware/unoq_mcu/`（RPC で `zm_set_led(bool)` を公開し、LED3 の緑を点けて消すだけ。表示の規則は M4）。
+  コア `arduino:zephyr@1.0.0`、`Arduino_RouterBridge@0.4.3`（依存 `Arduino_RPClite` 0.3.1）、FQBN `arduino:zephyr:unoq`。版は基板の上の `~/.arduino15` と同じ。
+  書き込みは UNO Q の USB-C を PC に直につなぎ、`arduino-cli board list` に出るポート（`/dev/ttyACM0`、`configuration: ADB Configuration`）で:
+
+  ```
+  cmake -S . -B build-unoq -DSKETCH_NAME=unoq_mcu -DPORT=/dev/ttyACM0 -DPYTHON3=$PWD/.venv/bin/python3
+  cmake --build build-unoq --target build && cmake --build build-unoq --target upload
+  ```
+
+  中身は remoteocd（USB の adb 越し）。書く物を UNO Q の `/tmp/remoteocd/`（`flash_sketch.cfg`、`unoq_mcu.ino.elf-zsk.bin`、`zephyr-arduino_uno_q_stm32u585xx.elf`）に置き、
+  基板の上の openocd が SWD で書く。`/tmp` は tmpfs で、再起動で消える。音声ではない。10/13 に書き込んだ（10/13 のコミットのスケッチ）。
+  書き込みの直後に router の journal に `decoding packet: invalid packet, expected array` が数行出るが、その後の RPC は通る。
+- **Linux 側の配置**: `cmake --build build-unoq --target deploy-unoq`（rsync。宛先は `-DUNOQ_HOST`、既定 `arduino@unoq.local`）で、`device/unoq/DEPLOY_FILES` の
+  2 ファイル（`mcu_rpc.py`・`led_check.py`）だけを `~/zaitaku-mealpace-device/` に配る。常駐させない（systemd のユニットは無い）。ファイルを書かない。
+  実行は `python3 -B`（`__pycache__` を作らない）:
+
+  ```
+  ssh arduino@unoq.local 'python3 -B ~/zaitaku-mealpace-device/led_check.py on'      # off / bench --n 100 --warmup 5
+  ```
+
+  記録（`record.py`）の間は動かさない（0028 決定 3）。消すときは `ssh arduino@unoq.local 'rm -r ~/zaitaku-mealpace-device'`。
+- **PD 給電の構成（10/13）**: PD 対応モバイルバッテリー → USB-C→3.5 mm 変換アダプタ（UGREEN CM721。DAC 搭載、PD 60 W パススルー）の PD の入口 → UNO Q。
+  SH-12JK はこのアダプタの 3.5 mm に挿す。ALSA では `hw:CARD=Audio`。PC とは Wi-Fi の ssh だけ。この構成で `record.py --throat sh12jk-wired-unoq-usbaudio` の
+  60 秒が使わない目安に当たらなかった（docs/log/2026-10-13.md）。
 
 ## 構成 A は使わない。構成 B も記録には使わない
 

@@ -1,6 +1,6 @@
 # 0035 UNO Q の Linux 側のコードの置き場所と配置、MCU との RPC の方式（#38）
 
-日付: 2026-10-13　状態: 案（実測待ち。書き込み・配置・LED の点灯・往復の遅れ・PD 電源の結果を入れてから「採用」にする）
+日付: 2026-10-13　状態: 採用（10/13。書き込み・配置・LED の点灯・往復の遅れ・PD 電源の実測を下の「確かめたこと」に入れた）
 
 plan #38（続き。PLAN-SHA `fa908f0da6355c58`、人が承認、Codex の plan レビューを 3 回通した）と、人の決定 D1〜D4（10/13）による。
 docs/decisions/0025「0001 との関係」の「Linux 側の Python の配置の方法は M3 の Issue で決める」に答える。0025 の本文は変えない。
@@ -52,15 +52,38 @@ docs/decisions/0025「0001 との関係」の「Linux 側の Python の配置の
   App Lab の既定のアプリは無い（`No default app set`）。
 - PC: コアと RouterBridge を上の版で入れ、`board listall` で FQBN `arduino:zephyr:unoq` を確かめた。空のスケッチと `firmware/unoq_mcu/` のビルドが通った。
   書き込みは `remoteocd`（`upload --adb-path ... -s <シリアル番号>`。USB の adb 越し）が既定で、network の `remoteocd_network` もある（コアの `platform.txt`）。
+- 書き込み（A1・A3）: UNO Q の USB-C を PC に直につなぐと、`arduino-cli board list` に `/dev/ttyACM0`（serial、`configuration: ADB Configuration`）が出た。
+  `cmake --build build-unoq --target upload`（remoteocd。UNO Q の `/tmp/remoteocd/` に書く物を置き、基板の上の openocd が SWD で書く）で書けた。
+  スケッチ 89,280 B、所要 約 10 秒。消したのはスケッチの領域だけ（ローダは照合して同じなら書かない。ブートローダの書き込みはしていない）。
+  `/tmp/remoteocd/` は tmpfs で、再起動で消える。
+- 配置: `deploy-unoq`（rsync）で `~/zaitaku-mealpace-device/` に `led_check.py`・`mcu_rpc.py` の 2 つだけが載った。UNO Q に rsync は初め無く、
+  人が `sudo apt install rsync`（3.5.0）で入れた（人の決定 10/13。D1 のとおり rsync で配る）。`python3 -B` の実行の後も `__pycache__` は無い。
+- LED: MCU 側の LED3 の緑（PH11）が `led_check.py on` で点き、`off` で消えた（人が目で確かめた）。Arduino のピン表は旗 0、Zephyr のボード定義は
+  ACTIVE_LOW で、`digitalWrite` の LOW で点く（`led_out.cpp` の見込みどおり）。
+- `zm_set_led` の往復の遅れ（`led_check.py bench --n 100 --warmup 5`。送ってから応答まで。合否は付けない）:
 
-## 確かめていないこと（実測の後に書き足す）
+  | 電源 | 件数 | 中央値 | 95 パーセンタイル | 最大 |
+  |---|---|---|---|---|
+  | USB-C を PC に直挿し | 100 | 5.103 ms | 5.239 ms | 5.377 ms |
+  | PD（下の構成） | 100 | 5.090 ms | 5.216 ms | 5.341 ms |
 
-- PC から USB（adb）で書き込めるか（A1・A3）。
-- LED の極性（Arduino のピン表は旗 0、Zephyr のボード定義は ACTIVE_LOW。`led_out.cpp` は LOW で点く見込み）。
-- `zm_set_led` の往復の遅れ（直挿し・PD の 2 通り）。
-- PD 電源（P1〜P4）。
+- PD 電源: PD 対応モバイルバッテリー（5000 mAh）→ USB-C→3.5 mm 変換アダプタ（UGREEN CM721。DAC 搭載、PD 60 W パススルー）の PD の入口 → UNO Q。
+  plan のハブの代わりに、このアダプタのパススルーを使う構成。起動し、ALSA の `hw:CARD=Audio` が見え（P1）、カーネルログに電圧・過電流・USB のリセットの行は無く
+  （起動の途中の数え直しの 1 行だけ。`/sys/class/power_supply` は無く電圧は読めない。P3）、LED の RPC も動いた（P2b）。60 秒の記録（P2）は `throat_check.py` の
+  使わない目安に当たらなかった（overrun 0、推定差 +4 ms、段差 0、0 の区間 0）。持ち時間（P4）は人が決めるまで保留。
+- 書き込みの直後に router の journal に `decoding packet: invalid packet, expected array` が出る。RouterBridge が起動時にシリアルに書く文字列
+  （前の回の壊れた RPC を流すためのもの）を router が読んだものと見ている（見立て）。その後の RPC は通った。
+
+## 確かめていないこと
+
+- PD のバッテリーの持ち時間（P4）。電源由来の雑音の比較（任意）。
+- 往復の遅れの、M4 の検出器を動かしている間の値（この記録の数字は検出器を動かしていないときのもの）。
 
 ## 0025「確かめていないこと」との関係
 
-この Issue で答える 0025 の項目（arduino-cli、PD、RPC の遅れ）は、実測の後にここへ参照で書く。0025 の本文は変えない。
-1 窓あたりの計算時間の実測は M4 に回す（人の決定 D7）。
+0025 の「確かめていないこと」のうち、次をこの記録で答えた（0025 の本文は変えない）。
+
+- arduino-cli で UNO Q の MCU 側のビルドと書き込みができるか → できた（上の「書き込み」）。
+- PD パススルー経由で UNO Q とアダプタが給電されたまま動くか → 動いた（上の「PD 電源」。ハブではなくアダプタのパススルー）。持ち時間は未確認。
+- RPC の遅れ → 上の表（中央値 約 5.1 ms）。Linux 側の 1 ホップの処理時間は M4 に回す（人の決定 D7）。
+- LED をどこに出すか → この Issue は MCU 側の LED3 で点灯を確かめただけ。M4 の表示の場所は M4 で決める（D6）。
