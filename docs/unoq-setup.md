@@ -108,6 +108,9 @@ ssh arduino@<UNO Q> 'find ~ /tmp -xdev -type f \( -iname "*.wav" -o -iname "*.ra
 新しいファイルに音声の形式のものが無く、音声の拡張子のファイルが 0 件であること（docs/log/2026-10-08.md と同じ方法）。
 `~/.local/state/wireplumber/stream-properties` は確認から除く。`pw-record` のストリームが来ると WirePlumber が音量・ミュートの復元の状態を書くテキストで、音声ではない（10/10 の実測）。
 ほかに音声ではない既知のもの（10/13）: `~/.bash_history`（人の対話のシェルの履歴）、`/tmp/.X0-lock`（起動のたびに X が作る）、`~/zaitaku-mealpace-device/` の配ったファイル（下）。
+#51 の計測用の venv がある間（10/24〜）: `~/zaitaku-mealpace-bench-venv/` の下のファイル（pip が入れたもの）、`~/.cache/pip/`（pip のキャッシュ）、
+`~/.cache/Microsoft/DeveloperTools/.onnxruntime/` の `deviceid`・`onnxruntime.db`（ONNX Runtime 1.31 が import のたびに作る・書き直す。0039 決定 6）。
+`~/.cache/mesa_shader_cache/`（Mesa の GPU のシェーダのキャッシュ。10/24 14:44 にできた。計測は `MESA_SHADER_CACHE_DISABLE=true` で増やさない）。
 UNO Q の時計は起動の後に進むことがある（10/13、ファイルの日時と `date -u` がずれた。NTP によると見ているが未確認）。`-newermt` の基準時刻が曖昧なときも、音声の拡張子の検索が 0 件であることで補う。
 
 ## MCU のスケッチと Linux 側の配置（#38、docs/decisions/0035）
@@ -127,7 +130,7 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
   基板の上の openocd が SWD で書く。`/tmp` は tmpfs で、再起動で消える。音声ではない。10/13 に書き込んだ（10/13 のコミットのスケッチ）。
   書き込みの直後に router の journal に `decoding packet: invalid packet, expected array` が数行出るが、その後の RPC は通る。
 - **Linux 側の配置**: `cmake --build build-unoq --target deploy-unoq`（rsync `--copy-links`。宛先は `-DUNOQ_HOST`、既定 `arduino@unoq.local`）で、
-  `device/unoq/DEPLOY_FILES` の 9 つだけを `~/zaitaku-mealpace-device/` に配る（10/24、#44）: `mcu_rpc.py`、`led_check.py`、`bench_infer.py`、`features_np.py`、
+  `device/unoq/DEPLOY_FILES` の一覧だけを `~/zaitaku-mealpace-device/` に配る（#51 の後は 14 個。下の「推論ランタイムの比較の計測」）。#44 の 9 つ（10/24）: `mcu_rpc.py`、`led_check.py`、`bench_infer.py`、`features_np.py`、
   `mel40_htk_0_4000.npy`、`mel26_htk_0_4000.npy`、`features_np_ref.npz`、`postprocess.py`、`evaluate.py`。うち後ろの 6 つは `analysis/` へのリンクで、
   送る前に先が `analysis/` の直下の普通のファイルであることを確かめる（0035 の追記）。UNO Q の上はどれも普通のファイル。音声のファイルは無い。
   常駐させない（systemd のユニットは無い）。ファイルを書かない。実行は `python3 -B`（`__pycache__` を作らない）:
@@ -149,6 +152,62 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
   `--no-rpc` で RPC を省く（PC のテスト用）。10/24 の結果は docs/log/2026-10-24.md。
 
   記録（`record.py`）の間は動かさない（0028 決定 3）。消すときは `ssh arduino@unoq.local 'rm -r ~/zaitaku-mealpace-device'`。
+- **推論ランタイムの比較の計測（#51、docs/decisions/0039）**: 配る一覧は 14 個（上の 9 つに `bench_runtimes.py` と乱数の重みのモデル 4 つ `cnn_rand0.onnx`・
+  `cnn_rand0.tflite`・`cnn_rand0.ncnn.param`・`cnn_rand0.ncnn.weights` を足した。モデルは `analysis/` へのリンク）。計測のために入れたものは一時的なもので、
+  装置の推論は numpy のまま（0039 決定 1）。計測が終わって要らなければ人が外す（下）。
+
+  計測用の venv（配る先の外。numpy は system の 2.2.4 を共有する）の作り方（人、10/24）:
+
+  ```
+  ssh arduino@unoq.local 'python3 -m venv --system-site-packages ~/zaitaku-mealpace-bench-venv'
+  ssh arduino@unoq.local '~/zaitaku-mealpace-bench-venv/bin/pip install ai-edge-litert==2.3.0 ncnn==1.0.20261020'
+  ssh arduino@unoq.local '~/zaitaku-mealpace-bench-venv/bin/pip install --no-cache-dir --no-deps onnxruntime==1.31.0'
+  ```
+
+  10/24 に入れたもの（人、`sudo`）:
+
+  | 入れ方 | 名前と版 | 用途 |
+  |---|---|---|
+  | apt | `python3-onnxruntime` 1.21.0+dfsg-1 | ONNX Runtime（import で SIGILL になり使えない。PyPI の wheel で測った） |
+  | apt | `python3-pyarmnn` 23.08-5、`armnn-latest-cpu-gpu` 23.08-5（`libarm-compute43` 24.11） | Arm NN の CpuAcc・GpuAcc |
+  | apt | `python3-venv` 3.13.5 | 計測用の venv |
+  | apt | `libopenblas0-pthread` 0.3.29+ds-3 | OpenBLAS の計測（C） |
+  | apt | `ocl-icd-opencl-dev` 2.3.3-1 | `libOpenCL.so` のリンク（Arm NN GpuAcc の再試行） |
+  | venv（pip） | `ai-edge-litert` 2.3.0、`ncnn` 1.0.20261020、`onnxruntime` 1.31.0 | LiteRT・ncnn・ONNX Runtime |
+
+  apt は自動で入ったものを含めて 47 個（一覧は `/var/log/apt/history.log` の 10/24 の行）。ディスクの空きは 1.8 GB → 1.6 GB、venv は 130 MB。
+
+  走らせ方（`~/zaitaku-mealpace-device/` で、venv の python。バックエンドごとに別の ssh。合成入力だけ、ファイルを書かない、標準出力は集計の行だけ。最初に #44 の照合、
+  次にバックエンドごとに `cnn_forward` との照合をし、NG なら測らない。RPC は消灯を送るだけ）:
+
+  ```
+  ssh arduino@unoq.local 'cd ~/zaitaku-mealpace-device && ~/zaitaku-mealpace-bench-venv/bin/python -B bench_runtimes.py --list'
+  ssh arduino@unoq.local 'cd ~/zaitaku-mealpace-device && env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 RUSTICL_ENABLE=freedreno MESA_SHADER_CACHE_DISABLE=true ~/zaitaku-mealpace-bench-venv/bin/python -B bench_runtimes.py --only ncnn-vulkan --threads 1 --overlap; echo "rc=$?"'
+  ssh arduino@unoq.local 'cd ~/zaitaku-mealpace-device && ~/zaitaku-mealpace-bench-venv/bin/python -B bench_runtimes.py --only idle'
+  ```
+
+  既定のスレッドは `env -u OPENBLAS_NUM_THREADS -u OMP_NUM_THREADS -u MKL_NUM_THREADS …` と `--threads 0`。`--sustain-s`（既定 60）は持続的な負荷の秒数、0 で省く。
+  GPU の環境変数（`RUSTICL_ENABLE=freedreno`・`MESA_SHADER_CACHE_DISABLE=true`）は計測のコマンドで渡し、ファイルに固定しない（0039 決定 3）。
+  import でプロセスごと落ちる経路（SIGILL の 132 など）は出力が出ないので、終了コードを必ず控える。10/24 の結果は docs/log/2026-10-24.md「#51」。
+
+  BLAS の切り替え（人、`sudo`）。OpenBLAS を入れると alternatives が OpenBLAS に替わる（auto、優先度 100）。参照実装に戻すには:
+
+  ```
+  sudo update-alternatives --set libblas.so.3-aarch64-linux-gnu /usr/lib/aarch64-linux-gnu/blas/libblas.so.3
+  sudo update-alternatives --set liblapack.so.3-aarch64-linux-gnu /usr/lib/aarch64-linux-gnu/lapack/liblapack.so.3
+  ```
+
+  `--set` の後は **manual mode**（10/24 の今の状態）。OpenBLAS を外すか `sudo update-alternatives --auto libblas.so.3-aarch64-linux-gnu`（liblapack も）に戻すまでこのまま。
+  実際に読み込んだ BLAS は `bench_runtimes.py` の環境の行（`/proc/self/maps`）で分かる（`np.show_config` はビルド時の値のままで替わらない）。
+
+  消し方（人。計測の後、要らなければ。外す前に `apt-get -s remove …` で一覧を見て、もとから入っていたものを外さないことを確かめる）:
+
+  ```
+  ssh arduino@unoq.local 'rm -r ~/zaitaku-mealpace-bench-venv ~/.cache/Microsoft'
+  sudo apt remove python3-onnxruntime python3-pyarmnn armnn-latest-cpu-gpu python3-venv libopenblas0-pthread ocl-icd-opencl-dev && sudo apt autoremove
+  ```
+
+  `libopenblas0-pthread` を外すと alternatives の候補は参照実装だけになる。外したもの・残したものは docs/log と 0039 に書く。
 - **PD 給電の構成（10/13）**: PD 対応モバイルバッテリー → USB-C→3.5 mm 変換アダプタ（UGREEN CM721。DAC 搭載、PD 60 W パススルー）の PD の入口 → UNO Q。
   SH-12JK はこのアダプタの 3.5 mm に挿す。ALSA では `hw:CARD=Audio`。PC とは Wi-Fi の ssh だけ。この構成で `record.py --throat sh12jk-wired-unoq-usbaudio` の
   60 秒が使わない目安に当たらなかった（docs/log/2026-10-13.md）。

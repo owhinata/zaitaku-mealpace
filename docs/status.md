@@ -315,6 +315,15 @@ M0 準備の関門は 9/20 に通過（docs/decisions/0010、`gate-M0`）。
   1 窓の全体（間引き → 特徴量 → 推論 → 後処理 → RPC）の中央値は構成 J 41.6〜45.0 ms、構成 J＋R 48.2〜53.8 ms、最大 58.1 ms 以下で、ホップ 0.25 秒の 250 ms・0.1 秒の 100 ms に収まる
   （CNN だけで約 27.8 ms）。ホップの変更は決めていない（別の decision）。`arduino-router` 0.11.0 でソケットの権限が変わり、人が `arduino` を `arduino-router` のグループに足した。
   UNO Q に音声のファイルは無い。docs/log/2026-10-24.md「#44」、0035 の追記。ランタイムの比較（B・C・D）は人の決定で別 Issue。
+- #51（10/24）: plan #51（Codex 2 回、3 面 LGTM。人が 10/24 に承認）を実装し、UNO Q で測った（計測だけ。装置の推論は numpy のまま、採否は別の decision で #47 の plan の前）。
+  `analysis/make_runtime_models.py`（乱数の重みの CNN を ONNX・TFLite・ncnn に。4 つで 87,069 B、PC の CPU で `cnn_forward` と 1e-7 以下）、`test_runtime_models.py`、
+  `device/unoq/bench_runtimes.py`（`bench_infer` の (c)・(f) の CNN の段を替える。CPU 時間・60 秒の持続的な負荷・スレッドで投入する重ね合わせも測る）、配る一覧は 14 個。
+  テストは analysis 410 → 418、device/unoq 24 → 30。一時的に入れたものと装置で使うものの区別は docs/decisions/0039（採用）、0035 に追記。
+  UNO Q（合成入力・乱数の重み・RPC 込み）: CNN 1 窓の中央値は numpy 27.7 ms（参照 BLAS）・14.6〜14.9 ms（OpenBLAS）、CPU のランタイム（LiteRT・ONNX Runtime・ncnn・Arm NN CpuAcc）
+  1.3〜2.2 ms、GPU（ncnn の Vulkan）8.7〜9.7 ms（CPU 時間 約 2.5 ms）。構成 J の全体は測れた全部の行で 250 ms・100 ms 未満（中央値 17.3〜45.9 ms。numpy の書き方の
+  einsum `optimize=False` だけ 80〜86 ms）。動作しなかったもの: ONNX Runtime の XNNPACK の EP、Arm NN GpuAcc（ACL）、LiteRT の GPU（SIGILL）。既定のスレッドの ONNX Runtime と
+  OpenBLAS は持続的な負荷でこのプロセスの CPU 使用率 118〜320%（1 スレッド指定で 13〜76%）。ONNX Runtime は `~/.cache/Microsoft/` にファイルを書く（音声ではない）。
+  BLAS の alternatives は参照実装に戻したが manual mode。UNO Q に音声のファイルは無い。docs/log/2026-10-24.md「#51」。
 - ロボセンサー技研への問い合わせ未送付（代替センサ、docs/decisions/0002、#5）。
 
 ## 次にやること
@@ -353,7 +362,7 @@ M3 の判定の数字に使う記録（#39）と評価（#40）は、#28 の後�
 **今（10/14 未明）:** M4 の Issue を起票した（下の表）。人のレビューで直した点: 評価用の `meal` では FEAT（窓ごとの特徴量）を有効にする（D7 の例外、0005 の範囲内）、48 kHz → 16 kHz の間引きは装置と PC で同じ numpy のコード、不応期は N = 0.5 秒だけ（嚥下回数と衝突）、hard negative を候補に明示、`detector.py` は `python3 -u` で起動し受信時刻との差を log に、D8 は (b)（検出器に音声の出口を作らない）。
 学習用 `meal` は 3 本（10/25〜10/28、締め 10/28 の終わり）、評価用 `meal` は 3 本以上・収集日 2 日以上（11/1〜11/4、打ち切り 11/4 の終わり）、#49 は 11/5、#50 は 11/7 まで（人の決定 10/24、docs/decisions/0037。10/13 の 10/18〜10/22・10/30〜11/2 を改めた）。追加の条件別セッションは録らない。次は #44（UNO Q の推論の土台・時間の計測）と #46（分割と記録の計画、0037）から。削るかは 10/28 ごろに判断。
 **人の作業（#46 のコミットの後）:** 学習用 `meal` 3 本の記録（#48、10/25〜10/28。手順は `docs/recording-protocol.md`「M4 の `meal`（咽喉マイク）」）。
-**人の作業（#47 の plan の前）:** plan.md の M4 の日程（10/14〜11/7）と Milestone の日付、`device/` を edit-gate の対象に（#38 D8）、CLAUDE.md・AGENTS.md の「UNO Q 側はプログラムを置かず」「ALSA から」の文言（0035 D1b）。UNO Q の `python3-numpy` と `arduino-router` グループは 10/24 に済み（#44）。ランタイム比較は #51 として 10/24 に起票した（草案は人がレビュー。控えは `~/work/zaitaku-mealpace-scratch/m4issues/M4-8.draft.md`）。#51 の計測の前に人が UNO Q に入れるもの（apt: `libopenblas0-pthread`・`python3-onnxruntime`・`python3-pyarmnn`・`armnn-latest-cpu-gpu`・`python3-venv`、venv に pip で `ai-edge-litert`・`ncnn`）は #51 の本文。
+**人の作業（#47 の plan の前）:** plan.md の M4 の日程（10/14〜11/7）と Milestone の日付、`device/` を edit-gate の対象に（#38 D8）、CLAUDE.md・AGENTS.md の「UNO Q 側はプログラムを置かず」「ALSA から」の文言（0035 D1b）。UNO Q の `python3-numpy` と `arduino-router` グループは 10/24 に済み（#44）。ランタイム比較は #51 として 10/24 に起票した（草案は人がレビュー。控えは `~/work/zaitaku-mealpace-scratch/m4issues/M4-8.draft.md`）。#51 の計測は 10/24 に済んだ。**人の作業（#51 の段階 5）:** UNO Q の計測用に入れたもの（apt の `python3-onnxruntime`・`python3-pyarmnn`・`armnn-latest-cpu-gpu`・`python3-venv`・`libopenblas0-pthread`・`ocl-icd-opencl-dev` と自動で入ったもの、venv `~/zaitaku-mealpace-bench-venv`、`~/.cache/Microsoft`）のうち要らないものを外す（`apt-get -s` で先に一覧を見る。手順は docs/unoq-setup.md）。BLAS の alternatives は manual mode なので、残すなら `--auto` に戻すかを決める。外した後の `dpkg -l`・`df -h` を log と 0039 に追記する。ランタイムの採否（numpy のままか、OpenBLAS・別のランタイムか）は別の decision で #47 の plan の前に決める（0039 決定 5）。
 
 M4 検出器（咽喉マイク版）（10/14〜11/7、人の決定で前倒し）:
 
@@ -366,7 +375,7 @@ M4 検出器（咽喉マイク版）（10/14〜11/7、人の決定で前倒し�
 | #48 | 学習用と評価用の記録（人。学習用 `meal` 3 本 10/25〜10/28、評価用 `meal` 3 本以上 11/1〜11/4。0037） | #46、#47 |
 | #49 | M4 の評価（評価側を 1 回だけ。M2・M3 と並べる） | #45、#47、#48 |
 | #50 | 【判定】M4 検出器（咽喉マイク版）（閉じるのは人、`gate-M4` は人。関門レビューは `--base gate-M3`） | 全部 |
-| #51 | UNO Q の推論ランタイムの比較（numpy の書き方・OpenBLAS・CPU のランタイム・GPU。計測のみ。人の決定 10/24: 数字を待たず最初から比較、GPU は外さない、計測に要るものは入れて不要なら外す。10/24 起票） | #44（済み）。#45・#47 とは独立 |
+| #51 | UNO Q の推論ランタイムの比較（numpy の書き方・OpenBLAS・CPU のランタイム・GPU。計測のみ。10/24 実装・計測済み: CNN 1 窓は numpy 27.7 ms、CPU のランタイム 1.3〜2.2 ms、ncnn の GPU 8.7〜9.7 ms。全体は測れた全部の行で 250 ms・100 ms 未満。docs/decisions/0039、docs/log/2026-10-24.md。残り: 段階 5（人が外す）と、採否の decision（#47 の plan の前）） | #44（済み）。#45・#47 とは独立 |
 
 
 **今（10/13 夜）:** #38 も人が close。M3 で open なのは #41 だけ。**#41: 人の判定（10/13 夜）= M3 通過（0036）。関門レビューは approve・指摘なし。`gate-M3` タグと close は人。M4 で削るものは今は決めず、誤検出を減らす取り組みと UNO Q の推論時間の計測を M4 の草案の中心にする（人の考え）** → M4 の Issue の草案（メインが書く）。

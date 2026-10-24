@@ -9,6 +9,7 @@ PC 側の解析・評価。ファームウェアが何で書かれていても�
 - `train_eval.py` M1 の分岐点: ロジスティック回帰で学習し、上の3つを使って採点した報告を出す（`--throat` で咽喉マイクのセッション。M3）
 - `features_v2.py`・`postprocess.py`・`compare.py`・`visualize.py` 咽喉マイクの特徴量の組と後処理を学習側の交差検証だけで比べ、図にする（#43、docs/decisions/0033）
 - `features_np.py`・`make_features_np_consts.py` 咽喉マイクの間引き・`mfe40`・`a52`・CNN の順伝播の numpy だけの実装（装置と PC で同じコード）と、それが読むメル行列・照合用の参照を作るスクリプト（#44、docs/decisions/0035 の追記）
+- `make_runtime_models.py` 乱数の重みの CNN を ONNX・TFLite・ncnn に書き出す（UNO Q の推論ランタイムの比較の計測用。学習済みではない。#51、docs/decisions/0039）
 - `final_eval.py` 咽喉マイクの評価側を、事前に登録した 2 つの構成で 1 回だけ採点する（#40、docs/decisions/0034）
 - `evaluate_detector.py` M2 の検出器のセッション（`detect.csv`・`events.csv`）を `evaluate.py` の数え方で採点した報告を出す（#23、docs/decisions/0021）
 - `led_rule.py`   `detect.csv` の `positive` と `window_t_ms` から LED の状態（1 黄 / 2 緑）を docs/decisions/0018 の規則で再計算する（#25。`firmware/detector/led_rule.h` と同じ式。評価には使わない）
@@ -336,6 +337,26 @@ UNO Q の Linux 側（numpy 2.2.4 だけ。librosa・scipy は無い）と PC �
 - 作り直し（PC。librosa・scipy を使う）: `python analysis/make_features_np_consts.py` は作り直した値と既にあるファイルを比べるだけ（違えば 1）。
   `--write` のときだけ上の 3 つを書く。`features_v2` は import の時点で `.npy` を読むので、消えたときは git から戻す。
 - 装置の計測は `device/unoq/bench_infer.py`（合成入力だけ。最初に `features_np_ref.npz` と照合）。走らせ方は docs/unoq-setup.md、結果は docs/log/2026-10-24.md。
+- `random_cnn(rng)` は時間を測るための乱数の重み（`compare.measure_timings` と同じ作り方。学習済みではない）。`bench_infer.py`・`bench_runtimes.py`・
+  `make_runtime_models.py`・`test_runtime_models.py` が同じこの関数から重みを作る（#51）。
+
+## 推論ランタイムの比較の計測用のモデル（`make_runtime_models.py`。#51）
+
+UNO Q の CNN の段を別の推論ランタイムに替えて時間を測るため（docs/decisions/0039。計測だけで、装置の推論は numpy のまま）、`random_cnn(default_rng(0))` の重みを
+`compare._make_net`（M3 の学習と同じ定義）に載せ、入力 (1, 98, 40) float32・出力ロジット (1,) で書き出す。どれも音声・学習の成果・特徴量ではない（合計 87,069 B）。
+
+- `cnn_rand0.onnx`: `torch.onnx.export`（dynamo、外部データなし）。dynamo は opset 18 で作るので、この CNN で 17 と 18 で違う ReduceMean の axes を属性に戻して opset 17 にし
+  （ほかの演算子が出たら止まる）、`ir_version` を 10 以下にする（UNO Q の Debian の ONNX Runtime 1.21 でも読める値）。
+- `cnn_rand0.ncnn.param`・`cnn_rand0.ncnn.weights`: `pnnx.export`（`fp16=False`）を一時フォルダに書かせ、ncnn の 2 つだけを持ってくる。最後の 0 次元への Reshape は ncnn で
+  実行できないので外す。重みの名前は `.gitignore` の `*.bin` を避けて `.ncnn.weights`。
+- `cnn_rand0.tflite`: `litert_torch.convert`（float32、量子化しない）。変換用の venv（リポジトリの外）で走らせる。
+- 既定は作り直した物の出力が、置いてある物の出力と同じかを比べるだけ（違えば・無ければ 1）。変換は版でバイト列が変わるので比べるのは出力。`--write` で上の固定のパスに書く。
+  `--only onnx,ncnn`（`.venv`）、`--only tflite`（変換用の venv）。
+- 依存（装置には要らない）: `.venv` に `requirements-runtimes.txt`（onnx・onnxscript・onnxruntime・ai-edge-litert・ncnn・pnnx。torch は `requirements-cnn.txt` から先に入れる）。
+  変換用の venv（`~/.venvs/zaitaku-mealpace-litert-convert`）に `requirements-convert-litert.txt`（torch・numpy・litert-torch と、`compare` が import する scipy・librosa・scikit-learn）。
+  作り方は各ファイルの先頭のコメント。
+- UNO Q での計測は `device/unoq/bench_runtimes.py`（`bench_infer.py` の (c)・(f) の CNN の段だけをバックエンドに替える。numpy の書き方 3 つ、ONNX Runtime、LiteRT、Arm NN、
+  ncnn の CPU と GPU。合成入力だけ、ファイルを書かない）。モデルは `device/unoq/` の同名のリンクで配る。走らせ方は docs/unoq-setup.md、結果は docs/log/2026-10-24.md「#51」。
 
 ## 咽喉マイクの評価側の採点（`final_eval.py`。#40）
 
@@ -531,6 +552,9 @@ EI_API_KEY=... python analysis/ei_testing_result.py data/raw --project-id <ID>
 #44 のテスト（`test_features_np.py`）は librosa・scipy を使い、`features_np.py` のメル行列・タップ・間引き・`mfe40`・`a52`・デルタを librosa・scipy の式と
 比べ、合成の咽喉マイクのセッションを旧の参照経路（`resample_poly` と librosa・scipy の式。変更前の式を写したもの）と今の経路の両方に通して比べる。
 `features_np_ref.npz` が古くなっていないこと、`features_np.py` が numpy と標準ライブラリ以外を import せず書き込みと `print` が無いことも確かめる。
+#51 のテスト（`test_runtime_models.py`）は onnxruntime・ai-edge-litert・ncnn（`requirements-runtimes.txt`）を使い、torch は使わない。4 つのモデルの CPU（fp32）の出力に
+sigmoid を掛けた値が `cnn_forward`（同じ乱数の重み）と 1e-5 以内であること（合成の入力 6 つ）、演算子が標準のものだけであること、ONNX の opset 17・`ir_version` 10 以下、
+合計 200 KB 以下を確かめる。ランタイムが入っていない形式は飛ばす（このリポジトリの確かめでは飛ばし 0 件を見る）。
 #43 のテスト（`test_features_v2.py`・`test_postprocess.py`・`test_throat_compare.py`・`test_visualize.py`）と #40 のテスト（`test_final_eval.py`）は
 librosa・matplotlib・torch を使い、
 `test_throat_compare.py`・`test_visualize.py` は合成の咽喉マイクのセッション 6 本で交差検証（CNN を含む）を回すので 1 分ほど掛かる。

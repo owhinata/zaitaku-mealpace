@@ -132,3 +132,18 @@ docs/decisions/0025「0001 との関係」の「Linux 側の Python の配置の
   CNN の順伝播だけで 1 窓 約 27.8 ms、RPC の往復 約 5.3〜5.4 ms（10/13 の表と同じ桁）。計測中のスレッド数は 1（既定でも 1）。
   配置と計測の後、UNO Q に音声の拡張子のファイルは 0 件、`~/zaitaku-mealpace-device/` は一覧の 9 つだけで `__pycache__` は無い。
   ホップの変更はここでは決めない（#44 D5。別の decision）。
+
+## 追記（2026-10-24、Issue #51）: 推論ランタイムの比較の計測のファイルと、一時的に入れたもの
+
+上の決定の本文は変えない。計測のために一時的に入れたものと装置で使うものの区別は docs/decisions/0039（採用）。
+
+- **配る一覧は 14 個**: #44 の 9 つに、`bench_runtimes.py`（計測。合成入力だけ、ファイルを書かない、環境変数を書き換えない、`subprocess` を使わない）と、
+  `analysis/` の直下へのリンクの乱数の重みのモデル 4 つ（`cnn_rand0.onnx`・`cnn_rand0.tflite`・`cnn_rand0.ncnn.param`・`cnn_rand0.ncnn.weights`。
+  `make_runtime_models.py` で作った。音声・学習の成果・特徴量ではない）を足した。静的テストは、ランタイムのモジュール（`onnxruntime`・`ai_edge_litert`・`pyarmnn`・
+  `ncnn`）の import を `bench_runtimes.py` にだけ許し、配る `.py` の環境変数の書き込みを禁じる。`deploy-unoq` の検査は今のまま（足したのは普通のファイルと
+  `analysis/` の直下へのリンク）。計測のファイルを一覧から外すかは、ランタイムの採否の decision（0039 決定 5）の後、#47 の plan で決める。
+- **venv は配る先の外**: `~/zaitaku-mealpace-bench-venv`（`--system-site-packages`。numpy は system の 2.2.4）。`deploy-unoq` は venv に触らない。
+- **入れたもの（人、`sudo`。名前と版は 0039 と docs/log/2026-10-24.md「#51」）**: apt で `python3-onnxruntime`・`python3-pyarmnn`・`armnn-latest-cpu-gpu`・`python3-venv`
+  （自動を含め 34 個）、`libopenblas0-pthread`・`ocl-icd-opencl-dev`（自動を含め 13 個）。venv に pip で `ai-edge-litert`・`ncnn`・`onnxruntime`（PyPI の wheel）。まだ外していない。
+- **BLAS の alternatives**: libblas・liblapack とも参照実装（`blas/libblas.so.3`・`lapack/liblapack.so.3`）を指すが、`update-alternatives --set` で戻したので
+  **manual mode**。OpenBLAS（優先度 100）が入っている間に `--auto` に戻すと OpenBLAS に替わる。numpy の数字（#44）は参照実装のときのもの。
