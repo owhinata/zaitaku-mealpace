@@ -340,8 +340,11 @@ class ArmnnBackend(Backend):
 
     def init(self, threads):
         ann = self.ann
+        self.rt = ann.IRuntime(ann.CreationOptions())
+        # 登録されたバックエンド（pyarmnn 33 には BackendRegistryInstance が
+        # 無いので、ランタイムの DeviceSpec から読む）
         self.registered = sorted(
-            _bid(b) for b in ann.BackendRegistryInstance().GetBackendIds()
+            _bid(b) for b in self.rt.GetDeviceSpec().GetSupportedBackends()
         )
         if self.backend_id not in self.registered:
             raise Unavailable(
@@ -356,7 +359,6 @@ class ArmnnBackend(Backend):
         (out_name,) = parser.GetSubgraphOutputTensorNames(0)
         self.in_info = parser.GetNetworkInputBindingInfo(0, in_name)
         self.out_info = parser.GetNetworkOutputBindingInfo(0, out_name)
-        self.rt = ann.IRuntime(ann.CreationOptions())
         opt = ann.OptimizerOptions()
         opt.m_ReduceFp32ToFp16 = bool(self.fp16)
         # 1 つだけを渡す（ほかのバックエンドへ黙って落ちない。割り当てられ
