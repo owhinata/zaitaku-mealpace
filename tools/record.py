@@ -67,7 +67,8 @@ S16_LE・48 kHz・2 ch の生の PCM を受けて、変換せずに throat.wav �
 最初のバイトが THROAT_START_WAIT_S 秒以内に届かなければ、記録を始めずに終了コー
 ド 1（フォルダを作らない）。子が記録の途中で終わったらファイルを残して終了コード
 1。終了時に overrun の行の数と推定差（診断値）を表示し、meta.json にも書く。
---throat のときは --subject p1・--cond meal・--indicator を受けない。
+--throat のときは --subject p1・--indicator を受けない。--cond meal は有線の
+iface（sh12jk-wired-unoq-usbaudio）だけ受ける（M4 の学習用、0037）。
 UNO Q には何も書かない（コマンドの出力先は標準出力だけ）。ミキサーは `amixer
 sget` で読むだけ。
 
@@ -770,6 +771,8 @@ THROAT_IFACES = {
     "sh12jk-wired-pc": (False, "alsa"),
     "sh12jk-nz210c-rx-usbaudio": (False, "alsa"),
 }
+# --cond meal を受ける iface（M4 の学習用 meal。docs/decisions/0037）
+THROAT_MEAL_IFACE = "sh12jk-wired-unoq-usbaudio"
 # 出力先は標準出力（-）だけ。-q は付けない（overrun の行を出させる）。-v で
 # buffer_size・period_size を標準エラーに出させる
 ARECORD_ARGS = [
@@ -841,8 +844,12 @@ def throat_arg_error(a) -> str | None:
     """--throat の引数の検査。記録を始めない理由の文か None。"""
     if a.subject == "p1":
         return "--throat は subject self のみ（docs/decisions/0028）"
-    if a.cond == "meal":
-        return "--throat では meal を録りません（meal は検出器で録る）"
+    # M4 の学習用 meal は有線の UNO Q の経路だけで録る（docs/decisions/0037）
+    if a.cond == "meal" and a.throat != THROAT_MEAL_IFACE:
+        return (
+            f"--throat の meal は iface {THROAT_MEAL_IFACE} だけ"
+            "（M4 の学習用。docs/decisions/0037）"
+        )
     if a.indicator is not None:
         return "--throat では --indicator を使いません（DETECT が来ない）"
     if a.throat not in THROAT_IFACES:

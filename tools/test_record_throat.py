@@ -476,7 +476,6 @@ class ThroatMainTest(unittest.TestCase):
     def test_h9_argument_checks(self):
         bad = [
             ("--subject", "p1"),
-            ("--cond", "meal"),
             ("--indicator", "/fake/indicator"),
             ("--throat", "sh12jk-unknown"),
             ("--throat-host", "local"),  # unoq の iface に local
@@ -510,6 +509,65 @@ class ThroatMainTest(unittest.TestCase):
                 # 後の --throat が前の値を置き換える
                 code, out = self.run_main(*self.W, *extra, throat_argv=boom)
                 self.assertEqual(code, 1, out)
+                self.assertNotIn("子を起動した", out)
+                self.assertEqual(self.sessions(), [])
+
+    def test_h9e_meal_only_on_wired_unoq_iface(self):
+        """--cond meal は有線の UNO Q の iface だけ受ける（M4 の学習用、
+        docs/decisions/0037）。書くファイルと meta.json の形は変わらない。"""
+        code, out = self.run_main(
+            *self.W, "--cond", "meal", "--duration", "0.3"
+        )
+        self.assertEqual(code, 0, out)
+        sd = self.one_session()
+        self.assertTrue(sd.name.endswith("_self_meal"), sd.name)
+        self.assertEqual(
+            {p.name for p in sd.iterdir()},
+            {"throat.wav", "throat_chunks.csv", "events.csv", "meta.json"},
+        )
+        m = self.meta(sd)
+        self.assertEqual((m["fw"], m["cond"]), ("pc-throat", "meal"))
+        self.assertEqual(m["sensors"][0]["iface"], "sh12jk-wired-unoq-usbaudio")
+        self.assertEqual(
+            self.argv_seen, [("arduino@unoq.local", "hw:CARD=Audio,DEV=0")]
+        )
+
+    def test_h9f_meal_stops_on_other_ifaces_and_p1(self):
+        """有線でない iface（構成 B・NZ-210C の受信機・PC 直結）と、
+        --subject p1 との組では、子を起動せずフォルダも作らない。"""
+        bad = [
+            (*A2DP, "--throat-device", BT_NODE),
+            ("--throat", "sh12jk-nz210c-rx-unoq-usbaudio"),
+            (
+                "--throat",
+                "sh12jk-wired-pc",
+                "--throat-host",
+                "local",
+                "--throat-device",
+                "hw:CARD=Generic_1,DEV=0",
+            ),
+            (
+                "--throat",
+                "sh12jk-nz210c-rx-usbaudio",
+                "--throat-host",
+                "local",
+                "--throat-device",
+                "hw:CARD=Generic_1,DEV=0",
+            ),
+            (*self.W, "--subject", "p1"),
+        ]
+        for extra in bad:
+            with self.subTest(extra=extra):
+
+                def boom(host, device, *kind):
+                    raise AssertionError("子を起動した")
+
+                code, out = self.run_main(
+                    *extra, "--cond", "meal", throat_argv=boom
+                )
+                self.assertEqual(code, 1, out)
+                want = "0028" if "p1" in extra else "0037"
+                self.assertIn(f"docs/decisions/{want}", out)
                 self.assertNotIn("子を起動した", out)
                 self.assertEqual(self.sessions(), [])
 
