@@ -212,6 +212,90 @@ class F4M4LinesMatch(unittest.TestCase):
         )
 
 
+CONFIG = (
+    "set=mfe40 classifier=cnn seeds=0 hard_negative=none post=hyst "
+    "threshold=- enter=0.95 exit=0.85 cap_s=2.0 refractory_s=none"
+)
+SYNTH_0038 = """# 0038 合成
+
+```
+M4-CONFIG: {config}
+M4-MODEL: {model}
+```
+"""
+
+
+class F6M4Config(unittest.TestCase):
+    """plan #45 の 9・12 節: 0038 の機械が読む行の定数と照合。"""
+
+    def test_none_expected_lines(self):
+        self.assertIsNone(fixed_eval.M4_CONFIG)
+        self.assertIsNone(fixed_eval.M4_MODEL)
+        self.assertEqual(
+            fixed_eval.m4_config_expected_lines(),
+            [
+                "M4-CONFIG: （ステップ 2 で追記）",
+                "M4-MODEL: （ステップ 3 で追記）",
+            ],
+        )
+        text = SYNTH_0038.format(
+            config=fixed_eval.M4_CONFIG_PENDING,
+            model=fixed_eval.M4_MODEL_PENDING,
+        )
+        self.assertTrue(fixed_eval.m4_config_lines_match(text))
+
+    def test_config_filled(self):
+        text = SYNTH_0038.format(
+            config=CONFIG, model=fixed_eval.M4_MODEL_PENDING
+        )
+        self.assertFalse(fixed_eval.m4_config_lines_match(text))
+        with mock.patch.object(fixed_eval, "M4_CONFIG", CONFIG):
+            self.assertTrue(fixed_eval.m4_config_lines_match(text))
+            self.assertFalse(
+                fixed_eval.m4_config_lines_match(
+                    text.replace("enter=0.95", "enter=0.90")
+                )
+            )
+            self.assertFalse(
+                fixed_eval.m4_config_lines_match(text + "M4-CONFIG: x\n")
+            )
+        model = "path=analysis/models/m4-0038.npz sha256=" + "0" * 64
+        text2 = SYNTH_0038.format(config=CONFIG, model=model)
+        with (
+            mock.patch.object(fixed_eval, "M4_CONFIG", CONFIG),
+            mock.patch.object(fixed_eval, "M4_MODEL", model),
+        ):
+            self.assertTrue(fixed_eval.m4_config_lines_match(text2))
+            self.assertFalse(fixed_eval.m4_config_lines_match(text))
+
+    def test_0037_lines_are_not_config_lines(self):
+        # 0037 の M4- の行は 0038 の照合に入らない（逆も）
+        self.assertTrue(fixed_eval.m4_lines_match(SYNTH_0037))
+        both = SYNTH_0037 + SYNTH_0038.format(
+            config=fixed_eval.M4_CONFIG_PENDING,
+            model=fixed_eval.M4_MODEL_PENDING,
+        )
+        self.assertTrue(fixed_eval.m4_config_lines_match(both))
+        self.assertFalse(fixed_eval.m4_lines_match(both))
+
+    def test_file_matches(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            with mock.patch.object(fixed_eval, "REPO_ROOT", root):
+                self.assertFalse(fixed_eval.m4_config_file_matches())
+                p = root / fixed_eval.M4_CONFIG_DECISION
+                p.parent.mkdir(parents=True)
+                p.write_text(
+                    SYNTH_0038.format(
+                        config=CONFIG, model=fixed_eval.M4_MODEL_PENDING
+                    ),
+                    encoding="utf-8",
+                )
+                self.assertFalse(fixed_eval.m4_config_file_matches())
+                with mock.patch.object(fixed_eval, "M4_CONFIG", CONFIG):
+                    self.assertTrue(fixed_eval.m4_config_file_matches())
+
+
 class F5M3CheckUnchanged(unittest.TestCase):
     def test_m3_eval_still_stops_m3_path(self):
         with self.assertRaises(SystemExit) as cm:

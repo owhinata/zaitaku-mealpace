@@ -151,11 +151,32 @@ def _torch_setup(seed: int):
     return torch
 
 
+def weighted_loss(torch, logits, y, pos_weight, w):
+    """窓ごとの重み w を掛けた 2 値交差エントロピー（陽性の重みは今と同じ）の
+    バッチ平均（#45 の hard negative。plan #45 の 5.3）。w が全部 1 なら
+    BCEWithLogitsLoss(pos_weight=…) の平均と同じ。"""
+    per = torch.nn.functional.binary_cross_entropy_with_logits(
+        logits,
+        y,
+        pos_weight=torch.tensor(pos_weight, dtype=torch.float32),
+        reduction="none",
+    )
+    return (per * w).mean()
+
+
 def cnn_fit(
-    data: Sequence[SessionData], where: str, seed: int = CNN_SEED
+    data: Sequence[SessionData],
+    where: str,
+    seed: int = CNN_SEED,
+    sample_weight: Sequence[np.ndarray] | None = None,
 ) -> CnnModel:
     """data のセッションだけで、メルの帯域ごとの正規化・陽性の重み・重みを作る。
-    正規化は valid な窓の全部、学習は valid かつ陽性か陰性の窓だけ。"""
+    正規化は valid な窓の全部、学習は valid かつ陽性か陰性の窓だけ。
+
+    sample_weight（#45）: セッションごとの窓の重み（data と同じ順、各セッションの
+    全窓の長さ）。省くと今の BCEWithLogitsLoss(pos_weight=…) の経路のまま。渡すと
+    学習に使う窓の重みを取り出し、weighted_loss で学習する。陽性の重み（陰性数 ÷
+    陽性数）は窓の数で数える（重みでは数えない）。"""
     names = ", ".join(d.name for d in data)
     used = [d for d in data if d.feats.valid.any()]
     if not used:
@@ -178,10 +199,23 @@ def cnn_fit(
             f"学習に使うセッション: {names}"
         )
     pos_weight = n_neg / n_pos
+    wt = None
+    if sample_weight is not None:
+        if len(sample_weight) != len(data) or any(
+            len(w) != len(d.labels) for w, d in zip(sample_weight, data)
+        ):
+            raise ValueError(
+                f"{where}: sample_weight の長さがセッション・窓の数と合いません"
+            )
+        w = np.concatenate(
+            [np.asarray(sw, np.float64)[u] for sw, u in zip(sample_weight, use)]
+        )
     torch = _torch_setup(seed)
     net = _make_net(torch)
     Xn = torch.from_numpy(((X - mean) / std).astype(np.float32))
     yt = torch.from_numpy((y == POSITIVE).astype(np.float32))
+    if sample_weight is not None:
+        wt = torch.from_numpy(w.astype(np.float32))
     loss_fn = torch.nn.BCEWithLogitsLoss(
         pos_weight=torch.tensor(pos_weight, dtype=torch.float32)
     )
@@ -193,7 +227,12 @@ def cnn_fit(
         for k in range(0, len(y), CNN_BATCH):
             idx = perm[k : k + CNN_BATCH]
             opt.zero_grad()
-            loss = loss_fn(net(Xn[idx]), yt[idx])
+            if wt is None:
+                loss = loss_fn(net(Xn[idx]), yt[idx])
+            else:
+                loss = weighted_loss(
+                    torch, net(Xn[idx]), yt[idx], pos_weight, wt[idx]
+                )
             loss.backward()
             opt.step()
     params = {

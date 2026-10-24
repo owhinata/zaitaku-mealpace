@@ -10,6 +10,11 @@ draw(..., side="eval") で描く（評価側の名前だけを受け付ける。
 確率は final_eval.py の 1 回だけの採点の確率で、ここでは採点し直さない。
 評価側 2 点の比較の図は fig_final。
 
+M4 の学習側の図（#45、plan #45 の 7.2）は m4_compare.py の --figures から
+draw_m4 で描く（draw(..., side="m4train")。M4 の学習側の一覧にある名前だけ）。
+meal のセッションは 300 秒ごとの頁に分け、細かい表示（20 ms の包絡、フレームごとの
+メル、波形）を描かない。比較の図の合格線は fig_compare の引数（0.85 / 1.0）。
+
 図の 3 種類:
   1. セッションごと: 窓平均 RMS、窓平均メル（0.25 秒ごと）、マーカー、窓ごとの
      陽性確率、後処理後の陽性、検出／見逃し／誤検出。窓ごとにまとめた値だけで描く。
@@ -142,6 +147,28 @@ def check_sessions(root: Path, eval_min: int, names: Sequence[str]) -> dict:
         if n not in parts["train"]:
             raise SystemExit(f"学習側のセッションではありません: {n}")
     return parts
+
+
+def check_m4_train_sessions(root: Path, names: Sequence[str]) -> list:
+    """M4 の学習側の図（#45、side="m4train"）: 名前がすべて m4_compare.list_train
+    の学習側にあること。M4_EVAL_FROM 以降の名前・一覧に無い名前は止まる。
+    戻り値は学習側の一覧。"""
+    import m4_compare
+
+    for n in names:
+        if n[:8] >= fixed_eval.M4_EVAL_FROM:
+            raise SystemExit(
+                f"M4 の評価側の窓（{fixed_eval.M4_EVAL_FROM} 以降）のセッションは描きません: {n}"
+            )
+    train = m4_compare.list_train(root).train
+    for n in names:
+        if f"_{train_eval.SUBJECT}_" not in n:
+            raise SystemExit(
+                f"subject が {train_eval.SUBJECT} でないセッションは描きません: {n}"
+            )
+        if n not in train:
+            raise SystemExit(f"M4 の学習側のセッションではありません: {n}")
+    return train
 
 
 # --- 集計 ---
@@ -326,22 +353,44 @@ def fig_events(path: Path, title: str, items: Sequence[dict]) -> None:
     plt.close(fig)
 
 
-def fig_compare(path: Path, rows: Sequence, selected=None) -> None:
-    """図 3。学習側 CV の各行（評価側の点は描かない）。"""
+def _m3_label(r) -> str:
+    lab = f"{r.set}・{'なし' if r.post == 'none' else 'ヒステリシス'}"
+    if r.classifier == "CNN":
+        lab += "（CNN、参考）"
+    return lab
+
+
+def fig_compare(
+    path: Path,
+    rows: Sequence,
+    selected=None,
+    det_line: float = train_eval.PASS_DETECTION_RATE,
+    fp_line: float = train_eval.PASS_FP_PER_MIN,
+    label_fn=None,
+    marker_fn=None,
+    group_fn=None,
+    hollow_fn=None,
+    title: str | None = None,
+) -> None:
+    """図 3。学習側 CV の各行（評価側の点は描かない）。破線は det_line・fp_line
+    （既定は M1 の合格線 0.70 / 3.0。M4 の #45 は 0.85 / 1.0 を渡す）。label_fn
+    ほかを省くと #43 の描き方のまま。"""
     plt = _plt()
     fig, ax = plt.subplots(figsize=(9, 6))
     markers = {"none": "o", "hyst": "^"}
-    sets = list(dict.fromkeys(r.set for r in rows))
+    label_fn = label_fn or _m3_label
+    marker_fn = marker_fn or (lambda r: markers[r.post])
+    group_fn = group_fn or (lambda r: r.set)
+    hollow_fn = hollow_fn or (lambda r: r.classifier == "CNN")
+    sets = list(dict.fromkeys(group_fn(r) for r in rows))
     cmap = plt.get_cmap("tab10")
     for r in rows:
         m = r.metrics
         x, y = m["false_positives_per_min"], m["detection_rate"]
         if x is None or y is None:
             continue
-        col = cmap(sets.index(r.set))
-        lab = f"{r.set}・{'なし' if r.post == 'none' else 'ヒステリシス'}"
-        if r.classifier == "CNN":
-            lab += "（CNN、参考）"
+        col = cmap(sets.index(group_fn(r)) % 10)
+        lab = label_fn(r)
         if r is selected:
             lab += "（選択）"
             ax.scatter(
@@ -350,21 +399,22 @@ def fig_compare(path: Path, rows: Sequence, selected=None) -> None:
         ax.scatter(
             [x],
             [y],
-            marker=markers[r.post],
+            marker=marker_fn(r),
             s=60,
-            facecolors="none" if r.classifier == "CNN" else col,
+            facecolors="none" if hollow_fn(r) else col,
             edgecolors=col,
             label=lab,
         )
     ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5))
-    ax.axhline(train_eval.PASS_DETECTION_RATE, color="0.5", ls="--", lw=1)
-    ax.axvline(train_eval.PASS_FP_PER_MIN, color="0.5", ls="--", lw=1)
+    ax.axhline(det_line, color="0.5", ls="--", lw=1)
+    ax.axvline(fp_line, color="0.5", ls="--", lw=1)
     ax.set_xlabel("誤検出（回/分、学習側 CV）")
     ax.set_ylabel("検出率（学習側 CV）")
     ax.set_ylim(0, 1.02)
     ax.set_xlim(left=0)
     ax.set_title(
-        "組の比較（学習側の交差検証。○ なし、△ ヒステリシス、白抜きは CNN の参考）",
+        title
+        or "組の比較（学習側の交差検証。○ なし、△ ヒステリシス、白抜きは CNN の参考）",
         fontsize=10,
     )
     fig.tight_layout()
@@ -406,7 +456,71 @@ def fig_final(path: Path, points: Sequence[dict]) -> None:
 SIDE_TITLE = {
     "train": "学習側 CV の検証側の確率",
     "eval": "評価側（#40、1 回だけの採点の確率）",
+    "m4train": "M4 の学習側 CV の検証側の確率（#45）",
 }
+MEAL_PAGE_S = 300.0  # meal のセッションごとの図の 1 頁の長さ（#45）
+
+
+def is_meal(name: str) -> bool:
+    return name.rsplit("_", 1)[-1] == "meal"
+
+
+def page_slice(ses: dict, a: float, b: float) -> dict:
+    """セッションごとの図の入力を、時刻 [a, b) の頁に切る（窓ごとの値だけ）。"""
+    ct = ses["cells_t"]
+    kc = (ct >= a) & (ct < b)
+    ts = ses["t_start"]
+    kt = (ts >= a) & (ts < b)
+    cls = ses["cls"]
+    return dict(
+        t0=ses["t0"],
+        cells_t=ct[kc],
+        rms=ses["rms"][kc],
+        mel=ses["mel"][kc],
+        markers={
+            lb: [t for t in v if a <= t < b] for lb, v in ses["markers"].items()
+        },
+        t_start=ts[kt],
+        prob=ses["prob"][kt],
+        mask=ses["mask"][kt],
+        cls={
+            "検出": [t for t in cls["検出"] if a <= t < b],
+            "見逃し": [t for t in cls["見逃し"] if a <= t < b],
+            "誤検出": [(x, y) for x, y in cls["誤検出"] if x < b and y > a],
+        },
+    )
+
+
+def fig_fp_breakdown(path: Path, breakdowns: dict) -> None:
+    """図 (d)（#45）。誤検出の主分類ごとの回数の棒（行ごと）。breakdowns は
+    名前 → m4_compare.fp_breakdown の戻り値。"""
+    import m4_compare
+
+    plt = _plt()
+    fig, ax = plt.subplots(figsize=(10, 5))
+    cats = m4_compare.FP_CATS
+    n = len(breakdowns)
+    width = 0.8 / max(n, 1)
+    for j, (name, b) in enumerate(breakdowns.items()):
+        vals = [sum(b["main"][c].values()) for c in cats]
+        ax.bar(
+            np.arange(len(cats)) + (j - (n - 1) / 2) * width,
+            vals,
+            width,
+            label=f"{name}（計 {b['total']} 回）",
+        )
+    ax.set_xticks(
+        range(len(cats)),
+        [m4_compare.FP_CAT_LABEL[c] for c in cats],
+        rotation=15,
+        fontsize=8,
+    )
+    ax.set_ylabel("誤検出（回、学習側 CV）")
+    ax.legend(fontsize=8)
+    ax.set_title("誤検出の中身（主分類は排他）", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(path, dpi=DPI)
+    plt.close(fig)
 
 
 def draw(
@@ -420,46 +534,71 @@ def draw(
     selected=None,
     side: str = "train",
     title_suffix: str | None = None,
+    compare_kw: dict | None = None,
 ) -> list:
     """scored（交差検証の検証側の確率）と mask から 3 種類の図を描く。
     side="eval"（final_eval.py からだけ）は評価側の名前だけを受け付け、
-    出力先が既にあれば止まる（上書きしない）。"""
+    出力先が既にあれば止まる（上書きしない）。
+
+    side="m4train"（#45。eval_min は使わない）は M4 の学習側の名前だけを受け付ける
+    （check_m4_train_sessions）。meal のセッションはセッションごとの図を
+    MEAL_PAGE_S ごとの頁に分け、細かい表示（イベントごとの図の 20 ms の包絡・
+    フレームごとのメル・波形）を描かない（plan #45 の 7.2、0037 の 4 と同じ理由）。
+    条件別のセッションのセッションごとの図は、誤検出か見逃しが 1 つ以上あるものだけ。
+    compare_kw は fig_compare に渡す（線の値など）。"""
     if side not in SIDE_TITLE:
-        raise ValueError(f"side は train / eval のどちらかです: {side!r}")
+        raise ValueError(
+            f"side は train / eval / m4train のどれかです: {side!r}"
+        )
     out = check_out_dir(out_dir)
     root = Path(root)
     names = [s.data.name for s in scored]
+    m4 = side == "m4train"
     if side == "eval":
         check_eval_sessions(root, eval_min, names)
+    elif m4:
+        check_m4_train_sessions(root, names)
     else:
         check_sessions(root, eval_min, names)
     suffix = SIDE_TITLE[side] if title_suffix is None else title_suffix
-    out.mkdir(parents=True, exist_ok=side == "train")
+    out.mkdir(parents=True, exist_ok=side != "eval")
     paths = []
     events = {"検出": [], "見逃し": [], "誤検出": []}
     for s, m in zip(scored, mask_list):
         d = s.data
         p = root / d.name
+        meal = m4 and is_meal(d.name)
         x, sample_t, _, _, _, t0, t1 = features._throat_windows(p)
         cells_t, rms, mel = cell_summary(x, sample_t, t0, t1)
         cls = classify(d.swallows, d.feats.t_start_s[m].tolist())
-        path = out / f"session_{d.name}.png"
-        fig_session(
-            path,
-            f"{d.name}（{label}、{suffix}）",
-            dict(
-                t0=t0,
-                cells_t=cells_t,
-                rms=rms,
-                mel=mel,
-                markers=_markers(p),
-                t_start=d.feats.t_start_s,
-                prob=s.prob,
-                mask=m,
-                cls=cls,
-            ),
+        ses = dict(
+            t0=t0,
+            cells_t=cells_t,
+            rms=rms,
+            mel=mel,
+            markers=_markers(p),
+            t_start=d.feats.t_start_s,
+            prob=s.prob,
+            mask=m,
+            cls=cls,
         )
-        paths.append(path)
+        if meal:
+            n_pages = max(1, int(np.ceil((t1 - t0) / MEAL_PAGE_S)))
+            for k in range(n_pages):
+                a = t0 + k * MEAL_PAGE_S
+                path = out / f"session_{d.name}_p{k + 1:02d}.png"
+                fig_session(
+                    path,
+                    f"{d.name} 頁 {k + 1}/{n_pages}（{label}、{suffix}）",
+                    page_slice(ses, a, a + MEAL_PAGE_S),
+                )
+                paths.append(path)
+            del x
+            continue  # meal の細かい表示は描かない
+        if not m4 or cls["誤検出"] or cls["見逃し"]:
+            path = out / f"session_{d.name}.png"
+            fig_session(path, f"{d.name}（{label}、{suffix}）", ses)
+            paths.append(path)
         for kind in events:
             for v in cls[kind]:
                 if len(events[kind]) >= MAX_EVENTS_PER_KIND:
@@ -503,8 +642,47 @@ def draw(
         paths.append(path)
     if rows:
         path = out / "compare.png"
-        fig_compare(path, rows, selected)
+        fig_compare(path, rows, selected, **(compare_kw or {}))
         paths.append(path)
+    return paths
+
+
+def draw_m4(root: Path, result, out_dir: Path) -> list:
+    """m4_compare.run の結果から、選んだ行の図、25 行の比較の図（線 0.85 / 1.0）、
+    誤検出の中身の棒（R0 と選んだ行）を描く（plan #45 の 7.2）。"""
+    import m4_compare
+
+    r = result.selected
+    scored = result.scored[r.cls]
+    paths = draw(
+        root,
+        None,
+        scored,
+        [m4_compare.op_mask(s, r.op) for s in scored],
+        out_dir,
+        f"{r.label}・{m4_compare.op_text(r.op)}",
+        result.rows,
+        r,
+        side="m4train",
+        compare_kw=dict(
+            det_line=m4_compare.M4_PASS_DETECTION_RATE,
+            fp_line=m4_compare.M4_PASS_FP_PER_MIN,
+            label_fn=lambda x: f"{x.cls}・{x.post}",
+            marker_fn=lambda x: "os^Dv"[m4_compare.POST_ORDER.index(x.post)],
+            group_fn=lambda x: x.cls,
+            hollow_fn=lambda x: False,
+            title="25 行の比較（学習側の交差検証。色は分類器、形は後処理。破線は 85% / 1.0 回/分）",
+        ),
+    )
+    path = check_out_dir(out_dir) / "fp_breakdown.png"
+    fig_fp_breakdown(
+        path,
+        {
+            "R0 構成 J のまま": result.breakdown["R0"],
+            f"選んだ行 {r.cls}・{r.post}": result.breakdown["selected"],
+        },
+    )
+    paths.append(path)
     return paths
 
 

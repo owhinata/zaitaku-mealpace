@@ -324,6 +324,13 @@ M0 準備の関門は 9/20 に通過（docs/decisions/0010、`gate-M0`）。
   einsum `optimize=False` だけ 80〜86 ms）。動作しなかったもの: ONNX Runtime の XNNPACK の EP、Arm NN GpuAcc（ACL）、LiteRT の GPU（SIGILL）。既定のスレッドの ONNX Runtime と
   OpenBLAS は持続的な負荷でこのプロセスの CPU 使用率 118〜320%（1 スレッド指定で 13〜76%）。ONNX Runtime は `~/.cache/Microsoft/` にファイルを書く（音声ではない）。
   BLAS の alternatives は参照実装に戻したが manual mode。UNO Q に音声のファイルは無い。docs/log/2026-10-24.md「#51」。
+- #45 ステップ 1（10/24）: plan #45（Codex 3 面レビュー LGTM。人が 10/24 に承認）のステップ 1 のコードと合成のテストを書いた（M4 のどの性能の数字も見ていない）。
+  `analysis/postprocess.py` に 1 窓ずつ進める後処理 `PostStepper`（ヒステリシス → 不応期 0.5 秒（塊ごと抑える）→ 塊の上限 1.5・2.0・2.5 秒）・`post_mask`・`ensemble_mean`
+  （上限・不応期なしは `hysteresis` とビット一致。装置に配るので numpy と `evaluate` だけ）、`compare.cnn_fit` に省略可の `sample_weight`（省くと今の経路のまま）、
+  `analysis/m4_compare.py`（M4 の学習側の一覧 `list_train`（締めより後は `meta.json` も開かない）、収集日ごとの CV、入れ子の hard negative、種の平均、分類器 5 × 後処理 5 = 25 行と
+  参考の行、選び方（1.0 回/分以下で検出率が最大、同率は単純なほう）、誤検出の中身の排他の主分類、報告、`--smoke`・`--final-model`、`load_model`・`model_prob`、`plan_trainings`）、
+  `visualize.py` の `side="m4train"`（`meal` は 300 秒ごとの頁、細かい表示を描かない）、`fixed_eval.py` の `M4_CONFIG`・`M4_MODEL`（`None`）と 0038 の行の照合。
+  テストは analysis 418 → 472（device/unoq 30・tools 88 は変わらず）。予行（`--smoke`）の結果は docs/log/2026-10-24.md「#45 ステップ 1」。
 - ロボセンサー技研への問い合わせ未送付（代替センサ、docs/decisions/0002、#5）。
 
 ## 次にやること
@@ -335,8 +342,9 @@ M4 検出器（咽喉マイク版）（10/14〜11/7、人の決定で前倒し�
 日程（人の決定 10/24、docs/decisions/0037。10/13 の 10/18〜10/22・10/30〜11/2 を改めた）: 学習用 `meal` は 3 本（10/25〜10/28、締め 10/28 の終わり）、評価用 `meal` は 3 本以上・収集日 2 日以上（11/1〜11/4、打ち切り 11/4 の終わり）、#49 は 11/5、#50 は 11/7 まで。追加の条件別セッションは録らない。削るかは 10/28 ごろに判断。
 起票時の人の決定（10/14）: 評価用の `meal` では FEAT（窓ごとの要約の値）を有効にする（D7 の例外、0005 の範囲内。中身は 0037）、48 kHz → 16 kHz の間引きは装置と PC で同じ numpy のコード（#44 で実装）、不応期は N = 0.5 秒だけ（嚥下回数と衝突）、hard negative を候補に明示、`detector.py` は `python3 -u` で起動し受信時刻との差を log に、D8 は (b)（検出器に音声の出口を作らない）。
 
-**今（10/24 夜）:** #44・#46・#51 は実装・計測・文書まで済み（close は人）。**次は #45（0038）の plan の素案から**（人の指示）。#47 の plan は 0038 の後で、0038 と #47 の実装は 10/29〜10/31 に収める必要がある（評価用 `meal` が 11/1 から）。装置のランタイムの採否（候補: numpy im2col＋OpenBLAS / LiteRT CPU / ncnn CPU / ncnn Vulkan。材料は docs/log/2026-10-24.md「#51」）は 0038 の後に別の decision で決める（0039 決定 5。0038 が LR なら numpy のまま）。
-**人の作業:** 学習用 `meal` 3 本の記録（#48、10/25〜10/28。手順は `docs/recording-protocol.md`「M4 の `meal`（咽喉マイク）」。締めの後、名前を 0037 の `M4-TRAIN` と `fixed_eval.M4_EXPECTED_TRAIN` に追記）。plan.md の M4 の日程（10/14〜11/7）と Milestone の日付、`device/` を edit-gate の対象に（#38 D8）、CLAUDE.md・AGENTS.md の「UNO Q 側はプログラムを置かず」「ALSA から」の文言（0035 D1b）。Issue #44・#46・#51 の close。
+**今（10/24 夜）:** #44・#46・#51 は実装・計測・文書まで済み（close は人）。#45 は plan が承認され（10/24）、ステップ 1（コード・合成のテスト・予行）まで済み。
+次は学習用 `meal` の締め（10/28）と採否の後のステップ 2（0037 の `M4-TRAIN`・`fixed_eval.M4_EXPECTED_TRAIN` の追記 → 本番の実行 → 0038）、ステップ 3（最終モデルと sha256）を 10/29〜10/30 に。#47 の plan は 0038 の後で、0038 と #47 の実装は 10/29〜10/31 に収める必要がある（評価用 `meal` が 11/1 から）。装置のランタイムの採否（候補: numpy im2col＋OpenBLAS / LiteRT CPU / ncnn CPU / ncnn Vulkan。材料は docs/log/2026-10-24.md「#51」）は 0038 の後に別の decision で決める（0039 決定 5。0038 が LR なら numpy のまま）。
+**人の作業:** 学習用 `meal` 3 本の記録（#48、10/25〜10/28。手順は `docs/recording-protocol.md`「M4 の `meal`（咽喉マイク）」。締めの後、名前を 0037 の `M4-TRAIN` と `fixed_eval.M4_EXPECTED_TRAIN` に追記）。Issue #45 の本文と 0037 の「28 行目の M2 の行」を「29 行目」に直す（`docs/evaluation.md` の実物。plan #45 の 10 節）。plan.md の M4 の日程（10/14〜11/7）と Milestone の日付、`device/` を edit-gate の対象に（#38 D8）、CLAUDE.md・AGENTS.md の「UNO Q 側はプログラムを置かず」「ALSA から」の文言（0035 D1b）。Issue #44・#46・#51 の close。
 
 | Issue | 内容 | 依存 |
 |---|---|---|

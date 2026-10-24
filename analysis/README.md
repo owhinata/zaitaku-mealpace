@@ -11,6 +11,7 @@ PC 側の解析・評価。ファームウェアが何で書かれていても�
 - `features_np.py`・`make_features_np_consts.py` 咽喉マイクの間引き・`mfe40`・`a52`・CNN の順伝播の numpy だけの実装（装置と PC で同じコード）と、それが読むメル行列・照合用の参照を作るスクリプト（#44、docs/decisions/0035 の追記）
 - `make_runtime_models.py` 乱数の重みの CNN を ONNX・TFLite・ncnn に書き出す（UNO Q の推論ランタイムの比較の計測用。学習済みではない。#51、docs/decisions/0039）
 - `final_eval.py` 咽喉マイクの評価側を、事前に登録した 2 つの構成で 1 回だけ採点する（#40、docs/decisions/0034）
+- `m4_compare.py` M4 の誤検出を減らす候補（後処理・種の平均・hard negative）を M4 の学習側の交差検証だけで比べ、構成（docs/decisions/0038）と最終モデルを作る（#45）
 - `evaluate_detector.py` M2 の検出器のセッション（`detect.csv`・`events.csv`）を `evaluate.py` の数え方で採点した報告を出す（#23、docs/decisions/0021）
 - `led_rule.py`   `detect.csv` の `positive` と `window_t_ms` から LED の状態（1 黄 / 2 緑）を docs/decisions/0018 の規則で再計算する（#25。`firmware/detector/led_rule.h` と同じ式。評価には使わない）
 - `ei_upload.py`  M2 の特徴量ベクトル（1 窓 1 項目）を Edge Impulse に投入する（#21。生の音声・IMU は上げない）
@@ -407,6 +408,60 @@ python analysis/final_eval.py data/raw                          # 評価側を 1
   `data/raw/` に足すと M3 の経路（`train_eval.py --throat`・`compare.py`）は今までどおり止まる。テストは `test_fixed_eval.py`（合成の名前だけ）。
 - `train_eval._git()` の作業ディレクトリはリポジトリ直下（`train_eval.GIT_ROOT`）。パスを指定した `git status` のため。
 
+## M4 の誤検出を減らす候補の比較と構成の固定（`m4_compare.py`。#45）
+
+手順は plan #45（学習側の数字を見る前に固定）。構成は docs/decisions/0038（ステップ 2 で書く）に、評価用 `meal`（11/1〜）の記録の前に固定する。
+**M4 の学習側だけを読む。** 評価側（`M4_EVAL_FROM` 以降の名前）は開かない・採点しない（#49）。
+
+```
+python analysis/m4_compare.py data/raw --smoke                                        # ステップ 1: 予行（性能の数字を出さない）
+python analysis/m4_compare.py data/raw --figures docs/log/2026-10-29-45               # ステップ 2: 本番（表・選んだ行・誤検出の中身・図）
+python analysis/m4_compare.py data/raw --final-model analysis/models/m4-0038.npz      # ステップ 3: 最終モデル
+```
+
+- **順序**（コードで止める）: 予行は `fixed_eval.M4_EXPECTED_TRAIN` が `None` の間だけ（入っていれば止まる）。本番は `M4_EXPECTED_TRAIN` が入っていて
+  0037 の `M4-` の行と一致し（`m4_lines_match`）、追跡しているファイルに未コミットの変更が無いときだけ（どれもデータを読む前に止まる）。最終モデルは
+  さらに `fixed_eval.M4_CONFIG` が入っていて 0038 の `M4-CONFIG`・`M4-MODEL` の行と一致するときだけ（`m4_config_file_matches`）。出力先が既にあれば止まる。
+- **学習側の一覧**（`list_train`）: `data/raw/` の直下を名前順に見る。名前の日付が `M4_TRAIN_CUTOFF`（20261028）より後のフォルダは `meta.json` を含めて
+  何も開かず、名前だけを報告に出す（`M4_EVAL_FROM` 以降を含む）。残りには `split.split_sessions` と同じ検査（シンボリックリンク、名前の形、`meta.json`、
+  subject の一致、`fw` と `throat.wav`・`detect.csv`・`feat.csv` の組、`pc-throat` の iface とファイルの有無）を同じ順で当て、`self` の `pc-throat` だけを採る
+  （`p1`・`fw` が無い・`detector` は採らない）。最後に `fixed_eval.assert_m4_train`。M3 の `assert_fixed_eval_not_in` は呼ばない（0037 の 2）。
+- **交差検証**: `train_eval.cv_groups`（学習側が 2 収集日以上なら収集日ごと）。正規化・陽性の重み・hard negative は fold の学習側だけで作る。
+- **候補**: 分類器 C1（LR `a52`、0014）・C2（CNN 種 0、0033 §2）・C3（C2 ＋ hard negative）・C4（CNN 種 0・1・2 の確率の算術平均）・C5（C4 の各種を
+  hard negative で学習）× 後処理 P0（なし、閾値 19 点）・P1（ヒステリシス 45 点）・P2（＋不応期 0.5 秒）・P3（＋塊の上限 1.5・2.0・2.5 秒、135 点）・
+  P4（＋上限＋不応期、135 点）= 25 行。参考の行: R0（構成 J のまま、入り 0.95・出 0.85 に固定）、CNN 種 1・2 の単独、その hard negative の単独。
+- **hard negative**: 学習の集合 S の中の交差検証（`cv_groups(S)`）で同じ種の C2 が出した確率に、固定の動作点 0.95 / 0.85 を当て、0011 の数え方で誤検出に
+  なった塊のうち、陰性のラベルで `valid` な窓の損失に 3.0 を掛ける（条件別のセッションだけ。`meal` には付けない）。外側の fold k の hard negative は、
+  k の学習側の中の交差検証だけで決める（入れ子。外側の検証側の窓・確率・マーカーを使わない）。内側の学習は「学習に使うセッションの集合」の鍵で使い回す。
+  重み付きの学習は `compare.cnn_fit(..., sample_weight=…)`（省くと今の経路のまま。`compare.weighted_loss` は全部 1 なら今の損失と同じ）。
+- **後処理**（`postprocess.py`、装置にも配る）: `PostStepper` は 1 窓ずつ進める状態機械（ヒステリシス → 不応期 → 塊の上限。因果的）。不応期は、新しい塊の
+  最初の窓と直前の塊の最後の窓の開始時刻の差が 0.5 秒以下なら塊ごと抑える。塊の上限は、抑えていない塊の最初の窓から `cap_s ÷ 0.25` 窓までを陽性に
+  し、それより後は陰性。`post_mask` は `PostStepper` を先頭から回すだけで、上限・不応期が無ければ `hysteresis` とビット一致する。`ensemble_mean` は
+  種ごとの確率の算術平均。数え方・窓・非嚥下区間・ホップは変えない。
+- **選び方**: 行の中では、誤検出率が 1.0 回/分以下の点のうち検出率が最大（同率なら 入り・出・上限 が高い・長いほう、P0 は閾値が高いほう。無ければ誤検出率が
+  最小）。25 行の中では、同じ規則で、同率なら単純なほう（C1 < … < C5、次に P0 < … < P4）。比べるのは学習側の全セッションの合算（`meal` だけ・条件別だけの
+  数字は並べるが選択に使わない）。検出率の合格線（85%）は選択に入れない。0014・0033 の 3.0 を 1.0 に読み替えたもの。
+- **報告**（本番）: 標準出力に Markdown。実行の条件（コミット、依存の版、CPU、種、格子、hard negative の値）、学習側のセッション（cond、`s` の数、非嚥下の
+  分数）、使わないセッション（名前だけ）、fold と正規化のセッション、fold ごとの hard negative の窓の数、25 行と参考の行の表（検出率・誤検出率・TP / FN / FP・
+  陽性窓の割合・`meal` だけ・条件別だけ・合格線 85% / 1.0 を満たすか）、常時陽性の場合、選んだ行と 0038 の `M4-CONFIG` の行、誤検出の中身（R0 と選んだ行。
+  主分類は排他: 嚥下の直後の延び・直前・動作に付くもの（t・c・n）・`meal` の会話あり・なし・その他。主分類の合計が誤検出の回数と一致しなければ止まる）、
+  付録に行ごとの格子、末尾に時間の実測。
+- **予行**（`--smoke`）: 学習側の一覧・使わない名前・fold の分け方・窓の数・`plan_trainings` の回数（予行の時点と、学習用 `meal` を 1〜3 収集日に分けた本番の
+  見込み 3 通り）と、外側の最初の fold・種 0 の 3 回の学習（重みなし、その内側の最初の fold の重みなし、予行専用の重み付き）の時間・窓 1,000 あたりの時間・
+  本番の見積もり・最大の常駐メモリだけを出す。検出率・誤検出率・陽性窓・hard negative の窓の数・確率・選んだ行は出さず、図も描かない。
+- **図**（本番の `--figures`。`docs/log/` の下だけ）: `visualize.draw_m4`（`draw(..., side="m4train")`。M4 の学習側の一覧にある名前だけ）。25 行の比較
+  （破線 85% / 1.0 回/分）、選んだ行のセッションごとの図（`meal` は 300 秒ごとの頁、条件別は誤検出か見逃しがあるものだけ）、イベントごとの小図（条件別だけ。
+  **`meal` の細かい表示（20 ms の包絡・フレームごとのメル・波形）は描かない**。0037 の 4 と同じ理由）、誤検出の中身の棒。
+- **最終モデル**（`--final-model`。`analysis/models/m4-0038.npz`）: 0038 の構成で学習側の全セッションから学習し（hard negative は全セッションの交差検証で決める）、
+  `numpy.savez`（`allow_pickle` を使わない）で保存する。鍵: `config`（`M4-CONFIG` の値）・`format`（1）、CNN は種ごとに `s<種>/conv1.weight` など
+  PyTorch の名前の重み（float32）と `s<種>/mean`・`s<種>/std`（float64、40）、LR は `std_mean`・`std_std`・`coef`（52、陽性の向き）・`intercept`。保存の直後に
+  `load_model` で読み戻し、学習側の全窓で確率の差の最大 1e-6 以下・後処理の出力の完全な一致を確かめ、外れたらファイルを消して止まる。報告に
+  `M4-MODEL: path=… sha256=…` の行を出す。`load_model`・`model_prob` は numpy と `features_np` だけで計算する（#47 が使う。ただし `m4_compare.py` の
+  import は scikit-learn・librosa・torch の経路を含むので、装置に配るときは #47 で切り出す）。
+- `fixed_eval.py` の `M4_CONFIG`・`M4_MODEL`（ステップ 1 では `None`）と `m4_config_lines_match`・`m4_config_file_matches`: 0038 の `M4-CONFIG:`・`M4-MODEL:` で
+  始まる行と定数の一字一句の一致。
+- ファイルは書かない（`--figures` の PNG と `--final-model` の重みを除く）。波形・特徴量の値・個々の窓の確率は出さない。計算の予算は本番 1 回が PC で 3 時間以内。
+
 ## 検出器の評価（`evaluate_detector.py`）
 
 M2 の数字（#27）を出す。検出器ファームウェア（#24）で録ったセッションには `imu.csv`・`audio_chunks.csv` が無く、
@@ -558,6 +613,9 @@ sigmoid を掛けた値が `cnn_forward`（同じ乱数の重み）と 1e-5 以�
 #43 のテスト（`test_features_v2.py`・`test_postprocess.py`・`test_throat_compare.py`・`test_visualize.py`）と #40 のテスト（`test_final_eval.py`）は
 librosa・matplotlib・torch を使い、
 `test_throat_compare.py`・`test_visualize.py` は合成の咽喉マイクのセッション 6 本で交差検証（CNN を含む）を回すので 1 分ほど掛かる。
+#45 のテスト（`test_m4_compare.py`、`test_postprocess.py`・`test_visualize.py`・`test_fixed_eval.py` に足した分）は、合成の `data/raw`（`meta.json` と空のファイル）と
+合成の SessionData で、CNN の学習を偽の関数に差し替えて回す（`compare.cnn_fit` の `sample_weight` と `weighted_loss` だけは本物の torch）。図の頁分けは
+合成の咽喉マイクのセッション（320 秒の `meal` を含む）で確かめる。
 `compare.py` のテストの名前が `test_compare.py` でないのは、`test_ei_upload.py` より前に並ぶテストのモジュールがあると、unittest が
 モジュールの終わりに登録済みの片付けを全部実行し、`test_ei_upload.py` が import の時点で作った一時フォルダが先に消えるため。
 図は一時フォルダに書く（`visualize.LOG_ROOT` を差し替える）。`test_final_eval.py` は印・図・合成の 0034 を一時フォルダに置き

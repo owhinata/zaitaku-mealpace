@@ -12,6 +12,9 @@ M4（#46、docs/decisions/0037）の定数と検査も置く。M4 は日付の�
 M3 の一覧と検査（上の 3 つと assert_fixed_eval_not_in・marker_note）は変えない。
 M4 の検査を呼ぶのは #45（assert_m4_train）と #49（assert_m4_eval・M4_MARKER）の
 入口。ここでは名前だけを見て、データを開かない。
+
+M4 の構成（#45、docs/decisions/0038）の機械が読む行の定数 M4_CONFIG・M4_MODEL と
+照合の関数も置く（ステップ 1 では None。値は 0038 と同じコミットで入れる）。
 """
 
 from __future__ import annotations
@@ -201,6 +204,44 @@ def m4_lines_match(decision_text: str) -> bool:
         if s.strip().startswith("M4-")
     ]
     return got == m4_expected_lines()
+
+
+# --- M4 の構成（#45、docs/decisions/0038）。0038 の機械が読む行と一字一句同じ ---
+M4_CONFIG_DECISION = "docs/decisions/0038-m4-detector-config.md"
+# 0038 の M4-CONFIG: の値の部分（ステップ 2 で、本番の報告の選んだ行から写す）
+M4_CONFIG: str | None = None
+# 0038 の M4-MODEL: の値の部分（ステップ 3 で path=… sha256=…）
+M4_MODEL: str | None = None
+M4_CONFIG_PENDING = "（ステップ 2 で追記）"
+M4_MODEL_PENDING = "（ステップ 3 で追記）"
+M4_CONFIG_PREFIXES = ("M4-CONFIG:", "M4-MODEL:")
+
+
+def m4_config_expected_lines() -> list:
+    """0038 にあるべき M4-CONFIG・M4-MODEL の行（この順）。"""
+    return [
+        f"M4-CONFIG: {M4_CONFIG if M4_CONFIG is not None else M4_CONFIG_PENDING}",
+        f"M4-MODEL: {M4_MODEL if M4_MODEL is not None else M4_MODEL_PENDING}",
+    ]
+
+
+def m4_config_lines_match(decision_text: str) -> bool:
+    """0038 の本文の M4-CONFIG: / M4-MODEL: で始まる行が、定数と一字一句一致
+    するか（m4_lines_match と同じ読み方）。"""
+    got = [
+        s.strip()
+        for s in decision_text.splitlines()
+        if s.strip().startswith(M4_CONFIG_PREFIXES)
+    ]
+    return got == m4_config_expected_lines()
+
+
+def m4_config_file_matches() -> bool:
+    """リポジトリの 0038 が無ければ偽。あれば m4_config_lines_match。"""
+    p = REPO_ROOT / M4_CONFIG_DECISION
+    if not p.is_file():
+        return False
+    return m4_config_lines_match(p.read_text(encoding="utf-8"))
 
 
 def m4_marker_note() -> str | None:
