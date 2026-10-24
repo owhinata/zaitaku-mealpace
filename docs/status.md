@@ -344,7 +344,7 @@ M4 検出器（咽喉マイク版）（10/14〜11/7、人の決定で前倒し�
 
 **今（10/24 夜）:** #44・#46・#51 は実装・計測・文書まで済み（close は人）。#45 は plan が承認され（10/24）、ステップ 1（コード・合成のテスト・予行）まで済み。
 次は学習用 `meal` の締め（10/28）と採否の後のステップ 2（0037 の `M4-TRAIN`・`fixed_eval.M4_EXPECTED_TRAIN` の追記 → 本番の実行 → 0038）、ステップ 3（最終モデルと sha256）を 10/29〜10/30 に。#47 の plan は 0038 の後で、0038 と #47 の実装は 10/29〜10/31 に収める必要がある（評価用 `meal` が 11/1 から）。装置のランタイムの採否（候補: numpy im2col＋OpenBLAS / LiteRT CPU / ncnn CPU / ncnn Vulkan。材料は docs/log/2026-10-24.md「#51」）は 0038 の後に別の decision で決める（0039 決定 5。0038 が LR なら numpy のまま）。
-**人の作業:** 学習用 `meal` 3 本の記録（#48、10/25〜10/28。手順は `docs/recording-protocol.md`「M4 の `meal`（咽喉マイク）」。締めの後、名前を 0037 の `M4-TRAIN` と `fixed_eval.M4_EXPECTED_TRAIN` に追記）。Issue #45 の本文と 0037 の「28 行目の M2 の行」を「29 行目」に直す（`docs/evaluation.md` の実物。plan #45 の 10 節）。plan.md の M4 の日程（10/14〜11/7）と Milestone の日付、`device/` を edit-gate の対象に（#38 D8）、CLAUDE.md・AGENTS.md の「UNO Q 側はプログラムを置かず」「ALSA から」の文言（0035 D1b）。Issue #44・#46・#51 の close。
+**人の作業:** 学習用 `meal` 3 本の記録（#48、10/25〜10/28。手順は `docs/recording-protocol.md`「M4 の `meal`（咽喉マイク）」。締めの後、名前を 0037 の `M4-TRAIN` と `fixed_eval.M4_EXPECTED_TRAIN` に追記）。plan.md の M4 の日程（10/14〜11/7）と Milestone の日付、`device/` を edit-gate の対象に（#38 D8）、CLAUDE.md・AGENTS.md の「UNO Q 側はプログラムを置かず」「ALSA から」の文言（0035 D1b）。Issue #44・#46・#51 は人が close した（10/24）。
 
 | Issue | 内容 | 依存 |
 |---|---|---|
