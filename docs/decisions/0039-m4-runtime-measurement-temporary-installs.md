@@ -41,4 +41,10 @@ Issue #51 で、UNO Q の CNN の段の推論を numpy の書き方の違い（B
 - **ランタイムが書いたファイル**: ONNX Runtime 1.31（PyPI の wheel）が import で `~/.cache/Microsoft/DeveloperTools/.onnxruntime/` に `deviceid`（36 B）と
   `onnxruntime.db`（24,576 B）を作り、使うたびに `onnxruntime.db` を書き直した。音声ではない。ほかに新しいファイルは無い（Mesa のシェーダのキャッシュは増えていない）。
 - UNO Q に音声の拡張子のファイルは 0 件。`~/zaitaku-mealpace-device/` は一覧の 14 個だけ、`__pycache__` 0 件。
-- **外したもの**: まだ無い（決定 2。人の作業）。外した後にこの記録と log に追記する。
+- **外したもの（10/24 18:52 JST、人、`sudo apt remove --autoremove`）**: 明示の 6 つ（`python3-onnxruntime`・`python3-pyarmnn`・`armnn-latest-cpu-gpu`・`python3-venv`・
+  `libopenblas0-pthread`・`ocl-icd-opencl-dev`）と自動で入っていたもの、計 44 個（一覧は docs/log/2026-10-24.md「#51」）。`apt-get -s` の一覧を人が先に見て、10/24 の導入で入ったものの
+  範囲内であることを確かめた。venv `~/zaitaku-mealpace-bench-venv` と `~/.cache/Microsoft`（ONNX Runtime が書いた 2 ファイル）も削除。alternatives は `--auto` に戻し、
+  libblas・liblapack とも auto mode で参照実装を指す。残したもの: `python3-numpy` 2.2.4（装置の推論に要る）、`python3.13-venv`・`python3-pip-whl`・`python3-setuptools-whl`
+  （apt がほかから使われていると見て残した 3 つ。数 MB）、`~/zaitaku-mealpace-device/` の 14 ファイル（計測用の 5 つは決定 5 の採否まで残す）。
+  メインが読み取りで確かめた: armnn・onnxruntime・openblas・ocl-icd-opencl-dev のパッケージ 0 個、`~/.cache` は `mesa_shader_cache` だけ、音声のファイル 0 件、
+  ディスクの空き 1.6 GB → 1.8 GB（81%。導入前と同じ）。
