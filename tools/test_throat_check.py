@@ -332,6 +332,30 @@ class ThroatCheckTest(unittest.TestCase):
         (self.dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
         self.assertEqual(tc.check(tc.load_session(self.dir))["flags"], [])
 
+    def test_k10_to_analysis_matches_resample_poly(self):
+        """間引きは features_np.decimate3（装置と同じ numpy のコード）。合成入力で
+        scipy の resample_poly(x, 1, 3) との差が int16 の目盛りで 1e-8 以下
+        （Issue #44）。"""
+        from scipy.signal import resample_poly
+
+        src = (Path(tc.__file__).resolve()).read_text(encoding="utf-8")
+        self.assertNotIn("scipy", src)
+        rng = np.random.default_rng(10)
+        for n in (48000, 48001, 48002, 100, 60):
+            with self.subTest(n=n):
+                L = np.round(rng.normal(0.0, 3000.0, n))
+                wav = np.stack([L, L], axis=1).astype("<i2")
+                got = tc.to_analysis({"fs": FS, "wav": wav})
+                ref = resample_poly(wav[:, 0].astype(float), 1, 3)
+                self.assertEqual(len(got), len(ref))
+                np.testing.assert_allclose(got, ref, rtol=0, atol=1e-8)
+        make_session(self.dir, seconds=20.0, seed=4)
+        ses = tc.load_session(self.dir)
+        ref = resample_poly(ses["wav"][:, 0].astype(float), 1, 3)
+        got = tc.to_analysis(ses)
+        self.assertEqual(len(got), len(ref))
+        np.testing.assert_allclose(got, ref, rtol=0, atol=1e-8)
+
 
 if __name__ == "__main__":
     unittest.main()

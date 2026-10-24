@@ -33,11 +33,10 @@
 """
 
 from __future__ import annotations
-import argparse, csv, json, sys, wave
+import argparse, csv, importlib.util, json, sys, wave
 from pathlib import Path
 
 import numpy as np
-from scipy.signal import resample_poly
 
 BIN_MS = 10_000  # 区間の長さ
 STEP_MS = 50.0  # 隣り合う区間の最小の差がこれを超えたら段差
@@ -58,6 +57,25 @@ TAP_MAX_ABS_MEDIAN_MS = 50.0
 ZERO_RUN_MS = 100
 # 0 の区間・stall・リンクの確認を使わない目安に入れる iface（構成 B）
 A2DP_IFACES = ("sh12jk-nz210c-a2dp-unoq",)
+# 間引き（48 kHz → 16 kHz）は装置と同じ numpy のコード（Issue #44）
+_FEATURES_NP_PATH = (
+    Path(__file__).resolve().parent.parent / "analysis" / "features_np.py"
+)
+_features_np_module = None
+
+
+def features_np_module():
+    """analysis/features_np.py を絶対パスから 1 回だけ読み込んで返す
+    （analysis/features.py がこのファイルを読むのと同じ方法）。"""
+    global _features_np_module
+    if _features_np_module is None:
+        spec = importlib.util.spec_from_file_location(
+            "features_np", _FEATURES_NP_PATH
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _features_np_module = mod
+    return _features_np_module
 
 
 # --- 読み込み ---
@@ -172,11 +190,12 @@ def est_diff_frames(session) -> int:
 
 # --- 包絡と叩き ---
 def to_analysis(session) -> np.ndarray:
-    """L（ch0）を float にし、16 kHz に落とす（resample_poly(x, 1, 3)）。"""
+    """L（ch0）を float にし、16 kHz に落とす（features_np.decimate3。
+    resample_poly(x, 1, 3) と同じ係数・位置合わせ。装置と同じコード）。"""
     s = _as_session(session)
     if s["fs"] != 48000:
         raise SystemExit(f"audio_hz が 48000 ではありません: {s['fs']}")
-    return resample_poly(s["wav"][:, 0].astype(float), 1, 3)
+    return features_np_module().decimate3(s["wav"][:, 0].astype(float))
 
 
 def moving_rms(x: np.ndarray, n: int) -> np.ndarray:

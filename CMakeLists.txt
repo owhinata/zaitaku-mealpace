@@ -123,6 +123,9 @@ add_custom_target(record
 
 # UNO Q の Linux 側への配置（#38、docs/decisions/0035）。device/unoq/DEPLOY_FILES に書いたファイルだけを
 # UNO Q の ~/zaitaku-mealpace-device/ に rsync で送る。一覧に絶対パス・".."・data/ の行があれば送らずに止まる。
+# 一覧の各行は device/unoq/ の普通のファイルか、analysis/ の直下の普通のファイルを指すリンク（PC と同じ推論のファイル。#44）。
+# 送る前に realpath で確かめ、data/ を含む先・analysis/ の外を指すリンク・device/unoq/ の外のファイルは止める。
+# リンクは --copy-links で先の中身を送る（UNO Q の上は平らな並びの普通のファイル）。
 # --delete は使わない（一覧の外は消さない。配った後に ls で一覧と一致するかを見る）。
 # 記録（record）の間は配ったプログラムを動かさない（0028 決定 3）。消すときは ssh で rm -r ~/zaitaku-mealpace-device。
 set(UNOQ_HOST "arduino@unoq.local" CACHE STRING "deploy-unoq の宛先（ssh の user@host）")
@@ -130,6 +133,7 @@ set(UNOQ_DEPLOY_LIST "${CMAKE_SOURCE_DIR}/device/unoq/DEPLOY_FILES")
 find_program(RSYNC rsync)
 add_custom_target(deploy-unoq
   COMMAND sh -c "if grep -n -E '^/|[.][.]|(^|/)data/' \"$1\"; then echo 'DEPLOY_FILES に配れない行がある（絶対パス、..、data/）' >&2; exit 1; fi" sh ${UNOQ_DEPLOY_LIST}
-  COMMAND ${RSYNC} -a --files-from=${UNOQ_DEPLOY_LIST} ${CMAKE_SOURCE_DIR}/device/unoq/ ${UNOQ_HOST}:zaitaku-mealpace-device/
+  COMMAND sh -c "root=$(realpath -e \"$1\") && d=$(realpath -e \"$1/device/unoq\") && a=$(realpath -e \"$1/analysis\") || exit 1; while IFS= read -r f || [ -n \"$f\" ]; do [ -z \"$f\" ] && continue; p=\"$d/$f\"; r=$(realpath -e \"$p\") || { echo \"DEPLOY_FILES の $f が無い\" >&2; exit 1; }; case \"$(realpath --relative-to=\"$root\" \"$r\")\" in data/*|*/data/*) echo \"DEPLOY_FILES の $f は data/ の中を指す\" >&2; exit 1;; esac; if [ -L \"$p\" ]; then { [ -f \"$r\" ] && [ \"$(dirname \"$r\")\" = \"$a\" ]; } || { echo \"DEPLOY_FILES の $f は analysis/ の直下の普通のファイルを指すリンクではない\" >&2; exit 1; }; elif ! { [ -f \"$p\" ] && [ \"$(dirname \"$r\")\" = \"$d\" ]; }; then echo \"DEPLOY_FILES の $f は device/unoq/ の普通のファイルではない\" >&2; exit 1; fi; done < \"$2\"" sh ${CMAKE_SOURCE_DIR} ${UNOQ_DEPLOY_LIST}
+  COMMAND ${RSYNC} -a --copy-links --files-from=${UNOQ_DEPLOY_LIST} ${CMAKE_SOURCE_DIR}/device/unoq/ ${UNOQ_HOST}:zaitaku-mealpace-device/
   COMMENT "UNO Q の Linux 側へ配る（${UNOQ_HOST}:zaitaku-mealpace-device/）"
   VERBATIM)

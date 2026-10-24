@@ -14,13 +14,15 @@ audio_chunks.csv、meta.json）。
 
 咽喉マイクのセッション（meta.json の fw が pc-throat。docs/decisions/0031）は
 extract_throat_session で、音の 15 次元（0012 の式。IMU なし。docs/decisions/0026）
-を出す。throat.wav の L（ch0）を scipy.signal.resample_poly(x, 1, 3) で 16 kHz
-に落とし、サンプルの時刻は tools/throat_check.py の sample_time_map（受信の時刻に
-よる対応。docs/decisions/0029）で出す。範囲は evaluate.throat_session_span と同じ
+を出す。throat.wav の L（ch0）を features_np.decimate3（resample_poly(x, 1, 3)
+と同じ係数・位置合わせ。テストで確かめる）で 16 kHz に落とし、サンプルの時刻は
+tools/throat_check.py の sample_time_map（受信の時刻による対応。
+docs/decisions/0029）で出す。範囲は evaluate.throat_session_span と同じ
 （o start から最後のサンプルの時刻まで）。
 
-依存: M1 の経路（extract_session）は numpy だけ。咽喉マイクの経路だけが scipy と
-tools/throat_check.py を使い、それらは咽喉マイクの経路の関数の中で読み込む。
+依存: M1 の経路（extract_session）は numpy だけ。咽喉マイクの経路だけが
+tools/throat_check.py（間引きは analysis/features_np.py。numpy だけ）を使い、
+それらは咽喉マイクの経路の関数の中で読み込む。
 
 使い方: python analysis/features.py <セッションフォルダ>
 """
@@ -464,7 +466,7 @@ def extract_session(session_dir: Path) -> WindowFeatures:
     )
 
 
-# --- 咽喉マイク（docs/decisions/0031。scipy と throat_check はここだけで読む） ---
+# --- 咽喉マイク（docs/decisions/0031。throat_check はここだけで読む） ---
 
 
 def throat_check_module():

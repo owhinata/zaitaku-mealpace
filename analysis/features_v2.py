@@ -8,22 +8,25 @@
   base15_mw  base15 を 0.5・1.0・2.0 秒の窓（中心をそろえる）に当てて並べる（45）。
   a52_mw     a52 を同じ 3 つの窓に当てて並べる（156）。
 CNN の入力（mfe40）: 対数メル 40 本（0〜A_FMAX_HZ）の 98 × 40。小さな CNN の
-numpy の順伝播（cnn_forward）もここに置く（装置と PC で同じコード。
-docs/decisions/0025）。学習（PyTorch）は compare.py。
+numpy の順伝播（cnn_forward）は features_np.py にあり、ここから同じ名前で出す
+（装置と PC で同じコード。docs/decisions/0025）。学習（PyTorch）は compare.py。
+mfe40・a52 の式（フレーム、|FFT|²、メル行列、デルタ）も features_np.py の numpy
+だけの実装を呼ぶ（Issue #44）。base15 は librosa・scipy のまま（装置で使わない）。
 
 中心はメモリ上の信号から作る関数（window_features・features_one・mfe_one）。
 セッションフォルダの読み込みは extract・extract_mfe だけが行い、窓の格子・valid・
 記録の範囲・サンプルの時刻は features._throat_windows（extract_throat_session と
 同じもの）を使う。戻り値に波形を含めない。特徴量をファイルに書かない。
 
-o start より前の音: 16 kHz の信号はセッション全体を resample_poly で落としてから
-窓を切る（features.extract_throat_session と同じ）。保証するのは窓の選び方で、
+o start より前の音: 16 kHz の信号はセッション全体を features_np.decimate3
+（resample_poly(x, 1, 3) と同じ係数・位置合わせ）で落としてから窓を切る
+（features.extract_throat_session と同じ）。保証するのは窓の選び方で、
 どの組のどの窓も [lo, hi)（記録の範囲 [t0, t1) に当たるサンプルの番号）の外を
 切り出さない。リサンプルのフィルタの裾（数 ms）と最近傍の 1 サンプルの規則による
 o start 直前の音の混入は extract_throat_session と同じで、変えない。
 
-依存: numpy、scipy、librosa（filters.mel・util.frame・feature.delta だけ。音声の
-読み込みには使わない）。
+依存: numpy、features_np（numpy だけ）、scipy（base15 の DCT だけ）、librosa
+（base15 のメル行列と重心の周波数だけ。音声の読み込みには使わない）。
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ import numpy as np
 import scipy.fft
 
 import features
+import features_np
 
 _CACHE_STOP = (
     "{}。librosa のキャッシュは特徴量をディスクや標準出力に出すので、この環境では"
@@ -105,7 +109,6 @@ EXTRA_LATENCY_S = {
     CNN_SET: 0.0,
 }
 
-_HAMMING = np.hamming(FRAME_LEN)  # 0012 と同じ対称形
 _FFT_FREQS = librosa.fft_frequencies(sr=SR, n_fft=N_FFT)
 _MEL_BASE = librosa.filters.mel(
     sr=SR,
@@ -117,26 +120,10 @@ _MEL_BASE = librosa.filters.mel(
     norm=None,
     dtype=np.float64,
 )
-_MEL_A = librosa.filters.mel(
-    sr=SR,
-    n_fft=N_FFT,
-    n_mels=N_MEL,
-    fmin=0.0,
-    fmax=A_FMAX_HZ,
-    htk=True,
-    norm=None,
-    dtype=np.float64,
-)
-_MEL_CNN = librosa.filters.mel(
-    sr=SR,
-    n_fft=N_FFT,
-    n_mels=N_MEL_CNN,
-    fmin=0.0,
-    fmax=A_FMAX_HZ,
-    htk=True,
-    norm=None,
-    dtype=np.float64,
-)
+# 案A と CNN のメル行列は features_np が読む .npy（librosa.filters.mel の値。
+# make_features_np_consts.py で作り、テストで一致を確かめる）
+_MEL_A = features_np.MEL26
+_MEL_CNN = features_np.MEL40
 
 A_STATS = ("mean", "max", "std", "dabs")
 BASE15_NAMES: tuple[str, ...] = features.AUDIO_FEATURE_NAMES
@@ -174,20 +161,17 @@ def _check_set(feature_set: str) -> None:
 
 def _power(x: np.ndarray) -> np.ndarray:
     """区間の波形 → フレームごとの |FFT|² ÷ N_FFT。(フレーム数, 257)。"""
-    fr = librosa.util.frame(
-        x, frame_length=FRAME_LEN, hop_length=FRAME_HOP, axis=0
-    )
-    spec = np.fft.rfft(fr * _HAMMING, n=N_FFT, axis=1)
-    return (spec.real**2 + spec.imag**2) / N_FFT
+    return features_np.power(x)
 
 
 def _preemph(x: np.ndarray) -> np.ndarray:
     """区間全体に掛けてから切る（0012 のまま）。"""
-    return np.append(x[0], x[1:] - PREEMPHASIS * x[:-1])
+    return features_np.preemph(x)
 
 
 def _mfcc(x: np.ndarray, mel_fb: np.ndarray) -> np.ndarray:
-    """区間の波形（float64）→ フレームごとの MFCC 13。(フレーム数, 13)。"""
+    """区間の波形（float64）→ フレームごとの MFCC 13。(フレーム数, 13)。
+    base15 だけが使う（DCT は scipy）。"""
     logmel = np.log(_power(_preemph(x)) @ mel_fb.T + LOG_FLOOR)
     return scipy.fft.dct(logmel, type=2, norm="ortho", axis=1)[:, :N_MFCC]
 
@@ -213,16 +197,10 @@ def base15_segment(x: np.ndarray) -> np.ndarray:
 def a_stats(C: np.ndarray) -> np.ndarray:
     """係数行列 (フレーム数, 13) → 52 次元（平均、最大、標準偏差（÷ n）、
     デルタの絶対値の平均）。フレームが DELTA_WIDTH に満たなければ全部 0。"""
-    C = np.asarray(C, dtype=np.float64)
-    if len(C) < DELTA_WIDTH:
-        return np.zeros(4 * N_MFCC)
+    # デルタは features_np の numpy の式（librosa.feature.delta の width 9・
+    # interp と同じ値）。キャッシュの確かめは残す（0033）
     check_librosa_cache()  # import の後にキャッシュを有効にされた場合
-    d = librosa.feature.delta(
-        C.T, width=DELTA_WIDTH, order=1, mode="interp", axis=-1
-    )
-    return np.concatenate(
-        [C.mean(axis=0), C.max(axis=0), C.std(axis=0), np.abs(d).mean(axis=1)]
-    )
+    return features_np.a_stats(C)
 
 
 def a52_segment(x: np.ndarray) -> np.ndarray:
@@ -230,17 +208,13 @@ def a52_segment(x: np.ndarray) -> np.ndarray:
     x = np.asarray(x, dtype=np.float64)
     if len(x) < FRAME_LEN:
         return np.zeros(4 * N_MFCC)
-    return a_stats(_mfcc(x, _MEL_A))
+    return a_stats(features_np.mfcc_a(x))
 
 
 def mfe_one(seg: np.ndarray) -> np.ndarray:
     """判定の窓の波形（16000 サンプル）→ 対数メル 40 本 (98, 40) float32。
-    16000 に満たなければ全部 0。"""
-    if len(seg) < WINDOW_SAMPLES:
-        return np.zeros((98, N_MEL_CNN), dtype=np.float32)
-    x = np.asarray(seg[:WINDOW_SAMPLES], dtype=np.float64)
-    logmel = np.log(_power(_preemph(x)) @ _MEL_CNN.T + LOG_FLOOR)
-    return logmel.astype(np.float32)
+    16000 に満たなければ全部 0（features_np.mfe40）。"""
+    return features_np.mfe40(seg)
 
 
 def logmel_frames(x: np.ndarray) -> np.ndarray:
@@ -248,7 +222,7 @@ def logmel_frames(x: np.ndarray) -> np.ndarray:
     x = np.asarray(x, dtype=np.float64)
     if len(x) < FRAME_LEN:
         return np.zeros((0, N_MEL_CNN))
-    return np.log(_power(_preemph(x)) @ _MEL_CNN.T + LOG_FLOOR)
+    return features_np.logmel(x, _MEL_CNN)
 
 
 _SEGMENT_FN = {"base15": base15_segment, "a52": a52_segment}
@@ -341,8 +315,14 @@ def extract_mfe(session_dir: Path) -> tuple:
 
 # --- 小さな CNN の numpy の順伝播（docs/decisions/0033。学習は compare.py） ---
 
-# (入力チャンネル, 出力チャンネル)。3×3、pad 1。1・2 層目の後に 2×2 の最大値
-CNN_CONV = ((1, 8), (8, 16), (16, 32))
+# 本体（CNN_CONV、_conv3x3、_maxpool2、cnn_forward）は features_np.py（装置と
+# PC で同じコード）。compare.py とテストの呼び出しのために同じ名前で出す
+from features_np import (  # noqa: E402, F401
+    CNN_CONV,
+    _conv3x3,
+    _maxpool2,
+    cnn_forward,
+)
 
 
 def cnn_param_count() -> int:
@@ -357,39 +337,6 @@ def cnn_macs(h: int = 98, w: int = N_MEL_CNN) -> int:
         if k < 2:
             h, w = h // 2, w // 2
     return total + CNN_CONV[-1][1]
-
-
-def _conv3x3(x: np.ndarray, W: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """x (B, Ci, H, W)、W (Co, Ci, 3, 3) → (B, Co, H, W)。pad 1、相互相関。"""
-    B, Ci, H, Wd = x.shape
-    xp = np.pad(x, ((0, 0), (0, 0), (1, 1), (1, 1)))
-    cols = np.lib.stride_tricks.sliding_window_view(xp, (3, 3), axis=(2, 3))
-    # cols (B, Ci, H, W, 3, 3)
-    out = np.einsum("bchwij,ocij->bohw", cols, W, optimize=True)
-    return out + b[None, :, None, None]
-
-
-def _maxpool2(x: np.ndarray) -> np.ndarray:
-    B, C, H, W = x.shape
-    h, w = H // 2, W // 2
-    x = x[:, :, : 2 * h, : 2 * w].reshape(B, C, h, 2, w, 2)
-    return x.max(axis=(3, 5))
-
-
-def cnn_forward(params: Mapping[str, np.ndarray], M: np.ndarray) -> np.ndarray:
-    """params: conv{1,2,3}.{weight,bias}、fc.{weight,bias}（PyTorch の
-    state_dict と同じ名前）。M: 正規化済みの (B, 98, 40)。陽性確率 (B,)。"""
-    x = np.asarray(M, dtype=np.float32)[:, None, :, :]
-    for k in range(3):
-        x = _conv3x3(
-            x, params[f"conv{k + 1}.weight"], params[f"conv{k + 1}.bias"]
-        )
-        x = np.maximum(x, 0.0)
-        if k < 2:
-            x = _maxpool2(x)
-    g = x.mean(axis=(2, 3))  # (B, 32)
-    z = g @ params["fc.weight"].T[:, 0] + params["fc.bias"][0]
-    return 1.0 / (1.0 + np.exp(-z.astype(np.float64)))
 
 
 def _main() -> None:  # pragma: no cover

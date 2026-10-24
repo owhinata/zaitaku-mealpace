@@ -1,4 +1,4 @@
-"""device/unoq/ のテスト（Issue #38。PC で合成だけ。UNO Q には配らない）。
+"""device/unoq/ のテスト（Issue #38・#44。PC で合成だけ。UNO Q には配らない）。
 
 .venv/bin/python -m unittest discover -s device/unoq -v
 """
@@ -6,20 +6,26 @@
 import ast
 import contextlib
 import io
+import os
 import pathlib
 import re
 import socket
+import subprocess
+import sys
+import tempfile
 import threading
 import unittest
 
 import msgpack
 import numpy as np
 
+import bench_infer
 import led_check
 import mcu_rpc
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
+ANALYSIS = ROOT / "analysis"
 FIRMWARE = ROOT / "firmware" / "unoq_mcu"
 
 
@@ -367,8 +373,36 @@ FORBIDDEN_IMPORTS = {
     "pyaudio",
     "subprocess",
     "soundfile",
-    "numpy",
+    "scipy",
+    "librosa",
+    "torch",
+    "sklearn",
+    "threadpoolctl",
 }
+# numpy を import してよい配るファイル（実物に合わせる。evaluate.py は今も
+# numpy を読まない）
+NUMPY_ALLOWED = {"features_np.py", "bench_infer.py", "postprocess.py"}
+# ファイルを書く呼び出し（属性の名前）
+WRITE_ATTRS = {
+    "save",
+    "savez",
+    "savez_compressed",
+    "savetxt",
+    "tofile",
+    "write_text",
+    "write_bytes",
+}
+EXPECTED_DEPLOY = [
+    "bench_infer.py",
+    "evaluate.py",
+    "features_np.py",
+    "features_np_ref.npz",
+    "led_check.py",
+    "mcu_rpc.py",
+    "mel26_htk_0_4000.npy",
+    "mel40_htk_0_4000.npy",
+    "postprocess.py",
+]
 
 
 def imported_modules(path):
@@ -384,12 +418,25 @@ def imported_modules(path):
 
 class TestStatic(unittest.TestCase):
     def test_deployed_files_no_audio_no_writes(self):
-        """6. 配るファイルは音声・subprocess・numpy を import せず、書き込みが無い。"""
-        for name in deploy_files():
+        """6. 配る .py は音声・subprocess・scipy などを import せず、書き込みが
+        無い。numpy は NUMPY_ALLOWED だけ。"""
+        py = [n for n in deploy_files() if n.endswith(".py")]
+        self.assertEqual(len(py), 6)
+        for name in py:
             with self.subTest(name=name):
                 names, tree = imported_modules(HERE / name)
                 self.assertFalse(names & FORBIDDEN_IMPORTS, names)
+                if name not in NUMPY_ALLOWED:
+                    self.assertNotIn("numpy", names)
                 for node in ast.walk(tree):
+                    if isinstance(node, ast.Call) and isinstance(
+                        node.func, ast.Attribute
+                    ):
+                        self.assertNotIn(
+                            node.func.attr,
+                            WRITE_ATTRS,
+                            f"{name}: {node.func.attr}",
+                        )
                     if not (
                         isinstance(node, ast.Call)
                         and isinstance(node.func, ast.Name)
@@ -408,20 +455,31 @@ class TestStatic(unittest.TestCase):
                     )
 
     def test_deploy_list(self):
-        """7. DEPLOY_FILES は device/unoq/ の中の実在のファイルだけ。"""
+        """7. DEPLOY_FILES は device/unoq/ の中の実在のファイルか、analysis/ の
+        直下の普通のファイルを指すリンクだけ。"""
         files = deploy_files()
-        self.assertEqual(sorted(files), ["led_check.py", "mcu_rpc.py"])
+        self.assertEqual(sorted(files), EXPECTED_DEPLOY)
         for name in files:
             with self.subTest(name=name):
                 self.assertFalse(name.startswith("/"))
                 self.assertNotIn("..", name)
+                self.assertNotIn("/", name)
                 self.assertNotRegex(name, r"(^|/)data/")
                 self.assertFalse(
                     pathlib.PurePosixPath(name).name[:5] == "test_"
                 )
-                p = (HERE / name).resolve()
+                link = HERE / name
+                p = link.resolve()
                 self.assertTrue(p.is_file())
-                self.assertEqual(p.parent, HERE)
+                self.assertFalse(p.is_symlink())
+                self.assertNotIn("data", p.relative_to(ROOT).parts)
+                self.assertFalse(p.name.startswith("test_"))
+                if link.is_symlink():
+                    self.assertFalse(os.path.isabs(os.readlink(link)))
+                    self.assertEqual(p.parent, ANALYSIS)
+                    self.assertEqual(p.name, name)
+                else:
+                    self.assertEqual(p.parent, HERE)
 
     def test_rpc_confined_to_one_module(self):
         """8. RPC は Linux 側・MCU 側とも 1 つのモジュールの中だけ。"""
@@ -461,6 +519,143 @@ class TestStatic(unittest.TestCase):
                 names, _ = imported_modules(path)
                 self.assertNotIn("socket", names)
                 self.assertNotIn("msgpack", names)
+
+
+def snapshot(*dirs):
+    """ディレクトリの下のすべてのパス（__pycache__ を含む）。"""
+    return {p for d in dirs for p in pathlib.Path(d).rglob("*")}
+
+
+COMBOS = [(c, h) for c in bench_infer.CONFIGS for h, _ in bench_infer.HOPS]
+
+
+class TestBenchInfer(unittest.TestCase):
+    """9. bench_infer.py（Issue #44）。合成入力だけ。ファイルを書かない。"""
+
+    MAX_LINES = 30
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.work = pathlib.Path(self._tmp.name)
+
+    def check_output(self, text):
+        lines = text.splitlines()
+        self.assertLessEqual(len(lines), self.MAX_LINES)
+        self.assertIn("照合: OK", text)
+        self.assertNotIn("判定", text)
+        for c, h in COMBOS:
+            label = f"構成 {c}・ホップ {h:g} 秒"
+            self.assertEqual(
+                sum(ln.startswith(f"(f) 全体 {label}（") for ln in lines), 1
+            )
+            lim = bench_infer.LIMIT_MS[h]
+            self.assertEqual(
+                sum(
+                    ln.startswith(f"(f) {label}: {lim:g} ms 未満か: ")
+                    for ln in lines
+                ),
+                1,
+            )
+            self.assertEqual(
+                sum(
+                    f"部品の和。全体の分布の値ではない）: {label} " in ln
+                    for ln in lines
+                ),
+                1,
+            )
+        return lines
+
+    def test_subprocess_no_rpc_writes_nothing(self):
+        before = snapshot(HERE, ANALYSIS, self.work)
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(HERE / "bench_infer.py"),
+                "--no-rpc",
+                "--n",
+                "3",
+                "--warmup",
+                "0",
+            ],
+            cwd=self.work,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = self.check_output(r.stdout)
+        self.assertIn("(e) RPC: 省いた（--no-rpc）", lines)
+        self.assertTrue(any("件数 3、" in ln for ln in lines))
+        self.assertEqual(snapshot(HERE, ANALYSIS, self.work), before)
+
+    def test_fake_link_sends_only_off_and_writes_nothing(self):
+        before = snapshot(HERE, ANALYSIS, self.work)
+        link = FakeLink()
+        out = io.StringIO()
+        with contextlib.chdir(self.work), contextlib.redirect_stdout(out):
+            rc = bench_infer.main(
+                ["--n", "3", "--warmup", "0"], open_link=lambda: link
+            )
+        self.assertEqual(rc, 0)
+        lines = self.check_output(out.getvalue())
+        self.assertTrue(any(ln.startswith("(e) RPC（") for ln in lines))
+        # (e) 3 回、(f) 4 つの組み合わせ × 3 回、最後の消灯 1 回
+        self.assertEqual(len(link.calls), 3 + 4 * 3 + 1)
+        self.assertEqual(set(link.calls), {mcu_rpc.STATE_OFF})
+        self.assertEqual(snapshot(HERE, ANALYSIS, self.work), before)
+
+    def test_ng_returns_1_without_measuring(self):
+        ref = bench_infer.load_ref()
+        broken = dict(ref, mfe40=ref["mfe40"] + 1.0)
+        missing = {k: v for k, v in ref.items() if k != "a52"}
+        reshaped = dict(ref, cnn=np.zeros(2))
+        for name, bad in (
+            ("壊した値", broken),
+            ("項目が無い", missing),
+            ("形が違う", reshaped),
+        ):
+            with self.subTest(name):
+                opened = []
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = bench_infer.main(
+                        ["--n", "3", "--warmup", "0"],
+                        open_link=lambda: opened.append(1) or FakeLink(),
+                        ref=bad,
+                    )
+                self.assertEqual(rc, 1)
+                text = out.getvalue()
+                self.assertIn("照合: NG", text)
+                self.assertNotIn("中央値", text)
+                self.assertEqual(opened, [])
+
+    def test_verify_ok_on_pc(self):
+        ok, diff = bench_infer.verify(bench_infer.load_ref())
+        self.assertTrue(ok)
+        self.assertLessEqual(diff, 1e-9)
+
+    def test_ring_and_hysteresis_step(self):
+        ring = bench_infer.Ring()
+        x = np.arange(40000, dtype=float)
+        for a, b in ((0, 4000), (4000, 5600), (5600, 17000), (17000, 40000)):
+            ring.push(x[a:b])
+            got = ring.latest()
+            want = np.concatenate((np.zeros(16000), x[:b]))[-16000:]
+            np.testing.assert_array_equal(got, want)
+        # postprocess.hysteresis と同じ規則
+        import postprocess
+
+        prob = [0.1, 0.75, 0.5, 0.35, 0.8, 0.9, 0.2]
+        valid = [True, True, True, True, False, True, True]
+        t = [0.25 * k for k in range(len(prob))]
+        want = postprocess.hysteresis(prob, valid, 0.7, 0.4, t)
+        on, got = False, []
+        for p, v in zip(prob, valid):
+            on = bench_infer.hyst_step(on, p, v, 0.7, 0.4)
+            got.append(on)
+        self.assertEqual(got, list(want))
 
 
 if __name__ == "__main__":

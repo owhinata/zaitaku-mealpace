@@ -1,2 +1,9 @@
 mcu_rpc.py
 led_check.py
+bench_infer.py
+features_np.py
+mel40_htk_0_4000.npy
+mel26_htk_0_4000.npy
+features_np_ref.npz
+postprocess.py
+evaluate.py
