@@ -291,6 +291,24 @@ def _cnn_shapes() -> dict:
     return shapes
 
 
+def random_cnn(rng) -> dict:
+    """時間を測るための乱数の重み（同じ形。学習済みではない）。
+    compare.measure_timings と同じ作り方（rng は np.random.default_rng など）。
+    装置の計測（bench_infer・bench_runtimes）と PC の変換・テストで同じ重みを
+    作るために、ここに 1 つだけ置く（Issue #51）。"""
+    params = {}
+    for k, (ci, co) in enumerate(CNN_CONV):
+        params[f"conv{k + 1}.weight"] = rng.normal(
+            0, 0.1, (co, ci, 3, 3)
+        ).astype(np.float32)
+        params[f"conv{k + 1}.bias"] = np.zeros(co, np.float32)
+    params["fc.weight"] = rng.normal(0, 0.1, (1, CNN_CONV[-1][1])).astype(
+        np.float32
+    )
+    params["fc.bias"] = np.zeros(1, np.float32)
+    return params
+
+
 def reference_cnn() -> tuple:
     """照合用の決定的な CNN の重みと入力 (params, M (1, 98, 40) float32)。
     学習済みの重みではない（数式で作る）。"""

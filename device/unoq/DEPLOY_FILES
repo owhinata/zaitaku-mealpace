@@ -7,3 +7,8 @@ mel26_htk_0_4000.npy
 features_np_ref.npz
 postprocess.py
 evaluate.py
+bench_runtimes.py
+cnn_rand0.onnx
+cnn_rand0.tflite
+cnn_rand0.ncnn.param
+cnn_rand0.ncnn.weights

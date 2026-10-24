@@ -1,0 +1,17 @@
+# Issue #51 の TFLite への変換（make_runtime_models.py --only tflite）だけに使う。
+# litert-torch は依存が多く typing_extensions を下げるので、.venv ではなく
+# リポジトリの外の変換用の venv に入れる（.gitignore は .venv/ だけなので、
+# リポジトリの中に置かない）。装置には要らない。
+#   python3 -m venv ~/.venvs/zaitaku-mealpace-litert-convert
+#   ~/.venvs/zaitaku-mealpace-litert-convert/bin/pip install \
+#     -r analysis/requirements-convert-litert.txt \
+#     --extra-index-url https://download.pytorch.org/whl/cpu
+#   ~/.venvs/zaitaku-mealpace-litert-convert/bin/python \
+#     analysis/make_runtime_models.py --only tflite [--write]
+torch==2.14.1+cpu
+numpy==2.5.3
+litert-torch==0.10.0
+# compare._make_net を使うため compare の依存（features_v2・train_eval）が要る
+scipy==1.18.1
+librosa==1.0.0
+scikit-learn>=1.9

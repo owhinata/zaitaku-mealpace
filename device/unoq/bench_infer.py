@@ -99,19 +99,9 @@ def verify(ref) -> tuple:
 # --- 計測の部品 ---
 
 
-def random_cnn(rng) -> dict:
-    """compare.measure_timings と同じ作り方の乱数の重み（同じ形）。"""
-    params = {}
-    for k, (ci, co) in enumerate(fnp.CNN_CONV):
-        params[f"conv{k + 1}.weight"] = rng.normal(
-            0, 0.1, (co, ci, 3, 3)
-        ).astype(np.float32)
-        params[f"conv{k + 1}.bias"] = np.zeros(co, np.float32)
-    params["fc.weight"] = rng.normal(0, 0.1, (1, fnp.CNN_CONV[-1][1])).astype(
-        np.float32
-    )
-    params["fc.bias"] = np.zeros(1, np.float32)
-    return params
+# compare.measure_timings と同じ作り方の乱数の重み（同じ形）。本体は
+# features_np に移した（Issue #51。変換・テスト・bench_runtimes と共有する）
+random_cnn = fnp.random_cnn
 
 
 class Model:

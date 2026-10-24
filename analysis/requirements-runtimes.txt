@@ -1,0 +1,14 @@
+# Issue #51 の推論ランタイムの比較（計測と変換だけ）に使う。装置には要らない
+# （装置の推論は numpy だけ。docs/decisions/0025）。.venv に入れる:
+#   torch は requirements-cnn.txt から先に入れる（pnnx が torch に依存する。
+#   先に入れておかないと既定の索引から別の torch が入りうる）
+#   .venv/bin/pip install -r analysis/requirements-runtimes.txt
+# 使うもの: make_runtime_models.py（ONNX・ncnn への変換）、test_runtime_models.py、
+# device/unoq/bench_runtimes.py の PC での参考の計測。
+# onnxruntime は UNO Q の計測用の venv に入れる PyPI の wheel と同じ版にそろえる。
+onnx==1.23.2
+onnxscript==0.7.2
+onnxruntime==1.31.0
+ai-edge-litert==2.3.0
+ncnn==1.0.20261020
+pnnx==20261020

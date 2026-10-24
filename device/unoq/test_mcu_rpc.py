@@ -1,10 +1,11 @@
-"""device/unoq/ のテスト（Issue #38・#44。PC で合成だけ。UNO Q には配らない）。
+"""device/unoq/ のテスト（Issue #38・#44・#51。PC で合成だけ。配らない）。
 
 .venv/bin/python -m unittest discover -s device/unoq -v
 """
 
 import ast
 import contextlib
+import importlib.util
 import io
 import os
 import pathlib
@@ -14,12 +15,15 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 import msgpack
 import numpy as np
 
 import bench_infer
+import bench_runtimes
+import features_np
 import led_check
 import mcu_rpc
 
@@ -381,7 +385,16 @@ FORBIDDEN_IMPORTS = {
 }
 # numpy を import してよい配るファイル（実物に合わせる。evaluate.py は今も
 # numpy を読まない）
-NUMPY_ALLOWED = {"features_np.py", "bench_infer.py", "postprocess.py"}
+NUMPY_ALLOWED = {
+    "features_np.py",
+    "bench_infer.py",
+    "bench_runtimes.py",
+    "postprocess.py",
+}
+# 推論ランタイムのモジュール（Issue #51 の計測だけ）。import してよいのは
+# bench_runtimes.py だけ
+RUNTIME_MODULES = {"onnxruntime", "ai_edge_litert", "pyarmnn", "ncnn"}
+RUNTIME_ALLOWED = {"bench_runtimes.py"}
 # ファイルを書く呼び出し（属性の名前）
 WRITE_ATTRS = {
     "save",
@@ -394,6 +407,11 @@ WRITE_ATTRS = {
 }
 EXPECTED_DEPLOY = [
     "bench_infer.py",
+    "bench_runtimes.py",
+    "cnn_rand0.ncnn.param",
+    "cnn_rand0.ncnn.weights",
+    "cnn_rand0.onnx",
+    "cnn_rand0.tflite",
     "evaluate.py",
     "features_np.py",
     "features_np_ref.npz",
@@ -421,13 +439,15 @@ class TestStatic(unittest.TestCase):
         """6. 配る .py は音声・subprocess・scipy などを import せず、書き込みが
         無い。numpy は NUMPY_ALLOWED だけ。"""
         py = [n for n in deploy_files() if n.endswith(".py")]
-        self.assertEqual(len(py), 6)
+        self.assertEqual(len(py), 7)
         for name in py:
             with self.subTest(name=name):
                 names, tree = imported_modules(HERE / name)
                 self.assertFalse(names & FORBIDDEN_IMPORTS, names)
                 if name not in NUMPY_ALLOWED:
                     self.assertNotIn("numpy", names)
+                if name not in RUNTIME_ALLOWED:
+                    self.assertFalse(names & RUNTIME_MODULES, names)
                 for node in ast.walk(tree):
                     if isinstance(node, ast.Call) and isinstance(
                         node.func, ast.Attribute
@@ -453,6 +473,54 @@ class TestStatic(unittest.TestCase):
                         any(re.search("[wax+]", str(m)) for m in modes),
                         f"{name}: open の書き込み {modes}",
                     )
+
+    def test_deployed_files_do_not_write_environment(self):
+        """配る .py は環境変数を書き換えない（os.environ への代入・削除・
+        setdefault・update・pop・clear、os.putenv・os.unsetenv が無い）。"""
+
+        def is_environ(node):
+            return (
+                isinstance(node, ast.Attribute)
+                and node.attr == "environ"
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "os"
+            )
+
+        py = [n for n in deploy_files() if n.endswith(".py")]
+        for name in py:
+            with self.subTest(name=name):
+                _, tree = imported_modules(HERE / name)
+                for node in ast.walk(tree):
+                    targets = []
+                    if isinstance(node, ast.Assign):
+                        targets = node.targets
+                    elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                        targets = [node.target]
+                    elif isinstance(node, ast.Delete):
+                        targets = node.targets
+                    for t in targets:
+                        self.assertFalse(
+                            isinstance(t, ast.Subscript)
+                            and is_environ(t.value),
+                            f"{name}: os.environ への書き込み",
+                        )
+                        self.assertFalse(is_environ(t), f"{name}: os.environ")
+                    if isinstance(node, ast.Call) and isinstance(
+                        node.func, ast.Attribute
+                    ):
+                        f = node.func
+                        self.assertFalse(
+                            is_environ(f.value)
+                            and f.attr
+                            in {"setdefault", "update", "pop", "clear"},
+                            f"{name}: os.environ.{f.attr}",
+                        )
+                        self.assertFalse(
+                            isinstance(f.value, ast.Name)
+                            and f.value.id == "os"
+                            and f.attr in {"putenv", "unsetenv"},
+                            f"{name}: os.{f.attr}",
+                        )
 
     def test_deploy_list(self):
         """7. DEPLOY_FILES は device/unoq/ の中の実在のファイルか、analysis/ の
@@ -656,6 +724,225 @@ class TestBenchInfer(unittest.TestCase):
             on = bench_infer.hyst_step(on, p, v, 0.7, 0.4)
             got.append(on)
         self.assertEqual(got, list(want))
+
+
+RT_ONLY = [
+    "numpy",
+    "numpy-einsum-noopt",
+    "numpy-im2col",
+    "ort-cpu",
+    "litert-cpu",
+    "ncnn-cpu",
+    "armnn-cpuacc",
+]
+NUMPY_BACKENDS = RT_ONLY[:3]
+RT_MODULE = {
+    "ort-cpu": "onnxruntime",
+    "litert-cpu": "ai_edge_litert",
+    "ncnn-cpu": "ncnn",
+    "armnn-cpuacc": "pyarmnn",
+}
+
+
+def installed(mod):
+    return importlib.util.find_spec(mod) is not None
+
+
+class FakeGpu(bench_runtimes.Backend):
+    """少し眠ってから numpy の cnn_forward を返す偽の GPU の経路。"""
+
+    gpu = True
+
+    def __init__(self, name, model, bias=0.0):
+        super().__init__(name, model)
+        self.bias = bias
+
+    def env(self):
+        return ["偽の GPU（テスト）"]
+
+    def run(self, Z):
+        time.sleep(0.001)
+        return features_np.cnn_forward(self.model.cnn, Z) + self.bias
+
+
+class TestBenchRuntimes(unittest.TestCase):
+    """10. bench_runtimes.py（Issue #51）。合成入力だけ。ファイルを書かない。"""
+
+    LINES_PER_BACKEND = 20
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.work = pathlib.Path(self._tmp.name)
+
+    def common(self, text, n_backends):
+        lines = text.splitlines()
+        self.assertLessEqual(
+            len(lines), 12 + self.LINES_PER_BACKEND * n_backends
+        )
+        self.assertIn("照合（#44）: OK", text)
+        self.assertNotIn("判定", text)
+        return lines
+
+    def check_measured(self, lines, name):
+        p = f"[{name}] "
+        self.assertIn(f"{p}照合: OK", "\n".join(lines))
+        want = [
+            f"{p}1 回目の実行（",
+            f"{p}(c) CNN 1 窓（",
+            f"{p}(c) CPU 時間: ",
+        ]
+        for h, _ in bench_infer.HOPS:
+            label = f"構成 J・ホップ {h:g} 秒"
+            lim = bench_infer.LIMIT_MS[h]
+            want += [
+                f"{p}(f) 全体 {label}（",
+                f"{p}(f) 全体 {label} CPU 時間: ",
+                f"{p}(f) {label}: {lim:g} ms 未満か: ",
+                f"{p}持続 {label}・",
+            ]
+        want.append(f"{p}このプロセスのスレッド数")
+        for w in want:
+            with self.subTest(name=name, line=w):
+                self.assertEqual(sum(ln.startswith(w) for ln in lines), 1)
+
+    def test_subprocess_no_rpc_writes_nothing(self):
+        before = snapshot(HERE, ANALYSIS, self.work)
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(HERE / "bench_runtimes.py"),
+                "--no-rpc",
+                "--n",
+                "3",
+                "--warmup",
+                "0",
+                "--sustain-s",
+                "1",
+                "--only",
+                ",".join(RT_ONLY),
+            ],
+            cwd=self.work,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = self.common(r.stdout, len(RT_ONLY))
+        for name in NUMPY_BACKENDS:
+            self.check_measured(lines, name)
+            self.assertIn(f"[{name}] 照合（PC の参照）: OK", r.stdout)
+        for name, mod in RT_MODULE.items():
+            with self.subTest(name=name):
+                if installed(mod):
+                    self.check_measured(lines, name)
+                else:
+                    self.assertIn(f"[{name}] 未導入（{mod}）", lines)
+        if not installed("pyarmnn"):
+            self.assertIn("[armnn-cpuacc] 未導入（pyarmnn）", lines)
+        self.assertEqual(snapshot(HERE, ANALYSIS, self.work), before)
+
+    def test_list_does_not_measure(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = bench_runtimes.main(["--list"])
+        self.assertEqual(rc, 0)
+        names = out.getvalue().split()
+        self.assertEqual(names, list(bench_runtimes.default_backends()))
+        self.assertNotIn(bench_runtimes.IDLE, names)
+        self.assertEqual(len(names), 14)
+        self.assertIn("litert-gpu-fp32", names)
+
+    def test_overlap_with_fake_gpu_and_fake_link(self):
+        before = snapshot(HERE, ANALYSIS, self.work)
+        link = FakeLink()
+        out = io.StringIO()
+        with contextlib.chdir(self.work), contextlib.redirect_stdout(out):
+            rc = bench_runtimes.main(
+                [
+                    "--n",
+                    "3",
+                    "--warmup",
+                    "0",
+                    "--sustain-s",
+                    "0",
+                    "--overlap",
+                    "--only",
+                    "fake-gpu",
+                ],
+                open_link=lambda: link,
+                backends={"fake-gpu": lambda m: FakeGpu("fake-gpu", m)},
+            )
+        self.assertEqual(rc, 0)
+        lines = self.common(out.getvalue(), 2)
+        p = "[fake-gpu] "
+        self.assertEqual(
+            sum(
+                ln.startswith(f"{p}重ね合わせ: 非同期の API なし")
+                for ln in lines
+            ),
+            1,
+        )
+        for h, _ in bench_infer.HOPS:
+            tag = f"{p}重ね合わせ ホップ {h:g} 秒（"
+            for form in (
+                "直列 壁時計",
+                "直列 CPU 時間",
+                "スレッドで投入 壁時計",
+            ):
+                with self.subTest(hop=h, form=form):
+                    self.assertEqual(
+                        sum(
+                            ln.startswith(tag) and f"）{form}: 件数 3、" in ln
+                            for ln in lines
+                        ),
+                        1,
+                    )
+            self.assertEqual(
+                sum(
+                    ln.startswith(f"{p}重ね合わせ ホップ {h:g} 秒: 中央値の差")
+                    for ln in lines
+                ),
+                1,
+            )
+        self.assertIn(f"{p}持続: 省いた（--sustain-s 0）", lines)
+        # (f) 2 つのホップ × 3 回、最後の消灯 1 回。消灯だけを送る
+        self.assertEqual(len(link.calls), 2 * 3 + 1)
+        self.assertEqual(set(link.calls), {mcu_rpc.STATE_OFF})
+        self.assertEqual(snapshot(HERE, ANALYSIS, self.work), before)
+
+    def test_ng_returns_1_without_measuring(self):
+        ref = bench_infer.load_ref()
+        broken = dict(ref, cnn=ref["cnn"] + 0.5)
+        opened = []
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = bench_runtimes.main(
+                ["--n", "3", "--warmup", "0", "--sustain-s", "0"],
+                open_link=lambda: opened.append(1) or FakeLink(),
+                ref=broken,
+            )
+        self.assertEqual(rc, 1)
+        text = out.getvalue()
+        self.assertIn("照合（#44）: NG", text)
+        self.assertNotIn("中央値", text)
+        self.assertFalse(any(ln.startswith("[") for ln in text.splitlines()))
+        self.assertEqual(opened, [])
+
+    def test_backend_ng_is_not_measured(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = bench_runtimes.main(
+                ["--no-rpc", "--n", "3", "--warmup", "0", "--overlap"],
+                backends={"bad": lambda m: FakeGpu("bad", m, bias=0.01)},
+            )
+        self.assertEqual(rc, 0)
+        lines = out.getvalue().splitlines()
+        self.assertTrue(any(ln.startswith("[bad] 照合: NG") for ln in lines))
+        self.assertIn("[bad] 照合が NG なので測らない", lines)
+        self.assertFalse(any("[bad] 1 回目" in ln for ln in lines))
+        self.assertFalse(any("中央値" in ln for ln in lines))
 
 
 if __name__ == "__main__":
