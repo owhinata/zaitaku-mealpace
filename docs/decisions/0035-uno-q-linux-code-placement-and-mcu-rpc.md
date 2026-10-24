@@ -106,3 +106,29 @@ docs/decisions/0025「0001 との関係」の「Linux 側の Python の配置の
 - PD パススルー経由で UNO Q とアダプタが給電されたまま動くか → 動いた（上の「PD 電源」。ハブではなくアダプタのパススルー）。持ち時間は未確認。
 - RPC の遅れ → 上の表（中央値 約 5.1〜5.3 ms）。Linux 側の 1 ホップの処理時間は M4 に回す（人の決定 D7）。
 - LED をどこに出すか → この Issue は MCU 側の 8×13 マトリクスに状態 0 / 1 / 2 の画を出すところまで（決定 7）。表示の規則は M4 で入れる。
+
+## 追記（2026-10-24、Issue #44）: 推論のファイルの配り方と、確かめたこと
+
+上の決定の本文は変えない。決定 1 の「M4 は同じ一覧に PC と同じ推論のファイルを足す」を、次の形で行った（plan #44、Codex 3 面 LGTM、人の承認 10/24）。
+
+- **配り方（決定 1 への追加）**: `device/unoq/` に `analysis/` のファイルへの相対のシンボリックリンクを置き、一覧に足した。`deploy-unoq` の rsync に
+  `--copy-links` を足し、リンクの先の中身を送る（UNO Q の上は今までと同じ平らな並びの普通のファイル）。送る前に、一覧の各行が `device/unoq/` の
+  普通のファイルか、`analysis/` の直下の普通のファイルを指すリンクかを `realpath` で確かめ、`data/` を含む先・`analysis/` の外を指すリンク・
+  先が無いリンクは送らずに止まる（CMakeLists.txt。止まることは一時的なリンクで確かめた）。リンクのやり方は `firmware/unoq_mcu/` と同じ。
+- **配る 9 つ**: `mcu_rpc.py`、`led_check.py`、`bench_infer.py`（計測。合成入力だけ、ファイルを書かない）、リンクの `features_np.py`（numpy だけの間引き・
+  特徴量・CNN の順伝播。PC の `features_v2.py`・`tools/throat_check.py` も同じものを呼ぶ）、`mel40_htk_0_4000.npy`・`mel26_htk_0_4000.npy`
+  （メル行列。librosa から PC で作った定数）、`features_np_ref.npz`（照合用の参照。合成入力の特徴量）、`postprocess.py`・`evaluate.py`（#44 では import
+  だけ。窓ごとの後処理は #47）。音声のファイルは無い。静的テストは配る `.py` の音声のモジュール・scipy・librosa・torch などの import と書き込みを禁じ、
+  numpy は `features_np.py`・`bench_infer.py`・`postprocess.py` にだけ許す。
+- **UNO Q に入れたもの**: 人が `sudo apt install python3-numpy`（10/24）。`python3-numpy 1:2.2.4+ds-1`（numpy 2.2.4）、一緒に `libblas3 3.12.1-6`・
+  `liblapack3 3.12.1-6`・`libgfortran5 14.2.0-19`・`python3-numpy-dev`。BLAS は netlib の参照実装だけ（`update-alternatives` の候補は 1 つ）。
+  librosa・scipy は入れていない。
+- **`arduino-router` 0.11.0 とソケットの権限**: 10/24 の apt の更新で `arduino-router` が 0.10.0 → 0.11.0 になり、ソケット `/var/run/arduino-router.sock` が
+  `srw-rw---- root arduino-router` になった（10/13 は `srw-rw-rw-`）。`arduino` から開けなくなったので、人が `sudo usermod -aG arduino-router arduino`
+  を行った（10/24。新しいログインのセッションから効く）。上の「確かめたこと（10/13）」のソケットの権限の記述は 10/13 の時点の事実として残す。
+- **確かめたこと（合成入力、docs/log/2026-10-24.md）**: UNO Q の numpy 版の特徴量と順伝播が PC の librosa 版の参照と最大の差 6.1e-08 で一致した（許容 1e-5）。
+  1 窓の全体（1 ホップの間引き → 特徴量 → 正規化 → 推論 → 後処理 → RPC を直列に 1 回）の中央値は、構成 J で 41.6〜45.0 ms、構成 J＋R で
+  48.2〜53.8 ms（ホップ 0.1 秒・0.25 秒、1 スレッド指定・既定）。最大は 58.1 ms 以下で、ホップ 0.25 秒の 250 ms・ホップ 0.1 秒の 100 ms に収まる。
+  CNN の順伝播だけで 1 窓 約 27.8 ms、RPC の往復 約 5.3〜5.4 ms（10/13 の表と同じ桁）。計測中のスレッド数は 1（既定でも 1）。
+  配置と計測の後、UNO Q に音声の拡張子のファイルは 0 件、`~/zaitaku-mealpace-device/` は一覧の 9 つだけで `__pycache__` は無い。
+  ホップの変更はここでは決めない（#44 D5。別の decision）。

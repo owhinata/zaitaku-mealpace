@@ -15,9 +15,11 @@
 | WirePlumber | 0.5.8-2 |
 | pulseaudio-utils | 無い（入れない。取り出しは PipeWire の `pw-record`） |
 | コーデック | SBC（UNO Q 側の A2DP シンクは sbc / opus_05 / opus_g。送信機とは SBC で合意） |
-| arduino-router | 0.10.0（Debian パッケージ。`arduino-router.service`、ソケット `/var/run/arduino-router.sock`（`srw-rw-rw-`）、MCU とはシリアル `/dev/ttyHS1` 115200。#38） |
-| arduino-cli / arduino-app-cli | 1.5.1 / 0.13.0（基板の上。App Lab の既定のアプリは無い） |
-| Python | 3.13.5（numpy・msgpack・pip は無い） |
+| arduino-router | 0.11.0（Debian パッケージ。10/24 の apt の更新で 0.10.0 から上がった。`arduino-router.service`、ソケット `/var/run/arduino-router.sock`（0.11.0 では `srw-rw---- root arduino-router`。0.10.0 の 10/13 は `srw-rw-rw-`）、MCU とはシリアル `/dev/ttyHS1` 115200。#38・#44） |
+| arduino-cli / arduino-app-cli | 1.5.1 / 0.14.0（基板の上。arduino-app-cli は 10/24 の apt の更新で 0.13.0 から上がった。App Lab の既定のアプリは無い） |
+| Python | 3.13.5（msgpack・pip・scipy・librosa は無い） |
+| numpy | 2.2.4（`python3-numpy 1:2.2.4+ds-1`。人が `sudo apt install python3-numpy` で入れた。10/24、#44。一緒に `libblas3 3.12.1-6`・`liblapack3 3.12.1-6`・`libgfortran5`・`python3-numpy-dev` が入った） |
+| BLAS | netlib の参照実装（`libblas3`）だけ。OpenBLAS・BLIS は入れない（#44 D9）。確かめ方: `update-alternatives --display libblas.so.3-aarch64-linux-gnu`（候補は `/usr/lib/aarch64-linux-gnu/blas/libblas.so.3` の 1 つ） |
 | rsync | 3.5.0（人が `sudo apt install rsync` で入れた。10/13、#38 の `deploy-unoq` のため） |
 
 ## 残した設定（音声ではない）
@@ -29,6 +31,7 @@
 | `/var/lib/lightdm/.config/wireplumber/wireplumber.conf.d/90-disable-bluez.conf` | lightdm の WirePlumber で bluez の監視を止める | 人（sudo） | A2DP のエンドポイントは先に登録した WirePlumber が持ち、ログイン画面（lightdm）側に音が流れていた | `ls` |
 | `~/.config/wireplumber/wireplumber.conf.d/90-bluez-no-seat.conf`（arduino） | コメント 1 行と、`wireplumber.profiles = { main = { monitor.bluez.seat-monitoring = disabled } }` の入れ子の 5 行（下） | メイン（ssh、sudo 不要） | ssh のセッションは seat0 の active ではなく、arduino の WirePlumber が bluez の監視を始めない | `cat` |
 | arduino の linger（`loginctl enable-linger arduino`） | ssh のセッションが無くても arduino の user manager（PipeWire・WirePlumber）を動かしたままにする | メイン（10/10） | linger が無いと、最後の ssh が閉じて約 10 秒で PipeWire が止まり、送信機の A2DP が切れる（10/10 の実測） | `loginctl show-user arduino -p Linger` |
+| `arduino` を `arduino-router` のグループに足した（`sudo usermod -aG arduino-router arduino`） | `arduino` が router のソケットを開けるようにする | 人（sudo、10/24、#44） | `arduino-router` 0.11.0 でソケットが `srw-rw---- root arduino-router` になり、`mcu_rpc.py` の接続が `PermissionError` になった。新しいログインのセッションから効く | `id`（`110(arduino-router)` があること）、`ls -l /var/run/arduino-router.sock` |
 | rfkill の soft block（`sudo rfkill block bluetooth`） | Bluetooth の無線を止める（`/sys/class/rfkill/rfkill0/soft` = 1、`bluetoothctl show` の Powered: no） | 人（sudo、10/11） | 構成 B を記録に使わないと決めた（10/10）後、Discoverable が yes のまま残っていた。有線の記録と M4 の間は Bluetooth を使わないので止める。`main.conf` と WirePlumber の設定は残す。systemd-rfkill が状態を保存するので再起動後も無効のまま。`all` は付けない（rfkill1 は Wi-Fi で、ssh が落ちる） | `cat /sys/class/rfkill/rfkill0/soft`（1）、`bluetoothctl show | grep Powered`（no）。`rfkill` は `/usr/sbin` にあり一般ユーザーの PATH に無い |
 
 `90-bluez-no-seat.conf` の中身（コメントを除く。10/10 の実物）:
@@ -123,15 +126,27 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
   中身は remoteocd（USB の adb 越し）。書く物を UNO Q の `/tmp/remoteocd/`（`flash_sketch.cfg`、`unoq_mcu.ino.elf-zsk.bin`、`zephyr-arduino_uno_q_stm32u585xx.elf`）に置き、
   基板の上の openocd が SWD で書く。`/tmp` は tmpfs で、再起動で消える。音声ではない。10/13 に書き込んだ（10/13 のコミットのスケッチ）。
   書き込みの直後に router の journal に `decoding packet: invalid packet, expected array` が数行出るが、その後の RPC は通る。
-- **Linux 側の配置**: `cmake --build build-unoq --target deploy-unoq`（rsync。宛先は `-DUNOQ_HOST`、既定 `arduino@unoq.local`）で、`device/unoq/DEPLOY_FILES` の
-  2 ファイル（`mcu_rpc.py`・`led_check.py`）だけを `~/zaitaku-mealpace-device/` に配る。常駐させない（systemd のユニットは無い）。ファイルを書かない。
-  実行は `python3 -B`（`__pycache__` を作らない）:
+- **Linux 側の配置**: `cmake --build build-unoq --target deploy-unoq`（rsync `--copy-links`。宛先は `-DUNOQ_HOST`、既定 `arduino@unoq.local`）で、
+  `device/unoq/DEPLOY_FILES` の 9 つだけを `~/zaitaku-mealpace-device/` に配る（10/24、#44）: `mcu_rpc.py`、`led_check.py`、`bench_infer.py`、`features_np.py`、
+  `mel40_htk_0_4000.npy`、`mel26_htk_0_4000.npy`、`features_np_ref.npz`、`postprocess.py`、`evaluate.py`。うち後ろの 6 つは `analysis/` へのリンクで、
+  送る前に先が `analysis/` の直下の普通のファイルであることを確かめる（0035 の追記）。UNO Q の上はどれも普通のファイル。音声のファイルは無い。
+  常駐させない（systemd のユニットは無い）。ファイルを書かない。実行は `python3 -B`（`__pycache__` を作らない）:
 
   ```
   ssh arduino@unoq.local 'python3 -B ~/zaitaku-mealpace-device/led_check.py wave'    # smile / off / bench --n 100 --warmup 5
   ```
 
   `wave`・`smile` は表示したまま終わる。`bench` は顔と消灯を交互に送って往復を測る（状態を渡して応答が返るまで。描画は含まない）。最後に消灯を送る。
+
+  1 窓あたりの処理時間の計測（#44。合成入力だけ、ファイルを書かない、標準出力は集計の行だけ。最初に `features_np_ref.npz` との照合をし、NG なら測らない。
+  RPC は消灯を送るだけで、最後にも消灯を送る）。1 スレッド指定と既定（ssh のセッションの値を引き継がない）の 2 回:
+
+  ```
+  ssh arduino@unoq.local 'cd ~/zaitaku-mealpace-device && env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -B bench_infer.py'
+  ssh arduino@unoq.local 'cd ~/zaitaku-mealpace-device && env -u OPENBLAS_NUM_THREADS -u OMP_NUM_THREADS -u MKL_NUM_THREADS python3 -B bench_infer.py'
+  ```
+
+  `--no-rpc` で RPC を省く（PC のテスト用）。10/24 の結果は docs/log/2026-10-24.md。
 
   記録（`record.py`）の間は動かさない（0028 決定 3）。消すときは `ssh arduino@unoq.local 'rm -r ~/zaitaku-mealpace-device'`。
 - **PD 給電の構成（10/13）**: PD 対応モバイルバッテリー → USB-C→3.5 mm 変換アダプタ（UGREEN CM721。DAC 搭載、PD 60 W パススルー）の PD の入口 → UNO Q。

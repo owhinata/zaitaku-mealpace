@@ -8,6 +8,7 @@ PC 側の解析・評価。ファームウェアが何で書かれていても�
 - `split.py`      セッション単位で学習／評価を分ける（窓単位の分割は実装しない）
 - `train_eval.py` M1 の分岐点: ロジスティック回帰で学習し、上の3つを使って採点した報告を出す（`--throat` で咽喉マイクのセッション。M3）
 - `features_v2.py`・`postprocess.py`・`compare.py`・`visualize.py` 咽喉マイクの特徴量の組と後処理を学習側の交差検証だけで比べ、図にする（#43、docs/decisions/0033）
+- `features_np.py`・`make_features_np_consts.py` 咽喉マイクの間引き・`mfe40`・`a52`・CNN の順伝播の numpy だけの実装（装置と PC で同じコード）と、それが読むメル行列・照合用の参照を作るスクリプト（#44、docs/decisions/0035 の追記）
 - `final_eval.py` 咽喉マイクの評価側を、事前に登録した 2 つの構成で 1 回だけ採点する（#40、docs/decisions/0034）
 - `evaluate_detector.py` M2 の検出器のセッション（`detect.csv`・`events.csv`）を `evaluate.py` の数え方で採点した報告を出す（#23、docs/decisions/0021）
 - `led_rule.py`   `detect.csv` の `positive` と `window_t_ms` から LED の状態（1 黄 / 2 緑）を docs/decisions/0018 の規則で再計算する（#25。`firmware/detector/led_rule.h` と同じ式。評価には使わない）
@@ -291,8 +292,9 @@ python analysis/visualize.py data/raw --eval-min 7 --set a52 --post hyst --out d
   0.5・1.0・2.0 秒に当てて並べる。45・156）、CNN の入力 `mfe40`（対数メル 40 本 0〜4000 Hz、98 × 40）。中心はメモリ上の信号から作る
   `window_features(x16k, starts, feature_set, lo, hi)`・`features_one(seg_by_length, feature_set)`・`mfe_one(seg)` で、セッションフォルダの
   読み込みは外側の `extract(session_dir, feature_set)`・`extract_mfe(session_dir)` だけ。窓の格子・`valid`・記録の範囲・サンプルの時刻は
-  `features._throat_windows`（`extract_throat_session` と同じもの）。CNN の numpy の順伝播 `cnn_forward` もここ（装置と PC で同じ）。
-- **`o start` より前の音**: 16 kHz の信号はセッション全体を `resample_poly` で落としてから窓を切る（`extract_throat_session` と同じ）。
+  `features._throat_windows`（`extract_throat_session` と同じもの）。CNN の numpy の順伝播 `cnn_forward` もここから同じ名前で出す
+  （本体は `features_np.py`。`mfe40`・`a52` の式も `features_np.py` を呼ぶ。下の節。#44）。
+- **`o start` より前の音**: 16 kHz の信号はセッション全体を `features_np.decimate3`（`resample_poly(x, 1, 3)` と同じ係数・位置合わせ。#44）で落としてから窓を切る（`extract_throat_session` と同じ）。
   保証するのは窓の選び方で、どの窓（0.5・2.0 秒を含む）も `[lo, hi)`（`lo` = `o start` に最も近いサンプル、`hi` = 時刻が範囲の終わりより
   前のサンプルの数）の外を切り出さない（2.0 秒の窓は範囲の端で切り詰める）。リサンプルのフィルタの裾（数 ms）による `o start` 直前の音の
   混入は `extract_throat_session`（基準 15 次元）と同じで、変えない。
@@ -316,6 +318,24 @@ python analysis/visualize.py data/raw --eval-min 7 --set a52 --post hyst --out d
   librosa のキャッシュの環境変数（`LIBROSA_CACHE_DIR`（空でも）、`LIBROSA_CACHE_VERBOSE` > 0）や import 済みの librosa のキャッシュが
   有効なときは、特徴量をディスク・標準出力に出さないため `features_v2.py` が止まる（環境変数を外して実行し直す）。
 - 計算の時間（D8）: 1 回の実行が PC で 30 分以内の予算。CNN の学習（14 fold × 20 エポック × 種 3 つ）が大半を占める。
+
+## numpy だけの間引き・特徴量・順伝播（`features_np.py`・`make_features_np_consts.py`。#44）
+
+UNO Q の Linux 側（numpy 2.2.4 だけ。librosa・scipy は無い）と PC で同じコードを使う（0025、0035 の追記）。`device/unoq/features_np.py` は
+このファイルへのリンクで、`deploy-unoq` が中身を配る。依存は numpy と標準ライブラリだけ。ファイルを書かず、標準出力に出さない。
+
+- 間引き（48 kHz → 16 kHz）: `decimate3(x)`（セッション全体。`scipy.signal.resample_poly(x, 1, 3)` と同じ 61 タップ（`firwin(61, 1/3,
+  window=("kaiser", 5.0))` と同じ式）・同じ位置合わせ・長さ ceil(n / 3)）と、ブロックごとの `Decimate3().process(block)`（出力をつなぐと
+  `decimate3` の先頭と一致。遅れは入力 30 サンプル）。`tools/throat_check.py` の `to_analysis` も `decimate3` を使うので、学習用 `meal` の経路
+  （`features._throat_windows` → `features_v2`）も装置と同じ係数で間引く。
+- 特徴量: `mfe40(seg)`（`features_v2.mfe_one` と同じ式、(98, 40) float32）、`a52(seg)`（MFCC 13 は DCT-II（ortho）の行列、デルタは中心の係数
+  k / 60・端は複製で `librosa.feature.delta(width=9, mode="interp")` と同じ値）。`cnn_forward(params, M)`（`features_v2` から移した）。
+- メル行列は `mel40_htk_0_4000.npy`（40 × 257）・`mel26_htk_0_4000.npy`（26 × 257）を読む（`librosa.filters.mel`、HTK、0〜4000 Hz、面積の
+  正規化なし）。`features_np_ref.npz` は照合用の参照（間引きのタップと、決定的な合成入力（`reference_signal`・`reference_cnn`。乱数を使わない
+  数式）に対する librosa 版の `mfe40`・`a52` と順伝播の出力。入力の信号そのものは入れない）。どれも音声ではない。
+- 作り直し（PC。librosa・scipy を使う）: `python analysis/make_features_np_consts.py` は作り直した値と既にあるファイルを比べるだけ（違えば 1）。
+  `--write` のときだけ上の 3 つを書く。`features_v2` は import の時点で `.npy` を読むので、消えたときは git から戻す。
+- 装置の計測は `device/unoq/bench_infer.py`（合成入力だけ。最初に `features_np_ref.npz` と照合）。走らせ方は docs/unoq-setup.md、結果は docs/log/2026-10-24.md。
 
 ## 咽喉マイクの評価側の採点（`final_eval.py`。#40）
 
@@ -357,6 +377,13 @@ python analysis/final_eval.py data/raw                          # 評価側を 1
 - 依存と再現の条件は `compare.py` と同じ（報告の実行の条件に `.venv` の全パッケージの版、CPU、torch のスレッド数を出す）。
 - `fixed_eval.py`: 0034 の評価側の 7 本（`FINAL-EVAL`）が学習側に入る分割では、`train_eval.py --throat`・`compare.py`・`visualize.py` がデータを読む前に
   止まる（後日セッションを足しても評価側を学習・交差検証に戻さない）。印があるときは、`--throat` と `compare.py` の報告の冒頭に「評価側は採点済み」の 1 行が出る。
+- `fixed_eval.py` の M4 の定数と検査（#46、docs/decisions/0037）: M4 は日付の境と名前の固定の一覧で分ける（締め `M4_TRAIN_CUTOFF` = 20261028、
+  評価側の窓 `M4_EVAL_FROM`〜`M4_EVAL_TO` = 20261101〜20261104）。M3 の 21 本（`M4_TRAIN_M3`。M3 の評価側だった 7 本を含む）は M4 では学習側。
+  `assert_m4_train` は締めより後の日付・`M4_EXPECTED_EVAL` の名前・21 本の欠け・`M4_EXPECTED_TRAIN` との不一致で止まり、`assert_m4_eval` は
+  `M4_EXPECTED_EVAL` が `None`（一覧の追記の前）・一覧との不一致・窓の外の日付・3 本未満で止まる。`m4_lines_match` は 0037 の `M4-` で始まる行と
+  定数の一致を返し、印のパスは `M4_MARKER`（`docs/log/m4-final-49.txt`）。どれも名前だけを見てデータを開かない。呼ぶのは #45（学習の入口）と
+  #49（評価側の入口）で、#46 の時点ではどこからも呼んでいない。M3 の一覧と `assert_fixed_eval_not_in` は変えていないので、学習用 `meal` を
+  `data/raw/` に足すと M3 の経路（`train_eval.py --throat`・`compare.py`）は今までどおり止まる。テストは `test_fixed_eval.py`（合成の名前だけ）。
 - `train_eval._git()` の作業ディレクトリはリポジトリ直下（`train_eval.GIT_ROOT`）。パスを指定した `git status` のため。
 
 ## 検出器の評価（`evaluate_detector.py`）
@@ -501,6 +528,9 @@ EI_API_KEY=... python analysis/ei_testing_result.py data/raw --project-id <ID>
 `test_features.py`・`test_features_m2.py`・`test_ei_upload.py`・`test_m2_*.py` は numpy、`test_train_eval.py` は numpy と scikit-learn を使う。
 咽喉マイクの経路のテスト（`test_features.py`・`test_evaluate.py`・`test_train_eval.py` の Throat の付くクラス）は、48 kHz・2 ch の
 合成の `throat.wav` を一時フォルダに作り、scipy と `tools/throat_check.py` を使う。
+#44 のテスト（`test_features_np.py`）は librosa・scipy を使い、`features_np.py` のメル行列・タップ・間引き・`mfe40`・`a52`・デルタを librosa・scipy の式と
+比べ、合成の咽喉マイクのセッションを旧の参照経路（`resample_poly` と librosa・scipy の式。変更前の式を写したもの）と今の経路の両方に通して比べる。
+`features_np_ref.npz` が古くなっていないこと、`features_np.py` が numpy と標準ライブラリ以外を import せず書き込みと `print` が無いことも確かめる。
 #43 のテスト（`test_features_v2.py`・`test_postprocess.py`・`test_throat_compare.py`・`test_visualize.py`）と #40 のテスト（`test_final_eval.py`）は
 librosa・matplotlib・torch を使い、
 `test_throat_compare.py`・`test_visualize.py` は合成の咽喉マイクのセッション 6 本で交差検証（CNN を含む）を回すので 1 分ほど掛かる。
