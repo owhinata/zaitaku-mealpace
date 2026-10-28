@@ -171,6 +171,10 @@ class M4VisualizeTest(unittest.TestCase):
 
         tmp = tempfile.TemporaryDirectory()
         cls.addClassCleanup(tmp.cleanup)
+        # 合成の名前は実物の M4_EXPECTED_TRAIN（2026-10-28 に固定）と違うので None で動かす
+        p = mock.patch.object(fixed_eval, "M4_EXPECTED_TRAIN", None)
+        p.start()
+        cls.addClassCleanup(p.stop)
         cls.tmp = Path(tmp.name)
         cls.root = cls.tmp / "raw"
         cls.root.mkdir()

@@ -1597,7 +1597,7 @@ def format_report(r: M4Result) -> str:
         "## 選んだ行",
         "",
         f"- **{r.selected.label}、{op_text(r.selected.op)}**",
-        f"- 規則: {r.select_rule}。学習側の交差検証の 24 本の合算だけで選んだ（`meal` だけ・条件別だけの数字は選択に使っていない）",
+        f"- 規則: {r.select_rule}。学習側の交差検証の {len(L.train)} 本の合算だけで選んだ（`meal` だけ・条件別だけの数字は選択に使っていない）",
         f"- 0038 の機械が読む行: `M4-CONFIG: {config_of(r.selected)}`",
         f"- 分類器: {'ロジスティック回帰（装置は numpy のまま）' if r.selected.cls == 'C1' else 'CNN'}",
         "- 注記: 25 行と各行の格子を同じ交差検証の数字で選ぶので、選んだ行の学習側 CV の数字は楽観側に出る。選んだ構成の性能は #49 の評価側で読む。",

@@ -123,7 +123,7 @@ M3 の検査は残して M4 の検査を別に足す、FEAT は窓ごとの要�
 ```
 M4-EVAL-WINDOW: from=2026-11-01 to=2026-11-04
 M4-TRAIN-CUTOFF: 2026-10-28
-M4-TRAIN: （学習用の記録の締めの後に追記）
+M4-TRAIN: 20261011-100847_self_quiet 20261011-101644_self_water 20261011-102354_self_talk 20261011-102854_self_saliva 20261011-103352_self_neck 20261011-103912_self_water 20261011-104408_self_cough 20261011-202238_self_quiet 20261011-202730_self_water 20261011-203152_self_talk 20261011-203631_self_saliva 20261011-204057_self_neck 20261011-204526_self_water 20261011-204956_self_cough 20261012-191826_self_quiet 20261012-192531_self_water 20261012-193001_self_talk 20261012-193459_self_saliva 20261012-193929_self_neck 20261012-194417_self_water 20261012-194854_self_cough 20261025-200807_self_meal 20261026-190244_self_meal 20261027-144545_self_meal 20261027-203815_self_meal 20261028-193716_self_meal
 M4-EVAL: （評価用の記録の打ち切りと採否の後に追記）
 ```
 
@@ -176,3 +176,12 @@ M4-EVAL: （評価用の記録の打ち切りと採否の後に追記）
 `docs/evaluation.md`（窓、数え方、非嚥下区間、セッション単位の分割、3 セッション以上、合格線）、0011、0014 の評価側の日数以外、0023 の本文、
 0031・0032・0034 の本文（M3 の一覧と検査 `assert_fixed_eval_not_in` を含む）、`split.py`・`evaluate.py`・`train_eval.py`・`compare.py`・`visualize.py`・
 `final_eval.py`・`evaluate_detector.py`・`throat_check.py`、`docs/data-schema.md`。
+
+## 追記（2026-10-28）: 学習側の一覧の固定
+
+- 2026-10-28（学習用 `meal` の締めの日）の夜に、人の指示でメインが `M4-TRAIN` の行と `analysis/fixed_eval.py` の `M4_EXPECTED_TRAIN` に同じ 26 本の名前を入れた
+  （7 節。M3 の 21 本 `M4_TRAIN_M3` と、学習用 `meal` 5 本: 2026-10-25、10-26、10-27 ×2、10-28。採否は人が記録の直後に決めた。docs/log/2026-10-25.md〜2026-10-28.md）。
+- 追記の時点で M4 のどの性能の数字も見ていない（#45 のステップ 1 の予行は検出率・誤検出率・確率を出さない。plan #45 の 11 節）。
+- 学習用 `meal` は 3 本の予定だったが、締めまでに採用した 5 本（収集日 4 日）をすべて学習側に入れる（2 節「締めの後に録ったもの以外は学習側」のとおり。本数の上限は決めていない）。
+  これより後に録った `pc-throat` のセッションは M4 に使わない（2 節）。
+- `M4-TRAIN-CUTOFF`・`M4-EVAL-WINDOW`・`M4-EVAL` の行は変えていない。

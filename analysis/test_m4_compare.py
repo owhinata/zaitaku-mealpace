@@ -75,6 +75,11 @@ def build_raw(base: Path, extra_meal=(MEAL_1,), late=True) -> Path:
 
 class ListingTest(unittest.TestCase):
     def setUp(self):
+        # 実物の M4_EXPECTED_TRAIN には 2026-10-28 に名前が入った。合成の名前のテストは
+        # 一覧の固定の前の状態（None）で動かす
+        p = mock.patch.object(fixed_eval, "M4_EXPECTED_TRAIN", None)
+        p.start()
+        self.addCleanup(p.stop)
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.base = Path(self._tmp.name)
@@ -445,7 +450,9 @@ class RunCase(unittest.TestCase):
             unittest.addModuleCleanup(tmp.cleanup)
             RunCase.tmp = Path(tmp.name)
             RunCase.root = build_raw(RunCase.tmp)
-            RunCase.names = mc.list_train(RunCase.root).train
+            # 合成の名前は実物の M4_EXPECTED_TRAIN（2026-10-28 に固定）と違う
+            with mock.patch.object(fixed_eval, "M4_EXPECTED_TRAIN", None):
+                RunCase.names = mc.list_train(RunCase.root).train
             RunCase.calls = []
             RunCase.trainer = mc.Trainer(fake_fit(RunCase.calls), fake_score)
             with production_ok(RunCase.names):
@@ -543,9 +550,10 @@ class SwitchTest(RunCase):
     def test_production_stops_before_reading(self):
         loader = mock.Mock(side_effect=AssertionError("読んだ"))
         with contextlib.redirect_stderr(io.StringIO()):
-            self.assertIsNone(fixed_eval.M4_EXPECTED_TRAIN)
-            with self.assertRaises(SystemExit):
-                mc.run(self.root, loader=loader)
+            # 一覧が None の間は本番が止まる（ステップ 2 で実物に名前を入れたので差し替える）
+            with mock.patch.object(fixed_eval, "M4_EXPECTED_TRAIN", None):
+                with self.assertRaises(SystemExit):
+                    mc.run(self.root, loader=loader)
             with (
                 mock.patch.object(
                     fixed_eval, "M4_EXPECTED_TRAIN", tuple(self.names)
@@ -581,9 +589,14 @@ class SwitchTest(RunCase):
             mc.main([str(self.root), "--smoke", "--figures", str(self.tmp)])
         sm.assert_not_called()
 
-    def smoke(self, **kw):
+    def smoke(self, fixed=None, **kw):
         calls = []
-        with mock.patch.object(train_eval, "_git", return_value="abc1234\n"):
+        # 予行は一覧の固定（2026-10-28）の前だけ走る。合成の名前では None に戻して確かめ、
+        # fixed を渡したときはその一覧が入った状態で止まることを確かめる
+        with (
+            mock.patch.object(fixed_eval, "M4_EXPECTED_TRAIN", fixed),
+            mock.patch.object(train_eval, "_git", return_value="abc1234\n"),
+        ):
             r = mc.smoke(
                 self.root, fake_fit(calls), fake_score, make_loader(), **kw
             )
@@ -611,16 +624,14 @@ class SwitchTest(RunCase):
         )
 
     def test_smoke_stops_when_list_fixed(self):
-        with mock.patch.object(
-            fixed_eval, "M4_EXPECTED_TRAIN", tuple(self.names)
-        ):
-            with self.assertRaises(SystemExit):
-                self.smoke()
+        with self.assertRaises(SystemExit):
+            self.smoke(fixed=tuple(self.names))
 
     def test_main_smoke_writes_nothing(self):
         before = sorted(p.relative_to(self.tmp) for p in self.tmp.rglob("*"))
         buf = io.StringIO()
         with (
+            mock.patch.object(fixed_eval, "M4_EXPECTED_TRAIN", None),
             mock.patch.object(mc, "load_all", make_loader()),
             mock.patch.object(compare, "cnn_fit", fake_fit([])),
             mock.patch.object(compare, "cnn_score", fake_score),
