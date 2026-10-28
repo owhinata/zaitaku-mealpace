@@ -19,7 +19,7 @@
 | arduino-cli / arduino-app-cli | 1.5.1 / 0.14.0（基板の上。arduino-app-cli は 10/24 の apt の更新で 0.13.0 から上がった。App Lab の既定のアプリは無い） |
 | Python | 3.13.5（msgpack・pip・scipy・librosa は無い） |
 | numpy | 2.2.4（`python3-numpy 1:2.2.4+ds-1`。人が `sudo apt install python3-numpy` で入れた。10/24、#44。一緒に `libblas3 3.12.1-6`・`liblapack3 3.12.1-6`・`libgfortran5`・`python3-numpy-dev` が入った） |
-| BLAS | netlib の参照実装（`libblas3`）だけ。OpenBLAS・BLIS は入れない（#44 D9）。確かめ方: `update-alternatives --display libblas.so.3-aarch64-linux-gnu`（候補は `/usr/lib/aarch64-linux-gnu/blas/libblas.so.3` の 1 つ） |
+| BLAS | **OpenBLAS**（`libopenblas0-pthread` 0.3.29+ds-3。docs/decisions/0040 の D9 の例外として人が 10/29 に `sudo apt install libopenblas0-pthread` で入れ直した）。alternatives は libblas・liblapack とも **auto mode** で OpenBLAS（優先度 100。参照実装 `libblas3` は優先度 10 で候補に残る）。確かめ方: `update-alternatives --display libblas.so.3-aarch64-linux-gnu`。numpy が実際に読んだ BLAS は `/proc/self/maps` の `openblas` で分かる（10/29 に 16 行。`np.show_config` はビルド時の値のまま）。装置の推論は 1 スレッド固定（`OPENBLAS_NUM_THREADS=1`、0040 決定 3。既定だと 4 コアが空回りする） |
 | rsync | 3.5.0（人が `sudo apt install rsync` で入れた。10/13、#38 の `deploy-unoq` のため） |
 
 ## 残した設定（音声ではない）
@@ -197,7 +197,8 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
   sudo update-alternatives --set liblapack.so.3-aarch64-linux-gnu /usr/lib/aarch64-linux-gnu/lapack/liblapack.so.3
   ```
 
-  `--set` の後は **manual mode**（10/24 の今の状態）。OpenBLAS を外すか `sudo update-alternatives --auto libblas.so.3-aarch64-linux-gnu`（liblapack も）に戻すまでこのまま。
+  `--set` の後は **manual mode**。OpenBLAS を外すか `sudo update-alternatives --auto libblas.so.3-aarch64-linux-gnu`（liblapack も）に戻すまでそのまま
+  （10/24 の計測の間はこの状態だった。10/24 の段階 5 で外して auto に戻り、10/29 に 0040 で入れ直してからは auto mode で OpenBLAS。上の表）。
   実際に読み込んだ BLAS は `bench_runtimes.py` の環境の行（`/proc/self/maps`）で分かる（`np.show_config` はビルド時の値のままで替わらない）。
 
   消し方（人。計測の後、要らなければ。外す前に `apt-get -s remove …` で一覧を見て、もとから入っていたものを外さないことを確かめる）:
@@ -208,6 +209,7 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
   ```
 
   `libopenblas0-pthread` を外すと alternatives の候補は参照実装だけになる。外したもの・残したものは docs/log と 0039 に書く。
+  **10/29 以降は `libopenblas0-pthread` を外さない**（装置の推論が使う。0040）。
 - **PD 給電の構成（10/13）**: PD 対応モバイルバッテリー → USB-C→3.5 mm 変換アダプタ（UGREEN CM721。DAC 搭載、PD 60 W パススルー）の PD の入口 → UNO Q。
   SH-12JK はこのアダプタの 3.5 mm に挿す。ALSA では `hw:CARD=Audio`。PC とは Wi-Fi の ssh だけ。この構成で `record.py --throat sh12jk-wired-unoq-usbaudio` の
   60 秒が使わない目安に当たらなかった（docs/log/2026-10-13.md）。
