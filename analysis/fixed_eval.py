@@ -223,7 +223,11 @@ M4_CONFIG: str | None = (
     " threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5"
 )
 # 0038 の M4-MODEL: の値の部分（ステップ 3 で path=… sha256=…）
-M4_MODEL: str | None = None
+# 0038 の M4-MODEL: の値の部分（ステップ 3。2026-10-29 の --final-model の報告）
+M4_MODEL: str | None = (
+    "path=analysis/models/m4-0038.npz"
+    " sha256=c786086f069c55c55b27eea860963c3c950c04b728fe65d52bc35a7a4a806d90"
+)
 M4_CONFIG_PENDING = "（ステップ 2 で追記）"
 M4_MODEL_PENDING = "（ステップ 3 で追記）"
 M4_CONFIG_PREFIXES = ("M4-CONFIG:", "M4-MODEL:")

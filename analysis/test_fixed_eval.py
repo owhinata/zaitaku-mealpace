@@ -260,6 +260,11 @@ class F6M4Config(unittest.TestCase):
         q = mock.patch.object(fixed_eval, "M4_CONFIG", None)
         q.start()
         self.addCleanup(q.stop)
+        # 実物の M4_MODEL には 2026-10-29 に 0038 の値（ステップ 3）が入った。
+        # 合成の値のテストは同じく None から動かす
+        r = mock.patch.object(fixed_eval, "M4_MODEL", None)
+        r.start()
+        self.addCleanup(r.stop)
 
     """plan #45 の 9・12 節: 0038 の機械が読む行の定数と照合。"""
 

@@ -37,10 +37,10 @@
 
 ```
 M4-CONFIG: set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5
-M4-MODEL: （ステップ 3 で追記）
+M4-MODEL: path=analysis/models/m4-0038.npz sha256=c786086f069c55c55b27eea860963c3c950c04b728fe65d52bc35a7a4a806d90
 ```
 
-   ステップ 3 で `M4-MODEL: path=analysis/models/m4-0038.npz sha256=<64 桁>` に置き換える（`fixed_eval.M4_MODEL` と同じコミット）。
+   2026-10-29 のステップ 3 で `M4-MODEL: path=analysis/models/m4-0038.npz sha256=<64 桁>` に置き換えた（`fixed_eval.M4_MODEL` と同じコミット。docs/log/2026-10-29.md）。
    最終モデルのファイルの形は plan #45 の 9.1（CNN: 種ごとの接頭辞 `s0/`・`s1/`・`s2/`、`numpy.savez`、`allow_pickle` を使わない）。
 
 ## `docs/evaluation.md` との関係（記録した逸脱。0034 と同じ扱い）
@@ -83,6 +83,6 @@ M4-MODEL: （ステップ 3 で追記）
 
 ## 影響する場所
 
-`analysis/fixed_eval.py`（`M4_CONFIG` にこの記録の値。`M4_MODEL` はステップ 3）、`analysis/test_fixed_eval.py`・`analysis/test_m4_compare.py`（実物の `M4_CONFIG` が `None` という前提のテストを合成の値への差し替えに直した）、
-docs/log/2026-10-28.md と `docs/log/2026-10-28-45/`、`docs/status.md`。ステップ 3 で `analysis/models/m4-0038.npz`。#47（装置の `detector.py` がこの構成と重みで推論する）、
+`analysis/fixed_eval.py`（`M4_CONFIG` にこの記録の値、`M4_MODEL` にステップ 3 の値）、`analysis/test_fixed_eval.py`・`analysis/test_m4_compare.py`（実物の `M4_CONFIG` が `None` という前提のテストを合成の値への差し替えに直した）、
+docs/log/2026-10-28.md と `docs/log/2026-10-28-45/`、`docs/status.md`。`analysis/models/m4-0038.npz`（ステップ 3 で作った最終モデルの重み）。#47（装置の `detector.py` がこの構成と重みで推論する）、
 #49（評価側の採点の入口がこの行と照合する）、0039 決定 5 の別の decision（分類器が CNN であることを入力にする）。
