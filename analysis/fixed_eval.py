@@ -216,8 +216,12 @@ def m4_lines_match(decision_text: str) -> bool:
 
 # --- M4 の構成（#45、docs/decisions/0038）。0038 の機械が読む行と一字一句同じ ---
 M4_CONFIG_DECISION = "docs/decisions/0038-m4-detector-config.md"
-# 0038 の M4-CONFIG: の値の部分（ステップ 2 で、本番の報告の選んだ行から写す）
-M4_CONFIG: str | None = None
+# 0038 の M4-CONFIG: の値の部分（ステップ 2。本番の報告の候補の表の C4 × P2 の行。
+# 規則が選んだのは P4 で、人が 2026-10-29 に P2 に変えた。0038 の決定 2）
+M4_CONFIG: str | None = (
+    "set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst"
+    " threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5"
+)
 # 0038 の M4-MODEL: の値の部分（ステップ 3 で path=… sha256=…）
 M4_MODEL: str | None = None
 M4_CONFIG_PENDING = "（ステップ 2 で追記）"

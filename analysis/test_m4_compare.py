@@ -864,8 +864,9 @@ class FinalModelTest(RunCase):
     def test_stops(self):
         out = self.tmp / "m.npz"
         with production_ok(self.names):
-            with self.assertRaises(SystemExit):
-                mc.final_model(self.root, out)  # M4_CONFIG が None
+            with mock.patch.object(fixed_eval, "M4_CONFIG", None):
+                with self.assertRaises(SystemExit):
+                    mc.final_model(self.root, out)  # M4_CONFIG が None
             with mock.patch.object(fixed_eval, "M4_CONFIG", CFG_CNN1):
                 with self.assertRaises(SystemExit):
                     mc.final_model(self.root, out)  # 0038 が無い・不一致
