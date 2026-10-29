@@ -11,9 +11,10 @@
 時間・時計の診断値。採否は人が決める（自動では決めない）。
 出さないもの: positive・prob・led・FEAT の値と、それらの集計。
 
-条件 4（受信の遅れ）と時計のずれの許す幅は、評価用 meal の前に人が 0037 に追記
-する規則を目安として当てる。追記の前（RX_DELAY_RULE・CLOCK_RULE が None）は値を
-出すだけ。ファイルを書かない。
+条件 4（受信の遅れ）と時計のずれの許す幅は、人が 0037 に追記した規則（10/29）を
+当てる: delay_meas の最大 > 1000 ms なら当たる（delay_upper は値を出すだけで判定に
+使わない）。anchor_spread_ms > 250、または clock_drift_min_ms・clock_drift_max_ms の
+絶対値 > 250 なら当たる（値が無ければ当たる）。ファイルを書かない。
 """
 
 from __future__ import annotations
@@ -27,9 +28,9 @@ MAX_GAP_MS = 1000  # evaluate.MAX_GAP_MS（docs/decisions/0021）
 WINDOW_MS = 1000
 LOSS_LIMIT = 0.01  # 条件 1
 END_S_MS = 1500  # 条件 6
-# 人が 0037 に追記する規則（評価用 meal の前）。決まるまで None（値を出すだけ）
-RX_DELAY_RULE = None  # 例: ("delay_upper", "max", 1000.0)
-CLOCK_RULE = None  # 例: {"anchor_spread_ms": 200.0, ...}
+# 人が 0037 に追記した規則（10/29）。None にすると値を出すだけになる
+RX_DELAY_RULE = ("delay_meas", "max", 1000.0)
+CLOCK_RULE = {"anchor_spread_ms": 250.0, "clock_drift_abs_ms": 250.0}
 CONV = "conv"
 WRONG_KEY = "wrong key"
 
@@ -77,6 +78,34 @@ def _med_max(v):
 
 def _hit(flag: bool) -> str:
     return "当たる" if flag else "当たらない"
+
+
+def clock_verdict(end: dict) -> str:
+    """時計のずれの判定の文（0037 の追記の規則）。値が無ければ当たる。"""
+    if CLOCK_RULE is None:
+        return "（規則が無い。値だけ）"
+    vals = [
+        end.get(k)
+        for k in (
+            "anchor_spread_ms",
+            "clock_drift_min_ms",
+            "clock_drift_max_ms",
+        )
+    ]
+    rule = (
+        f"（規則: anchor_spread_ms ≤ {CLOCK_RULE['anchor_spread_ms']:g}、"
+        f"clock_drift の絶対値 ≤ {CLOCK_RULE['clock_drift_abs_ms']:g}。0037 の追記）"
+    )
+    if any(
+        not isinstance(v, (int, float)) or isinstance(v, bool) for v in vals
+    ):
+        return f"{rule} → 当たる（値が無い）"
+    spread, dmin, dmax = vals
+    hit = (
+        spread > CLOCK_RULE["anchor_spread_ms"]
+        or max(abs(dmin), abs(dmax)) > (CLOCK_RULE["clock_drift_abs_ms"])
+    )
+    return f"{rule} → {_hit(hit)}"
 
 
 def analyze(d: Path) -> list[str]:
@@ -142,13 +171,16 @@ def analyze(d: Path) -> list[str]:
             + f"（ssh の往復時間の最大 {rtt} ms）"
         )
         if RX_DELAY_RULE is None:
-            verdict = "目安の規則はまだ無い（0037 に人が追記する）。値だけ"
+            verdict = "規則が無い。値だけ"
         else:
             which, stat, lim = RX_DELAY_RULE
             v = mm if which == "delay_meas" else mu
             v = None if v is None else v[0 if stat == "median" else 1]
-            verdict = _hit(v is None or v > lim)
-        out.append(f"4. 受信の遅れ: {txt} → {verdict}")
+            verdict = (
+                f"規則: {which} の{'中央値' if stat == 'median' else '最大'} > "
+                f"{lim:g} ms（0037 の追記）→ {_hit(v is None or v > lim)}"
+            )
+        out.append(f"4. 受信の遅れ: {txt} / {verdict}")
     else:
         out.append(
             "4. 受信の遅れ: 計算できない（detect_rx.csv か clock_offset_ms が無い）→ 当たる"
@@ -244,7 +276,7 @@ def analyze(d: Path) -> list[str]:
         f"e2e_ms（t_ms − (window_t_ms + 1000)）: 中央値 {e2e[0]}・最大 {e2e[1]} ms",
         f"時計: anchor_spread_ms {end.get('anchor_spread_ms')}、clock_drift_min_ms "
         f"{end.get('clock_drift_min_ms')}、clock_drift_max_ms {end.get('clock_drift_max_ms')}"
-        + ("（許す幅の目安はまだ無い。値だけ）" if CLOCK_RULE is None else ""),
+        + clock_verdict(end),
         f"marker_offset_shift_max_ms {meta.get('marker_offset_shift_max_ms')}、"
         f"ssh の往復時間の最大 {rtt} ms",
         f"行の途切れ {gaps.get('n')} 回（最長 {gaps.get('max_s')} 秒）",

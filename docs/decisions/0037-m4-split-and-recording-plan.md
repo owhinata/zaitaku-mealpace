@@ -211,6 +211,11 @@ M4-EVAL: （評価用の記録の打ち切りと採否の後に追記）
   `e2e_ms` 中央値 213・最大 236 ms。180 秒で `delay_upper` 最大 1142.8 ms（往復時間の最大 776.8 ms）。
 - **時計のずれの診断値**: `anchor_spread_ms`（最初の 1.0 秒の到着の揺れ）、`clock_drift_min_ms`・`clock_drift_max_ms`（到着の揺れと標本の時計のずれの合計）。
   ALSA・USB・arecord の中の固定の遅れは測れない（見込みは 1 ピリオド 125 ms 程度まで。推測）。10/29 の 30 分: `anchor_spread_ms` 0.089、`clock_drift_max_ms` 26.6（約 15 ppm）。
-- **人が追記する欄**（評価用 `meal` の前。`tools/unoq_session_check.py` の `RX_DELAY_RULE`・`CLOCK_RULE` に同じ値を入れる。追記の前は値を出すだけ）:
-  - 条件 4 の当て方（どの値を、どの統計量で、いくつと比べるか）: （人が追記）
-  - 時計のずれの許す幅（`anchor_spread_ms`・`clock_drift_*_ms`）と、測れない固定の遅れの扱い: （人が追記）
+- **人が追記する欄**（評価用 `meal` の前。`tools/unoq_session_check.py` の `RX_DELAY_RULE`・`CLOCK_RULE` に同じ値を入れる）:
+  - 条件 4 の当て方（人の決定 10/29）: **`delay_meas` の最大が 1000 ms を超えたら当たる**。`delay_upper` は使わない（往復時間は記録の前後に別の接続で測った値で、
+    外れ値を含み、記録中の遅れではないため）。`delay_meas` は片方向の最小の遅れ（測れない）の分だけ小さく出る（注記）。
+  - 時計のずれの許す幅と、測れない固定の遅れの扱い（人の決定 10/29）: **`anchor_spread_ms` ≤ 250、`clock_drift_min_ms`・`clock_drift_max_ms` の絶対値 ≤ 250**
+    （評価の窓 [t − 0.5, t + 1.5] に対して 1 ホップ分）。超えたら当たる。ALSA・USB・arecord の中の測れない固定の遅れ（125 ms 程度までの推測）は補正しない
+    （0029 と同じ扱い。窓の時刻が実際より少し遅い側に刻まれるだけで、窓の幅の内。#49 の報告に注記する）。
+  - 10/29 の実測（30 分の `water`）に当てると: `delay_meas` の最大 494 ms → 当たらない、`anchor_spread_ms` 0.089・`clock_drift_max_ms` 26.6 → 当たらない。
+  - 叩き: 評価用 `meal` ではしないまま（4 の表のとおり。人が 10/29 に再確認。PC に音が無く叩きを探せないため。FEAT の `log_energy_max` で粗く確かめる案は採らない）。

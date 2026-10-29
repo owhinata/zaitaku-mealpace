@@ -780,7 +780,14 @@ def make_device_session(
         "ssh_rtt_ms": {"max_ms": 12.5},
         "stop": "interrupt",
         "unoq_detector": {
-            "end": {"stop": "eof", "overrun_lines": 0, "rpc_errors": 0}
+            "end": {
+                "stop": "eof",
+                "overrun_lines": 0,
+                "rpc_errors": 0,
+                "anchor_spread_ms": 0.1,
+                "clock_drift_min_ms": -0.5,
+                "clock_drift_max_ms": 26.6,
+            }
         },
         "proc_ms": {"median": 50.0, "p95": 55.0, "max": 60.0},
         "line_gaps": {"n": 0, "max_s": 0.0},
@@ -817,11 +824,59 @@ class SessionCheckTest(unittest.TestCase):
             with self.subTest(k):
                 self.assertTrue(got[k].endswith("当たらない"), got[k])
         self.assertIn("会話 あり", got["8"])
-        self.assertIn("値だけ", got["4"])
         # rx − offset − (w + 1000) = (w + 40) + 1000 − w − 1000
         self.assertIn("delay_meas 中央値 40.0", got["4"])
         self.assertIn("delay_upper 中央値 52.5", got["4"])
+        self.assertIn(
+            "規則: delay_meas の最大 > 1000 ms（0037 の追記）", got["4"]
+        )
+        self.assertTrue(got["4"].endswith("→ 当たらない"), got["4"])
         self.assertTrue(any("e2e_ms" in ln and "40" in ln for ln in out))
+        clock = next(ln for ln in out if ln.startswith("時計:"))
+        self.assertTrue(clock.endswith("→ 当たらない"), clock)
+
+    def test_s5_rx_delay_rule_uses_delay_meas_only(self):
+        # delay_meas 最大 = 40 + rx_extra
+        got, _ = self.lines(rx_extra=961)  # 1001 > 1000
+        self.assertTrue(got["4"].endswith("→ 当たる"), got["4"])
+        got, _ = self.lines(rx_extra=960)  # 1000 は当たらない
+        self.assertTrue(got["4"].endswith("→ 当たらない"), got["4"])
+        # 往復時間が大きく delay_upper が 1000 を超えても、delay_meas で判定する
+        got, _ = self.lines(meta={"ssh_rtt_ms": {"max_ms": 5000.0}})
+        self.assertIn("delay_upper 中央値 5040.0", got["4"])
+        self.assertTrue(got["4"].endswith("→ 当たらない"), got["4"])
+        # 往復時間が無くても delay_meas で判定できる
+        got, _ = self.lines(meta={"ssh_rtt_ms": {}})
+        self.assertTrue(got["4"].endswith("→ 当たらない"), got["4"])
+
+    def test_s6_clock_rule(self):
+        def end(**kw):
+            e = {
+                "stop": "eof",
+                "anchor_spread_ms": 0.1,
+                "clock_drift_min_ms": -0.5,
+                "clock_drift_max_ms": 26.6,
+            }
+            e.update(kw)
+            return {"unoq_detector": {"end": e}}
+
+        for kw, want in (
+            ({}, "→ 当たらない"),
+            ({"anchor_spread_ms": 250.0}, "→ 当たらない"),
+            ({"anchor_spread_ms": 250.5}, "→ 当たる"),
+            ({"clock_drift_max_ms": 251.0}, "→ 当たる"),
+            ({"clock_drift_min_ms": -251.0}, "→ 当たる"),
+            ({"clock_drift_min_ms": -250.0}, "→ 当たらない"),
+            ({"clock_drift_max_ms": None}, "→ 当たる（値が無い）"),
+        ):
+            with self.subTest(kw=kw):
+                _, out = self.lines(meta=end(**kw))
+                clock = next(ln for ln in out if ln.startswith("時計:"))
+                self.assertTrue(clock.endswith(want), clock)
+                self.assertIn("0037 の追記", clock)
+        _, out = self.lines(meta={"unoq_detector": {"end": {}}})
+        clock = next(ln for ln in out if ln.startswith("時計:"))
+        self.assertTrue(clock.endswith("→ 当たる（値が無い）"), clock)
 
     def test_s2_each_condition(self):
         cases = {
