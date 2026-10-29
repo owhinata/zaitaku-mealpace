@@ -86,6 +86,20 @@ if os.environ.get("THROAT_FAKE"):
     record.throat_argv = lambda host, device: json.loads(os.environ["THROAT_FAKE"])
     record.mixer_argv = lambda host, device: None
     record.asoundrc_check_argv = lambda host: [sys.executable, "-c", "pass"]
+if os.environ.get("UNOQ_FAKE"):
+    # --unoq-detector の ssh の子を偽の検出器（test_record_unoq.FAKE_DET）に
+    # 差し替える（#47）。起動前の確かめ・往復時間・消灯も偽のコマンドに
+    import json
+    py = lambda code: [sys.executable, "-I", "-c", code]
+    record.unoq_detector_argv = lambda host, args: json.loads(os.environ["UNOQ_FAKE"])
+    record.led_off_argv = lambda host: py("pass")
+    record.rtt_argv = lambda host: py(
+        "import sys\nfor l in sys.stdin:\n    sys.stdout.write(l); sys.stdout.flush()"
+    )
+    record.busy_check_argv = lambda host: py("import sys; sys.exit(1)")
+    record.swap_check_argv = lambda host: py("print('Filename Type')")
+    record.asoundrc_check_argv = lambda host: py("pass")
+    record.mixer_argv = lambda host, device: None
 record.main()
 '''
 
@@ -387,6 +401,52 @@ class RecordTtyTest(unittest.TestCase):
             )
             self.assertEqual(meta["throat"]["stop"], "interrupt")
             self.assertEqual([r[1] for r in c.events()], ["s"])
+
+    def test_t12_unoq_no_rpc_enter_marker_sigint(self):
+        """--unoq-detector --no-rpc（偽の検出器）: 消灯の後に Enter を待ち、
+        cbreak でマーカーを受け、SIGINT で端末が戻り、子が残らない（#47）。"""
+        import json
+        from test_record_throat import pid_alive
+        from test_record_unoq import FAKE_DET, good_header
+
+        with tempfile.TemporaryDirectory() as d:
+            fake = Path(d) / "fake_det.py"
+            fake.write_text(FAKE_DET, encoding="utf-8")
+            pidfile = Path(d) / "det.pid"
+            cfg = {
+                "pidfile": str(pidfile),
+                "header": good_header(no_rpc=True),
+                "interval": 0.05,
+            }
+            argv = [sys.executable, "-I", str(fake), json.dumps(cfg)]
+            c = self.start(
+                "--unoq-detector",
+                "--no-rpc",
+                "--cond",
+                "water",
+                env_extra={"UNOQ_FAKE": json.dumps(argv)},
+            )
+            c.wait_text("目で確かめてから続ける（Enter）")
+            self.assertFalse(pidfile.exists())  # Enter の前は起動しない
+            c.send("\n")
+            c.wait_ready()
+            c.wait_text("窓が届き始めた")
+            c.send("s")
+            c.wait_text("ms] s")
+            c.signal(signal.SIGINT)
+            self.assertEqual(c.wait_exit(), 0, c.output())
+            self.assertTtyRestored(c)
+            self.assertFalse(pid_alive(int(pidfile.read_text())))
+            self.assertEqual([r[1] for r in c.events()], ["s"])
+            dirs = [p for p in c.raw_dir.iterdir() if p.is_dir()]
+            meta = json.loads(
+                (dirs[0] / "meta.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(meta["stop"], "interrupt")
+            self.assertFalse(meta["rpc"])
+            # Ctrl-C で標準入力を閉じ、検出器の E 行を受けてから終わる
+            self.assertEqual(meta["unoq_detector"]["end"]["stop"], "eof")
+            self.assertNotIn("0.777777777", c.output())
 
 
 class MarkAfterCloseTest(unittest.TestCase):

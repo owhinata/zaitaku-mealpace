@@ -147,3 +147,19 @@ docs/decisions/0025「0001 との関係」の「Linux 側の Python の配置の
   （自動を含め 34 個）、`libopenblas0-pthread`・`ocl-icd-opencl-dev`（自動を含め 13 個）。venv に pip で `ai-edge-litert`・`ncnn`・`onnxruntime`（PyPI の wheel）。まだ外していない。
 - **BLAS の alternatives**: libblas・liblapack とも参照実装（`blas/libblas.so.3`・`lapack/liblapack.so.3`）を指すが、`update-alternatives --set` で戻したので
   **manual mode**。OpenBLAS（優先度 100）が入っている間に `--auto` に戻すと OpenBLAS に替わる。numpy の数字（#44）は参照実装のときのもの。
+
+## 追記（2026-10-29、Issue #47）: 検出器の配る一覧
+
+上の決定の本文は変えない。
+
+- **配る一覧を入れ替えた（14 個）**: `detector.py`・`audio_in.py`（`device/unoq/` の普通のファイル）と、`m4_infer.py`・`led_rule.py`（`analysis/` の直下へのリンク）、
+  `m4-0038.npz`（`analysis/models/` へのリンク）を足し、`bench_runtimes.py` と `cnn_rand0.*` の 4 つを外した（0040 でランタイムを採らず M5 へ。ファイルはリポジトリに
+  残す）。UNO Q の上の古い 5 つは人が 10/29 に `rm` した（`--delete` は使わないまま）。一覧は `mcu_rpc.py`、`led_check.py`、`bench_infer.py`、`features_np.py`、
+  `mel40_htk_0_4000.npy`、`mel26_htk_0_4000.npy`、`features_np_ref.npz`、`postprocess.py`、`evaluate.py`、`detector.py`、`audio_in.py`、`m4_infer.py`、`led_rule.py`、`m4-0038.npz`。
+- **`deploy-unoq` の検査を広げた**: リンクの先は `analysis/` の直下の普通のファイル、または `analysis/models/` の直下の `.npz`（重み。0038 の `path` を変えないため）。
+- **静的テスト**（`device/unoq/test_mcu_rpc.py` は一覧と許可の集合だけを直し、新しい検査は `device/unoq/test_detector.py`）: `subprocess` の import は `audio_in.py` だけ、
+  環境変数の書き込みは `detector.py` の先頭の 3 つの代入（`OPENBLAS_NUM_THREADS`・`OMP_NUM_THREADS`・`MKL_NUM_THREADS` = `"1"`、numpy の import より前。0040 決定 3）だけ、
+  `audio_in.py` 以外の配る `.py` は `arecord`・`hw:`・`/dev/snd`・`pw-record`・`alsa` の文字列と `ctypes`・`pty`・`os.system` 等を含まない、書き込みの `open`・`save` 系が無い。
+- **配った後の照合**: `detector.py` の H 行の `code_sha256`（配った先の `.py`・`.npy`・`.npz` を名前の順に「`<名前> <sha256>`」で並べた文字列の sha256）を
+  `record.py` が手元の一覧の同じ計算と比べ、違えば記録を始めない。
+- **D1b**: CLAUDE.md・AGENTS.md の「UNO Q 側はプロジェクトのプログラムを置かず」「ALSA からメモリに取り」の文言は、人が 10/29 に D1b に合わせて直した（`331ce20`）。

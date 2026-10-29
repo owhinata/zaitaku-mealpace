@@ -480,6 +480,48 @@ class ThroatSplitTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             split_sessions(self.root, eval_min=7, kind="m2")
 
+    def test_sp12e_unoq_detector_sessions_are_listed_like_detector(self):
+        """M4 の装置のセッション（fw = unoq-detector、#47）は detector と同じ
+        扱い: M1 の分割に入れず detector に、--kind throat では excluded に。
+        detect.csv・feat.csv があっても止まらない（中身は開かない）。"""
+        UNOQ = {"subject": "self", "fw": "unoq-detector"}
+        m1 = sp10_names()
+        for n in m1:
+            make_session(self.root, n)
+        th = throat_names()
+        for n in th:
+            make_throat(self.root, n)
+        dev = [f"20261030-12{i:02d}00_self_water" for i in range(2)]
+        for n in dev:
+            make_session(self.root, n, meta=dict(UNOQ))
+            for f in ("detect.csv", "feat.csv", "detect_rx.csv", "events.csv"):
+                # 開けば読めない中身（開かないことの確かめ）
+                (self.root / n / f).write_bytes(b"\xff\xfe")
+        r = split_sessions(self.root, eval_min=14)
+        self.assertEqual(r["train"], m1[:7])
+        self.assertEqual(r["eval"], m1[7:])
+        self.assertEqual(r["detector"], dev)
+        r = split_sessions(self.root, eval_min=7, kind="throat")
+        self.assertEqual(r["train"], th[:14])
+        self.assertEqual(r["eval"], th[14:])
+        self.assertEqual(r["excluded"], sorted(m1 + dev))
+        # p1 の装置のセッションは self の detector に入れない
+        make_session(
+            self.root,
+            "20261030-130000_p1_water",
+            meta={"subject": "p1", "fw": "unoq-detector"},
+        )
+        self.assertEqual(
+            split_sessions(self.root, eval_min=14)["detector"], dev
+        )
+        # 別の fw の値で detect.csv があれば今までどおり止まる
+        bad = "20261030-140000_self_water"
+        make_session(self.root, bad, meta={"subject": "self", "fw": "unoq"})
+        (self.root / bad / "detect.csv").write_text("t_ms\n", encoding="utf-8")
+        with self.assertRaises(SystemExit) as cm:
+            split_sessions(self.root, eval_min=14)
+        self.assertIn(bad, str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

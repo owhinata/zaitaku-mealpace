@@ -185,3 +185,32 @@ M4-EVAL: （評価用の記録の打ち切りと採否の後に追記）
 - 学習用 `meal` は 3 本の予定だったが、締めまでに採用した 5 本（収集日 4 日）をすべて学習側に入れる（2 節「締めの後に録ったもの以外は学習側」のとおり。本数の上限は決めていない）。
   これより後に録った `pc-throat` のセッションは M4 に使わない（2 節）。
 - `M4-TRAIN-CUTOFF`・`M4-EVAL-WINDOW`・`M4-EVAL` の行は変えていない。
+
+## 追記（2026-10-29、Issue #47）: #47 で確定した事項
+
+上の決定の本文は変えない。`docs/data-schema.md` に装置のセッション（`fw` = `unoq-detector`）の節を足した記録を兼ねる（既存のファイル・列・単位・フレーム形式は
+変えていないので、記録済みのセッションの変換は要らない）。
+
+- **装置の `fw`**: `unoq-detector`（M2 の `detector` と `positive` の意味が違う: 0038 の後処理の出力）。`split.py` は `detector` と同じ扱い（M1 の分割に入れない。
+  `--kind throat` では `excluded`）、`m4_compare.list_train` も同じ集合で見る（#47 への申し送り）。`evaluate_detector.py` は変えていない（`fw` = `detector` だけを拾う）。
+- **FEAT の 82 次元**（4 の方針の確定。`feature_set` = `m4-0037-feat82`）: `mel_mean_00`〜`mel_mean_39`、`mel_std_00`〜`mel_std_39`（`mfe40` の時間方向の平均・標準偏差）、
+  `log_energy_mean`・`log_energy_max`。式は `docs/data-schema.md`。`--feat` のときだけ出す。
+- **評価用 `meal` の起動**: 冒頭の人の決定（10/24）「評価用の `meal` の間はマトリクスを自分から見えない向きに置く」は、**RPC なしで動かす（`--no-rpc`、マトリクスは
+  消灯のまま）**と読み替える（人の決定 10/29）。目的（表示が `s` の押し方に影響しないこと）は同じで、表示そのものが出ないので、より強い。`led` の列は `--no-rpc` でも
+  装置が 0018 の規則で計算して `detect.csv` に残す。`meta.json` に `rpc: false`。`cond` = `meal` では `record.py` は `--feat` と `--no-rpc` が無いと始めない。起動の前に
+  消灯を送り、人がマトリクスの消灯を目で確かめて Enter で始める。手順は `docs/recording-protocol.md`「評価用 `meal` の記録（装置の経路）」。
+- **ハートビート**（人の決定 10/29）: `record.py` が検出器の標準入力に 0.5 秒ごとに 1 バイトを書き、検出器は 2.0 秒届かなければ消灯して止まる（UNO Q の sshd が切断に
+  気づかないため）。そのセッションは `child-exit` で終わる。
+- **採否を確かめる道具**: `tools/unoq_session_check.py`。5 の捨てる条件（装置）1〜9 を「当たる / 当たらない」と数で出す。`detect.csv`・`feat.csv` は最初の 2 列
+  （`t_ms`・`window_t_ms`）だけを読み、`positive`・`prob`・`led`・FEAT の値と集計を出さない。
+- **受信の遅れ（条件 4 の材料）**: 受信時刻は `detect_rx.csv`（`window_t_ms, rx_ms, proc_us, lat_us, queue, backlog`。`prob`・`positive`・`led` を含めない）。
+  2 つの時計は合わせていない。`offset` = 全 D 行の `(rx_ms − t_ms)` の最小（下側の包絡）として
+  `delay_meas = (rx_ms − offset) − (window_t_ms + 1000)`（下側の値）、`delay_upper = delay_meas + rtt_max_ms`（記録の前後に同じ宛先へ ssh で測った往復時間の最大を、
+  片方向の遅れの推定の上限とする）。装置の時計では `e2e_ms = t_ms − (window_t_ms + 1000)`。
+  10/29 の動作確認（`water`、M4 には使わない）: 30 分で `delay_meas` 中央値 232・最大 494 ms、`delay_upper` 中央値 1103.6・最大 1365.6 ms（往復時間の最大 871.6 ms）、
+  `e2e_ms` 中央値 213・最大 236 ms。180 秒で `delay_upper` 最大 1142.8 ms（往復時間の最大 776.8 ms）。
+- **時計のずれの診断値**: `anchor_spread_ms`（最初の 1.0 秒の到着の揺れ）、`clock_drift_min_ms`・`clock_drift_max_ms`（到着の揺れと標本の時計のずれの合計）。
+  ALSA・USB・arecord の中の固定の遅れは測れない（見込みは 1 ピリオド 125 ms 程度まで。推測）。10/29 の 30 分: `anchor_spread_ms` 0.089、`clock_drift_max_ms` 26.6（約 15 ppm）。
+- **人が追記する欄**（評価用 `meal` の前。`tools/unoq_session_check.py` の `RX_DELAY_RULE`・`CLOCK_RULE` に同じ値を入れる。追記の前は値を出すだけ）:
+  - 条件 4 の当て方（どの値を、どの統計量で、いくつと比べるか）: （人が追記）
+  - 時計のずれの許す幅（`anchor_spread_ms`・`clock_drift_*_ms`）と、測れない固定の遅れの扱い: （人が追記）

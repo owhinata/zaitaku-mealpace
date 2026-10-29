@@ -6,10 +6,10 @@
 フォルダ名の形式（docs/data-schema.md）と meta.json の subject を確かめ、
 合わないものがあれば止まる
 （docs/decisions/0011）。
-meta.json の fw が detector のセッション（検出器で録った M2 のセッション）は M1
-の分割（train / eval）に入れず、
-戻り値の detector に列挙する。fw が detector でないのに detect.csv か feat.csv
-があるセッションは止まる
+meta.json の fw が detector のセッション（検出器で録った M2 のセッション）と
+unoq-detector のセッション（M4 の装置。#47）は M1 の分割（train / eval）に入れず、
+戻り値の detector に列挙する（--kind throat では excluded）。fw がどちらでもない
+のに detect.csv か feat.csv があるセッションは止まる
 （docs/decisions/0021）。fw が無い記録ファームウェアのセッション（
 docs/decisions/0006）は今までどおり分割に入れる。
 
@@ -38,6 +38,10 @@ NAME_RE = re.compile(
 
 
 DETECTOR_FW = "detector"
+# M4 の装置（UNO Q の detector.py、record.py --unoq-detector。#47）のセッション。
+# 分割では DETECTOR_FW と同じ扱い（docs/decisions/0037 の #47 への申し送り）
+UNOQ_DETECTOR_FW = "unoq-detector"
+DETECTOR_FWS = (DETECTOR_FW, UNOQ_DETECTOR_FW)
 DETECTOR_FILES = ("detect.csv", "feat.csv")
 
 # 咽喉マイク（docs/decisions/0029・0031）
@@ -139,8 +143,9 @@ def split_sessions(
             raise SystemExit(
                 f"throat.wav があるのに meta.json の fw が {THROAT_FW} ではありません: {p.name}"
             )
-        if meta.get("fw") == DETECTOR_FW:
-            # 検出器のセッションは M1 の分割に入れない（docs/decisions/0021）
+        if meta.get("fw") in DETECTOR_FWS:
+            # 検出器のセッションは M1 の分割に入れない（docs/decisions/0021）。
+            # M4 の装置のセッション（unoq-detector）も同じ（#47）
             if mine:
                 (detector if kind == "m1" else excluded).append(p)
             continue
@@ -157,8 +162,8 @@ def split_sessions(
         if any((p / name).is_file() for name in DETECTOR_FILES):
             # ファイルの有無を見るだけで、中身は開かない
             raise SystemExit(
-                f"検出器のファイル（detect.csv / feat.csv）があるのに meta.json の fw が {DETECTOR_FW} では"
-                f"ありません（META が届かなかったセッションは消す）: {p.name}"
+                f"検出器のファイル（detect.csv / feat.csv）があるのに meta.json の fw が {DETECTOR_FW}・"
+                f"{UNOQ_DETECTOR_FW} ではありません（META が届かなかったセッションは消す）: {p.name}"
             )
         if mine:
             (sessions if kind == "m1" else excluded).append(p)

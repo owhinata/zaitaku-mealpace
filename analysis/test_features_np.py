@@ -401,6 +401,174 @@ class RefFileTest(unittest.TestCase):
             )
 
 
+# --- im2col の置き換え（docs/decisions/0040 決定 1、plan #47 の 3 節） ---
+
+
+def old_conv3x3(x, W, b):
+    """置き換える前の features_np._conv3x3（einsum 版）をそのまま写したもの。"""
+    B, Ci, H, Wd = x.shape
+    xp = np.pad(x, ((0, 0), (0, 0), (1, 1), (1, 1)))
+    cols = np.lib.stride_tricks.sliding_window_view(xp, (3, 3), axis=(2, 3))
+    # cols (B, Ci, H, W, 3, 3)
+    out = np.einsum("bchwij,ocij->bohw", cols, W, optimize=True)
+    return out + b[None, :, None, None]
+
+
+def old_cnn_forward(params, M):
+    """置き換える前の cnn_forward（畳み込みだけが old_conv3x3）。"""
+    x = np.asarray(M, dtype=np.float32)[:, None, :, :]
+    for k in range(3):
+        x = old_conv3x3(
+            x, params[f"conv{k + 1}.weight"], params[f"conv{k + 1}.bias"]
+        )
+        x = np.maximum(x, 0.0)
+        if k < 2:
+            x = fnp._maxpool2(x)
+    g = x.mean(axis=(2, 3))
+    z = g @ params["fc.weight"].T[:, 0] + params["fc.bias"][0]
+    return 1.0 / (1.0 + np.exp(-z.astype(np.float64)))
+
+
+IM2COL_TOL = 1e-6  # 0040 決定 1
+M4_MODEL_PATH = Path(__file__).resolve().parent / "models" / "m4-0038.npz"
+
+
+def synthetic_mfe(n: int, seed: int) -> np.ndarray:
+    """正弦波・雑音から作った n 窓の mfe40 (n, 98, 40)。"""
+    rng = np.random.default_rng(seed)
+    t = np.arange(16000) / 16000
+    out = []
+    for i in range(n):
+        x = (
+            (0.05 + 0.3 * rng.random())
+            * np.sin(2 * np.pi * (150 + 90 * i) * t + rng.random())
+            + rng.normal(0.0, 10 ** rng.uniform(-4, -1), len(t))
+            + 0.1 * (i % 3 == 0) * rng.normal(0.0, 0.2, len(t))
+        )
+        out.append(fnp.mfe40(x))
+    return np.stack(out)
+
+
+class Im2colTest(unittest.TestCase):
+    def test_conv_matches_old_einsum(self):
+        rng = np.random.default_rng(0)
+        for B, Ci, Co, H, W in ((1, 1, 8, 98, 40), (3, 8, 16, 49, 20)):
+            x = rng.normal(0, 1, (B, Ci, H, W)).astype(np.float32)
+            Wt = rng.normal(0, 0.1, (Co, Ci, 3, 3)).astype(np.float32)
+            b = rng.normal(0, 0.1, Co).astype(np.float32)
+            got = fnp._conv3x3(x, Wt, b)
+            self.assertEqual(got.shape, (B, Co, H, W))
+            np.testing.assert_allclose(
+                got, old_conv3x3(x, Wt, b), rtol=0, atol=1e-5
+            )
+        self.assertIs(v2._conv3x3, fnp._conv3x3)
+
+    def test_random_weights_new_vs_old(self):
+        worst = 0.0
+        for s in range(5):
+            params = fnp.random_cnn(np.random.default_rng(s))
+            for B in (1, 7, 256):
+                with self.subTest(seed=s, B=B):
+                    M = (
+                        np.random.default_rng(100 + s)
+                        .normal(0, 1, (B, 98, 40))
+                        .astype(np.float32)
+                    )
+                    new = fnp.cnn_forward(params, M)
+                    old = old_cnn_forward(params, M)
+                    self.assertEqual(new.shape, (B,))
+                    d = float(np.abs(new - old).max())
+                    worst = max(worst, d)
+                    self.assertLessEqual(d, IM2COL_TOL)
+        self.assertLessEqual(worst, IM2COL_TOL)
+
+    def test_m4_model_new_vs_old(self):
+        import m4_infer
+
+        model = m4_infer.load_model(M4_MODEL_PATH)
+        a = model["arrays"]
+        X = synthetic_mfe(24, 3)
+        self.assertEqual(model["cfg"]["seeds"], (0, 1, 2))
+        for s in model["cfg"]["seeds"]:
+            with self.subTest(seed=s):
+                params = {k: a[f"s{s}/{k}"] for k in m4_infer.CNN_SHAPES}
+                Z = ((X - a[f"s{s}/mean"]) / a[f"s{s}/std"]).astype(np.float32)
+                d = np.abs(
+                    fnp.cnn_forward(params, Z) - old_cnn_forward(params, Z)
+                ).max()
+                self.assertLessEqual(float(d), IM2COL_TOL)
+
+    def test_reference_npz_within_existing_tolerance(self):
+        params, M = fnp.reference_cnn()
+        with np.load(fnp.REF_PATH, allow_pickle=False) as z:
+            ref = z["cnn"]
+        np.testing.assert_allclose(
+            fnp.cnn_forward(params, M), ref, rtol=0, atol=1e-5
+        )
+        np.testing.assert_allclose(
+            old_cnn_forward(params, M), ref, rtol=0, atol=1e-5
+        )
+
+
+# --- FEAT の 82 次元（plan #47 の 5 節） ---
+
+
+class MfeAndFeatTest(unittest.TestCase):
+    def test_mfe_is_bit_identical_to_mfe40(self):
+        for name, x in FeatureTest().segs().items():
+            with self.subTest(name):
+                M, f = fnp.mfe_and_feat(x)
+                np.testing.assert_array_equal(M, fnp.mfe40(x))
+                self.assertEqual(M.dtype, np.float32)
+                self.assertEqual(f.shape, (82,))
+                self.assertEqual(f.dtype, np.float64)
+        M, f = fnp.mfe_and_feat(np.ones(15999))
+        np.testing.assert_array_equal(M, np.zeros((98, 40), np.float32))
+        np.testing.assert_array_equal(f, np.zeros(82))
+
+    def test_names(self):
+        n = fnp.FEAT82_NAMES
+        self.assertEqual(len(n), 82)
+        self.assertEqual(len(set(n)), 82)
+        self.assertEqual(n[0], "mel_mean_00")
+        self.assertEqual(n[39], "mel_mean_39")
+        self.assertEqual(n[40], "mel_std_00")
+        self.assertEqual(n[79], "mel_std_39")
+        self.assertEqual(n[80:], ("log_energy_mean", "log_energy_max"))
+        self.assertEqual(fnp.FEAT82_SET, "m4-0037-feat82")
+
+    def test_formula_by_hand(self):
+        """手で計算した値と比べる。L の平均・標準偏差（÷ n）は mfe40 の
+        float32 の値から、対数エネルギーは |FFT|² ÷ 512 のフレームの和から。"""
+        rng = np.random.default_rng(11)
+        x = 0.2 * np.sin(2 * np.pi * 500 * np.arange(16000) / 16000)
+        x += rng.normal(0, 0.01, 16000)
+        _, f = fnp.mfe_and_feat(x)
+        L = fnp.mfe40(x).astype(np.float64)
+        n = L.shape[0]
+        mean = L.sum(axis=0) / n
+        std = np.sqrt(((L - mean) ** 2).sum(axis=0) / n)
+        np.testing.assert_allclose(f[:40], mean, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(f[40:80], std, rtol=0, atol=1e-12)
+        # フレームごとのエネルギーを素朴に（preemph → Hamming → |rfft|² / 512）
+        y = np.append(x[0], x[1:] - 0.97 * x[:-1])
+        e = []
+        for k in range(98):
+            fr = y[160 * k : 160 * k + 400] * np.hamming(400)
+            s = np.fft.rfft(fr, n=512)
+            e.append(np.log((np.abs(s) ** 2 / 512).sum() + 1e-10))
+        self.assertAlmostEqual(f[80], float(np.mean(e)), places=10)
+        self.assertAlmostEqual(f[81], float(np.max(e)), places=10)
+        # 無音: L = log(1e-10)（float32）、std 0、エネルギー log(1e-10)
+        _, z = fnp.mfe_and_feat(np.zeros(16000))
+        np.testing.assert_allclose(
+            z[:40], float(np.float32(np.log(1e-10))), rtol=0, atol=1e-6
+        )
+        np.testing.assert_array_equal(z[40:80], np.zeros(40))
+        self.assertAlmostEqual(z[80], np.log(1e-10))
+        self.assertAlmostEqual(z[81], np.log(1e-10))
+
+
 WRITE_ATTRS = {
     "save",
     "savez",

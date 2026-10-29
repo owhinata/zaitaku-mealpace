@@ -171,6 +171,31 @@ class LedRuleTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             led_rule.led_states([1000, 1250], [0])
 
+    def test_l6_stepper_matches_led_states(self):
+        """LedStepper（1 窓ずつ。#47 の装置）を回した値が led_states と一致
+        （表の入力すべてと、乱数の陽性の列）。"""
+        import random
+
+        rnd = random.Random(47)
+        inputs = dict(CASES)
+        for n in (1, 50, 400):
+            w = [1000 + 250 * i for i in range(n)]
+            inputs[f"rand_{n}"] = (w, [rnd.random() < 0.2 for _ in w], None)
+        for label, (w, pos, want) in inputs.items():
+            with self.subTest(label):
+                st = led_rule.LedStepper()
+                got = [st.step(a, b) for a, b in zip(w, pos)]
+                self.assertEqual(got, led_rule.led_states(w, pos))
+                if want is not None:
+                    self.assertEqual(got, want)
+
+    def test_l7_stepper_not_ascending_raises(self):
+        st = led_rule.LedStepper()
+        st.step(1000, 1)
+        for w in (1000, 750):
+            with self.subTest(w=w), self.assertRaises(ValueError):
+                st.step(w, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

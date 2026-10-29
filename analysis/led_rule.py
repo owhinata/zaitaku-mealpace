@@ -20,28 +20,39 @@ LED_OFF, LED_YELLOW, LED_GREEN = 0, 1, 2
 GREEN_HOLD_MS = 1750
 
 
+class LedStepper:
+    """0018 の規則を 1 窓ずつ進める（装置の detector.py と PC で同じコード。
+    #47）。step(w, p) は窓の開始 w（ms）と positive からその窓の led（1 / 2）。
+    w が前の窓より大きくなければ ValueError。"""
+
+    def __init__(self):
+        self.last_w: int | None = None
+        self.prev: int | None = None
+
+    def step(self, w, p) -> int:
+        w = int(w)
+        if self.prev is not None and w <= self.prev:
+            raise ValueError(
+                f"window_t_ms が昇順ではありません: {self.prev} → {w}"
+            )
+        self.prev = w
+        if int(p):
+            self.last_w = w
+        return (
+            LED_GREEN
+            if self.last_w is not None and w - self.last_w <= GREEN_HOLD_MS
+            else LED_YELLOW
+        )
+
+
 def led_states(
     window_t_ms: Sequence[int], positive: Sequence[int]
 ) -> list[int]:
     """detect.csv の行（窓の開始の昇順）から 0018 の規則で各行の led（1 / 2）
-    を出す。0（消灯）は行に出ない。"""
+    を出す。0（消灯）は行に出ない。LedStepper を先頭から回すだけ。"""
     if len(window_t_ms) != len(positive):
         raise ValueError(
             f"window_t_ms と positive の長さが違います: {len(window_t_ms)} != {len(positive)}"
         )
-    out: list[int] = []
-    last_w: int | None = None
-    prev: int | None = None
-    for w, p in zip(window_t_ms, positive):
-        w = int(w)
-        if prev is not None and w <= prev:
-            raise ValueError(f"window_t_ms が昇順ではありません: {prev} → {w}")
-        prev = w
-        if int(p):
-            last_w = w
-        out.append(
-            LED_GREEN
-            if last_w is not None and w - last_w <= GREEN_HOLD_MS
-            else LED_YELLOW
-        )
-    return out
+    st = LedStepper()
+    return [st.step(w, p) for w, p in zip(window_t_ms, positive)]

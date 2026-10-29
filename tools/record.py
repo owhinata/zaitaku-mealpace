@@ -72,6 +72,18 @@ iface（sh12jk-wired-unoq-usbaudio）だけ受ける（M4 の学習用、0037）
 UNO Q には何も書かない（コマンドの出力先は標準出力だけ）。ミキサーは `amixer
 sget` で読むだけ。
 
+M4 の装置のセッション（--unoq-detector、Issue #47、plan #47 の 7 節）: UNO Q の
+detector.py を ssh で起動し、標準出力の行（H・F・D・T・E）を受けて detect.csv・
+feat.csv（--feat）・detect_rx.csv・events.csv・meta.json に書く（fw =
+unoq-detector。docs/data-schema.md）。音声は UNO Q からも PC にも出ない（検出器に
+音声の出口は無い）。起動前に ALSA の設定・記録の経路（arecord・pw-record）・
+スワップを読み取りで確かめ、ssh の往復時間を測る。--no-rpc のときは先に消灯を送り、
+マトリクスが消えていることを目で確かめてから Enter で始める。H 行の構成・重み・
+配ったコードの sha256 が手元と違えば始めない。最初の D 行でフォルダを作る。
+マーカーの t_ms は装置の時計（offset で直した値）。--subject p1・--throat・
+--indicator・--port とは同時に使えない。--cond meal は --feat と --no-rpc が要る。
+記録の間も終わりにも、陽性・prob・led・FEAT の値と集計は表示しない。
+
 構成 B（--throat sh12jk-nz210c-a2dp-unoq、Issue #38、docs/decisions/0030）: 子は
 ssh 越しの `pw-record`（UNO Q の PipeWire の bluez_input のノードから標準出力へ。
 -P で node.dont-reconnect・node.dont-fallback・node.name = zm-throat-record）。
@@ -87,8 +99,9 @@ throat.pipewire.link_check に残す。受信が THROAT_STALL_S 秒止まった�
 """
 
 from __future__ import annotations
-import argparse, atexit, codecs, collections, contextlib, csv, json, os, re
-import shlex, signal, struct, subprocess, sys, threading, time, wave
+import argparse, atexit, codecs, collections, contextlib, csv, json, math, os
+import re, shlex, signal, statistics, struct, subprocess, sys, threading, time
+import wave
 from datetime import datetime
 from pathlib import Path
 
@@ -1860,12 +1873,1066 @@ def run_throat(a) -> None:
         )
 
 
+# --- M4 の装置（UNO Q の detector.py）の受け口（--unoq-detector、#47、plan #47 の 7 節） ---
+UNOQ_FW = "unoq-detector"
+UNOQ_DEVICE_DIR = "~/zaitaku-mealpace-device"
+UNOQ_ENV = "env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1"
+REPO_DIR = Path(__file__).resolve().parent.parent
+ANALYSIS_DIR = REPO_DIR / "analysis"
+UNOQ_DEPLOY_DIR = REPO_DIR / "device" / "unoq"
+# H 行を待つ最長の秒数、最初の D 行を待つ最長の秒数
+UNOQ_HEADER_WAIT_S = 30.0
+UNOQ_FIRST_WINDOW_WAIT_S = 15.0
+# 止めるとき E 行と EOF を待つ最長の秒数、SIGTERM の後に待つ秒数
+UNOQ_DRAIN_S = 5.0
+UNOQ_TERM_WAIT_S = 2.0
+# 起動前の確かめ（ssh 1 回ずつ）のタイムアウト、消灯（led_check.py off）の
+# タイムアウト
+UNOQ_CHECK_TIMEOUT_S = 10.0
+UNOQ_LED_OFF_TIMEOUT_S = 10.0
+# 往復時間: 起動前 20 回（最初の 2 回は捨てる）、終わり 10 回。1 回の待ちの上限
+RTT_START_N, RTT_DISCARD, RTT_END_N = 20, 2, 10
+RTT_TIMEOUT_S = 5.0
+# D 行がこの秒数届かなければ「途切れ」と表示する
+UNOQ_LINE_GAP_S = 1.0
+UNOQ_HOP_MS = 250
+UNOQ_WINDOW_MS = 1000
+UNOQ_N_FEAT = 82
+DETECT_RX_HEADER = [
+    "window_t_ms",
+    "rx_ms",
+    "proc_us",
+    "lat_us",
+    "queue",
+    "backlog",
+]
+UNOQ_STOPS = (
+    "eof",
+    "signal",
+    "overrun",
+    "stdout-stall",
+    "stdout-closed",
+    "heartbeat-timeout",
+    "error",
+)
+# ハートビート（人の決定 10/29、plan #47 の追記）: 検出器の標準入力に
+# UNOQ_HEARTBEAT_S ごとに 1 バイト（改行。音声ではない）を書く。検出器は
+# UNOQ_HEARTBEAT_TIMEOUT_S 届かなければ消灯して止まる（device/unoq/detector.py と
+# 同じ値。H 行の heartbeat_s・heartbeat_timeout_s と照らす）
+UNOQ_HEARTBEAT_S = 0.5
+UNOQ_HEARTBEAT_TIMEOUT_S = 2.0
+UNOQ_HEARTBEAT_BYTE = b"\n"
+
+
+def analysis_modules():
+    """(fixed_eval, m4_infer, features_np)。analysis/ を sys.path の後ろに足して
+    読む（--unoq-detector と道具のときだけ）。"""
+    if str(ANALYSIS_DIR) not in sys.path:
+        sys.path.append(str(ANALYSIS_DIR))
+    import fixed_eval, m4_infer, features_np  # noqa: E401
+
+    return fixed_eval, m4_infer, features_np
+
+
+def m4_model_fields(value: str) -> dict:
+    """fixed_eval.M4_MODEL（path=… sha256=…）を辞書に。"""
+    out = dict(p.split("=", 1) for p in value.split(" "))
+    if set(out) != {"path", "sha256"}:
+        raise ValueError(f"M4_MODEL の形が違います: {value!r}")
+    return out
+
+
+def deploy_list() -> list[str]:
+    text = (UNOQ_DEPLOY_DIR / "DEPLOY_FILES").read_text(encoding="utf-8")
+    return [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+
+def local_code_sha256() -> str:
+    """手元の DEPLOY_FILES の code_sha256（detector.py の H 行と同じ計算）。"""
+    _, m4_infer, _ = analysis_modules()
+    return m4_infer.code_sha256(UNOQ_DEPLOY_DIR / n for n in deploy_list())
+
+
+def expected_unoq() -> dict:
+    """detector.py の H 行と照らす値（fixed_eval の 0038 の定数）。"""
+    fixed_eval, _, features_np = analysis_modules()
+    if fixed_eval.M4_CONFIG is None or fixed_eval.M4_MODEL is None:
+        raise SystemExit("fixed_eval.M4_CONFIG・M4_MODEL がまだありません")
+    model = m4_model_fields(fixed_eval.M4_MODEL)
+    return {
+        "m4_config": fixed_eval.M4_CONFIG,
+        "model": model,
+        "code_sha256": local_code_sha256(),
+        "feature_set": features_np.FEAT82_SET,
+        "feature_names": list(features_np.FEAT82_NAMES),
+    }
+
+
+def detector_command(args: list[str]) -> str:
+    """ssh で UNO Q に渡す文字列（0040 決定 3 の env、python3 -u -B）。"""
+    return (
+        f"cd {UNOQ_DEVICE_DIR} && exec {UNOQ_ENV} python3 -u -B detector.py "
+        + " ".join(shlex.quote(x) for x in args)
+    )
+
+
+def detector_args(device, feat, no_rpc, exp, mode="--live") -> list[str]:
+    out = [mode]
+    if mode == "--live":
+        out += ["--device", device]
+    if feat:
+        out.append("--feat")
+    if no_rpc:
+        out.append("--no-rpc")
+    return out + [
+        "--expect-config",
+        exp["m4_config"],
+        "--expect-sha256",
+        exp["model"]["sha256"],
+    ]
+
+
+def unoq_detector_argv(host: str, args: list[str]) -> list[str]:
+    """detector.py を ssh で起動する argv。テストで差し替える口。"""
+    return ["ssh", *SSH_OPTS, host, detector_command(args)]
+
+
+def led_off_argv(host: str) -> list[str]:
+    """マトリクスを消す（led_check.py off。mcu_rpc で zm_set_state(0)）。"""
+    return [
+        "ssh",
+        *SSH_OPTS,
+        host,
+        f"python3 -B {UNOQ_DEVICE_DIR}/led_check.py off",
+    ]
+
+
+def rtt_argv(host: str) -> list[str]:
+    """往復時間を測る ssh（cat は標準入力を返すだけ。ファイルを書かない）。"""
+    return ["ssh", *SSH_OPTS, host, "exec cat"]
+
+
+def busy_check_argv(host: str) -> list[str]:
+    """記録の経路（arecord・pw-record）が動いていないかを読む（0028 決定 3）。
+    どちらかが動いていれば終了コード 0、どちらも無ければ 1。"""
+    return [
+        "ssh",
+        *SSH_OPTS,
+        host,
+        "exec sh -c 'pgrep -x arecord || pgrep -x pw-record'",
+    ]
+
+
+def swap_check_argv(host: str) -> list[str]:
+    """スワップの一覧を読む（plan #47 の Q11。読むだけ）。"""
+    return ["ssh", *SSH_OPTS, host, "exec cat /proc/swaps"]
+
+
+def _run_check(argv, timeout):
+    try:
+        return subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    except OSError:
+        return None
+
+
+def busy_error(host: str) -> str | None:
+    r = _run_check(busy_check_argv(host), UNOQ_CHECK_TIMEOUT_S)
+    if r is None:
+        return "UNO Q の上の記録の経路を確かめられませんでした。始めません"
+    if r.returncode == 0:
+        return (
+            "UNO Q の上で arecord か pw-record が動いています（記録の経路と"
+            "検出器を同時に動かさない。docs/decisions/0028 決定 3）。始めません"
+        )
+    if r.returncode != 1:
+        return f"UNO Q の上の記録の経路を確かめられませんでした（終了コード {r.returncode}）。始めません"
+    return None
+
+
+def swap_error(host: str) -> str | None:
+    """ディスクのスワップがあれば止める（zram はメモリの中なので可）。"""
+    r = _run_check(swap_check_argv(host), UNOQ_CHECK_TIMEOUT_S)
+    if r is None or r.returncode != 0:
+        return "UNO Q のスワップを確かめられませんでした。始めません"
+    lines = [ln.split() for ln in r.stdout.splitlines()[1:] if ln.strip()]
+    disk = [p[0] for p in lines if p and not p[0].startswith("/dev/zram")]
+    if disk:
+        return (
+            "UNO Q にディスクのスワップがあります（メモリの音声がディスクに出る"
+            f"経路。人に渡す）: {', '.join(disk)}。始めません"
+        )
+    return None
+
+
+def led_off(host: str) -> str | None:
+    """消灯を 1 回送る。失敗の理由か None。"""
+    r = _run_check(led_off_argv(host), UNOQ_LED_OFF_TIMEOUT_S)
+    if r is None:
+        return f"消灯を送れませんでした（{UNOQ_LED_OFF_TIMEOUT_S:g} 秒以内に終わらない・起動できない）"
+    if r.returncode != 0:
+        return f"消灯を送れませんでした（終了コード {r.returncode}: {r.stderr.strip()[-200:]}）"
+    return None
+
+
+def confirm_matrix_off() -> bool:
+    """--no-rpc のとき: マトリクスが消えていることを人が目で確かめて Enter。
+    tty が無ければ偽（始めない）。"""
+    if not sys.stdin.isatty():
+        return False
+    try:
+        input("マトリクスが消えていることを目で確かめてから続ける（Enter）: ")
+    except EOFError:
+        return False
+    return True
+
+
+def measure_rtt(host: str, n: int, discard: int) -> dict:
+    """同じ宛先へ ssh で cat を開き、1 行を書いて同じ行が返るまでを n 回
+    測る（最初の discard 回は捨てる）。{"n", "median_ms", "min_ms",
+    "max_ms"} か {"error"}。音声は流さない。"""
+    try:
+        p = subprocess.Popen(
+            rtt_argv(host),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as e:
+        return {"error": f"起動できない: {e}"}
+    samples = []
+    buf = b""
+    try:
+        fd = p.stdout.fileno()
+        for i in range(n):
+            msg = f"zm-rtt {i}\n".encode()
+            t0 = time.monotonic()
+            p.stdin.write(msg)
+            p.stdin.flush()
+            deadline = t0 + RTT_TIMEOUT_S
+            while msg not in buf:
+                left = deadline - time.monotonic()
+                if left <= 0 or not select.select([fd], [], [], left)[0]:
+                    return {"error": f"{RTT_TIMEOUT_S:g} 秒以内に返らない"}
+                d = os.read(fd, 4096)
+                if not d:
+                    return {"error": "途中で閉じた"}
+                buf += d
+            buf = buf.split(msg, 1)[1]
+            if i >= discard:
+                samples.append((time.monotonic() - t0) * 1000.0)
+    except (OSError, ValueError) as e:
+        return {"error": f"{type(e).__name__}"}
+    finally:
+        try:
+            p.stdin.close()
+        except Exception:
+            pass
+        try:
+            p.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            p.wait()
+        try:
+            p.stdout.close()
+        except Exception:
+            pass
+    if not samples:
+        return {"error": "測れた回が無い"}
+    return {
+        "n": len(samples),
+        "median_ms": round(statistics.median(samples), 3),
+        "min_ms": round(min(samples), 3),
+        "max_ms": round(max(samples), 3),
+    }
+
+
+def _json_ok(v) -> bool:
+    """H・E の値は数・文字列・真偽・文字列の配列だけ。"""
+    if isinstance(v, (bool, int, float, str)):
+        return True
+    return isinstance(v, list) and all(isinstance(x, str) for x in v)
+
+
+def parse_detector_line(line: str):
+    """detector.py の標準出力の 1 行。形が違えば None。
+    ("H", dict) / ("E", dict) / ("D", w, t, prob_text, positive, led) /
+    ("T", w, proc_us, lat_us, queue, backlog) / ("F", w, [値の文字列 82])。"""
+    kind, _, rest = line.partition(" ")
+    if kind in ("H", "E"):
+        try:
+            obj = json.loads(rest)
+        except ValueError:
+            return None
+        if not isinstance(obj, dict) or not all(
+            isinstance(k, str) and _json_ok(v) for k, v in obj.items()
+        ):
+            return None
+        return (kind, obj)
+    f = rest.split(" ")
+    try:
+        if kind == "D" and len(f) == 5:
+            w, t, pos, led = int(f[0]), int(f[1]), int(f[3]), int(f[4])
+            p = float(f[2])
+            if not (0.0 <= p <= 1.0) or pos not in (0, 1) or led not in (1, 2):
+                return None
+            return ("D", w, t, f[2], pos, led)
+        if kind == "T" and len(f) == 5:
+            v = [int(x) for x in f]
+            if any(x < 0 for x in v[1:]):
+                return None
+            return ("T", *v)
+        if kind == "F" and len(f) == 1 + UNOQ_N_FEAT:
+            w = int(f[0])
+            for x in f[1:]:
+                if not math.isfinite(float(x)):
+                    return None
+            return ("F", w, f[1:])
+    except ValueError:
+        return None
+    return None
+
+
+class DetectorStream:
+    """ssh の子（detector.py）。標準入力は PIPE（閉じると検出器が止まる）。
+    標準出力を行に分け、受けた時刻（PC の単調時計）を付けて返す。標準エラー
+    は daemon のスレッドで末尾 8 行だけ持つ（音声ではない）。"""
+
+    def __init__(self, argv: list[str]):
+        self.argv = argv
+        self.proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        self.fd = self.proc.stdout.fileno()
+        self.eof = False
+        self._buf = b""
+        self.tail = collections.deque(maxlen=8)
+        self._err = threading.Thread(target=self._read_stderr, daemon=True)
+        self._err.start()
+        # ハートビート（標準入力に 0.5 秒ごとに 1 バイト）。書けなくなったら
+        # （ssh が落ちた）数えて止める。記録は止めない（EOF で child-exit になる）
+        self.hb_sent = 0
+        self.hb_errors = 0
+        self._stdin_lock = threading.Lock()
+        self._hb_stop = threading.Event()
+        self._hb = threading.Thread(target=self._heartbeat, daemon=True)
+        self._hb.start()
+
+    def _heartbeat(self) -> None:
+        while not self._hb_stop.wait(UNOQ_HEARTBEAT_S):
+            with self._stdin_lock:
+                if self.proc.stdin.closed:
+                    return
+                try:
+                    self.proc.stdin.write(UNOQ_HEARTBEAT_BYTE)
+                    self.proc.stdin.flush()
+                    self.hb_sent += 1
+                except (OSError, ValueError):
+                    self.hb_errors += 1
+                    return
+
+    def _read_stderr(self) -> None:
+        try:
+            for raw in self.proc.stderr:
+                self.tail.append(raw.decode("utf-8", "replace").rstrip("\r\n"))
+        except (OSError, ValueError):
+            pass
+
+    def lines(self, timeout: float) -> list[tuple[str, float]]:
+        if self.eof:
+            return []
+        if not select.select([self.fd], [], [], timeout)[0]:
+            return []
+        data = os.read(self.fd, 65536)
+        now = time.monotonic()
+        if not data:
+            self.eof = True
+            return []
+        self._buf += data
+        *done, self._buf = self._buf.split(b"\n")
+        return [(d.decode("utf-8", "replace"), now) for d in done]
+
+    def stderr_tail(self) -> str:
+        self._err.join(timeout=0.5)
+        return "\n".join(f"  {s}" for s in self.tail) or "  （なし）"
+
+    def close_stdin(self) -> None:
+        """ハートビートを止めてから標準入力を閉じる（検出器は EOF で止まる）。"""
+        self._hb_stop.set()
+        with self._stdin_lock:
+            try:
+                self.proc.stdin.close()
+            except Exception:
+                pass
+        self._hb.join(timeout=1.0)
+
+    def _killpg(self, sig) -> None:
+        try:
+            os.killpg(self.proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    def stop(self, on_line) -> None:
+        """標準入力を閉じ → E 行と EOF を最長 UNOQ_DRAIN_S 秒読み切る → 残れば
+        プロセスグループに SIGTERM → UNOQ_TERM_WAIT_S 秒で SIGKILL。"""
+        self.close_stdin()
+        end = time.monotonic() + UNOQ_DRAIN_S
+        while not self.eof and time.monotonic() < end:
+            try:
+                for ln, t in self.lines(0.05):
+                    on_line(ln, t)
+            except (OSError, ValueError):
+                break
+        if self.proc.poll() is None:
+            self._killpg(signal.SIGTERM)
+            try:
+                self.proc.wait(timeout=UNOQ_TERM_WAIT_S)
+            except subprocess.TimeoutExpired:
+                self._killpg(signal.SIGKILL)
+                self.proc.wait()
+        try:
+            self.proc.stdout.close()
+        except Exception:
+            pass
+        self._err.join(timeout=1.0)
+
+
+def _quantiles(values) -> dict | None:
+    """中央値・95 パーセンタイル（numpy.percentile の既定と同じ線形補間）・最大。"""
+    v = sorted(values)
+    if not v:
+        return None
+    pos = 0.95 * (len(v) - 1)
+    lo = int(math.floor(pos))
+    hi = min(lo + 1, len(v) - 1)
+    p95 = v[lo] + (v[hi] - v[lo]) * (pos - lo)
+    return {
+        "n": len(v),
+        "median": round(statistics.median(v), 3),
+        "p95": round(p95, 3),
+        "max": round(v[-1], 3),
+    }
+
+
+def _med_max(values) -> dict | None:
+    v = list(values)
+    if not v:
+        return None
+    return {"median": round(statistics.median(v), 3), "max": round(max(v), 3)}
+
+
+def window_loss(w: list[int]) -> tuple[int, float]:
+    """(取りこぼした窓の数の推定, 割合)。window_t_ms の飛び（250 ms の 1.5 倍
+    以上）から（check_session.analyze と同じ数え方）。"""
+    lost = 0
+    for a, b in zip(w, w[1:]):
+        d = b - a
+        if d >= 1.5 * UNOQ_HOP_MS:
+            lost += round(d / UNOQ_HOP_MS) - 1
+    n = len(w)
+    return lost, (lost / (n + lost) if n + lost else 0.0)
+
+
+def rx_delays(rows, offset_ms: float, rtt_max_ms) -> tuple[list, list]:
+    """(delay_meas の並び, delay_upper の並び)。rows は (window_t_ms, rx_ms)。
+    delay_meas = (rx_ms − offset) − (window_t_ms + 1000)、delay_upper =
+    delay_meas + rtt_max_ms（往復時間の全体を片方向の遅れの推定の上限とする）。"""
+    meas = [(rx - offset_ms) - (w + UNOQ_WINDOW_MS) for w, rx in rows]
+    upper = [] if rtt_max_ms is None else [m + rtt_max_ms for m in meas]
+    return meas, upper
+
+
+class UnoqSession:
+    """装置のセッション（fw = unoq-detector）のファイル（docs/data-schema.md）。
+
+    detect.csv・feat.csv の値は D・F 行のまま（装置の時計）。detect_rx.csv は
+    PC の受信時刻（rx_ms、最初の D 行を受けた時刻からの PC の単調時計の ms）
+    と T 行の値だけ（prob・positive・led を含めない）。events.csv の t_ms は
+    キーを受けた PC の時刻を offset で装置の時計に直した値。"""
+
+    def __init__(self, out, subject, cond, position, band, feat):
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.dir = out / f"{stamp}_{subject}_{cond}"
+        # Session と同じく out の直下にだけ作る（docs/decisions/0007）
+        if self.dir.resolve().parent != out.resolve():
+            sys.exit(
+                f"セッションフォルダが {out} の直下になりません: {self.dir}"
+            )
+        self.dir.mkdir(parents=True, exist_ok=False)
+        self._files = []
+        self.detect_w = self._csv(
+            "detect.csv", ["t_ms", "window_t_ms", "positive", "prob", "led"]
+        )
+        self.rx_w = self._csv("detect_rx.csv", DETECT_RX_HEADER)
+        self.ev_w = self._csv("events.csv", ["t_ms", "label", "note"])
+        self.ev_f = self._files[-1]
+        self.feat_w = (
+            self._csv(
+                "feat.csv",
+                ["t_ms", "window_t_ms"] + [f"f{i}" for i in range(UNOQ_N_FEAT)],
+            )
+            if feat
+            else None
+        )
+        self._lock = threading.Lock()
+        self._closed = False
+        self.meta = {
+            "subject": subject,
+            "cond": cond,
+            "position": position,
+            "band": band,
+            "firmware_sha": git_sha(),
+            "sample_rates": {
+                "imu_hz": 0,
+                "audio_hz": THROAT_RATE_HZ,
+                "analog_hz": 0,
+            },
+            "sensors": [
+                {
+                    "id": "throat",
+                    "part": THROAT_PART,
+                    "iface": THROAT_MEAL_IFACE,
+                }
+            ],
+            "notes": "",
+            "fw": UNOQ_FW,
+        }
+
+    def _csv(self, name, header):
+        f = open(self.dir / name, "w", newline="", encoding="utf-8")
+        w = csv.writer(f)
+        w.writerow(header)
+        self._files.append(f)
+        return w
+
+    def window(self, w, t, prob_text, pos, led, feat_vals) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self.detect_w.writerow([t, w, pos, prob_text, led])
+            if self.feat_w is not None and feat_vals is not None:
+                self.feat_w.writerow([t, w, *feat_vals])
+
+    def timing(self, w, rx_ms, proc, lat, q, backlog) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self.rx_w.writerow([w, rx_ms, proc, lat, q, backlog])
+
+    def mark(self, t_ms: int, label: str, note: str = "") -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self.ev_w.writerow([t_ms, label, note])
+            self.ev_f.flush()
+            print(f"  [{t_ms} ms] {label} {note}")
+
+    def close(self, extra: dict) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            for f in self._files:
+                f.close()
+        self.meta.update(extra)
+        (self.dir / "meta.json").write_text(
+            json.dumps(self.meta, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"saved: {self.dir}")
+
+
+class UnoqReceiver:
+    """detector.py の行を受けてセッションに書く（plan #47 の 7 節）。
+
+    時刻: PC の時刻はすべて pc_ms = 最初の D 行を受けた時刻からの PC の単調時計
+    の ms。offset = それまでの全 D 行の (rx_ms − t_ms) の最小（下側の包絡）。
+    マーカーの t_ms = キーを受けた pc_ms − offset（そのときの値）。最初の D 行
+    より前のキーは記録しない。F 行は同じ窓の D 行を待って feat.csv に書く
+    （t_ms は D 行の t_ms）。T 行は直前の D 行と同じ窓のときだけ detect_rx.csv
+    に書く。形の違う行・順の違う行は数えて書かない（bad_lines）。"""
+
+    def __init__(self, a):
+        self.a = a
+        self.st = {
+            "bad": 0,
+            "head": None,
+            "end": None,
+            "pending_f": None,
+            "d": {},  # window_t_ms → rx_ms（T 行を待つ間）
+            "rows": [],  # (window_t_ms, t_ms, rx_ms)
+            "timing": [],  # (proc_us, lat_us, queue, backlog)
+            "offset": None,
+            "t0": None,
+            "last_d": None,
+            "gap_open": False,
+            "gaps": [],
+            "marks": [],  # キーを押した時点の offset
+            "sess": None,
+            "lock": threading.Lock(),
+        }
+
+    def pc_ms(self, now: float) -> int:
+        return int(round((now - self.st["t0"]) * 1000))
+
+    def on_line(self, line: str, now: float) -> None:
+        st, a = self.st, self.a
+        p = parse_detector_line(line)
+        if p is None:
+            st["bad"] += 1
+            return
+        kind = p[0]
+        if kind == "H":
+            if st["head"] is None:
+                st["head"] = (p[1], now)
+            else:
+                st["bad"] += 1
+            return
+        if kind == "E":
+            st["end"] = p[1]
+            return
+        if st["head"] is None or st["end"] is not None:
+            st["bad"] += 1
+            return
+        if kind == "F":
+            if not a.feat or st["pending_f"] is not None:
+                st["bad"] += 1
+            st["pending_f"] = (p[1], p[2])
+            return
+        if kind == "D":
+            _, w, t, prob_text, pos, led = p
+            f = st["pending_f"]
+            st["pending_f"] = None
+            if a.feat and (f is None or f[0] != w):
+                st["bad"] += 1
+                f = None
+            if st["rows"] and w <= st["rows"][-1][0]:
+                st["bad"] += 1
+                return
+            with st["lock"]:
+                if st["t0"] is None:
+                    st["t0"] = now
+                rx = self.pc_ms(now)
+                d = rx - t
+                st["offset"] = (
+                    d if st["offset"] is None else min(st["offset"], d)
+                )
+            if st["gap_open"]:
+                gap = now - st["last_d"]
+                st["gaps"].append(gap)
+                st["gap_open"] = False
+                print(f"  窓の行が届き直した（途切れ {gap:.1f} 秒）")
+            st["last_d"] = now
+            st["rows"].append((w, t, rx))
+            st["d"] = {w: rx}
+            if st["sess"] is None:
+                st["sess"] = UnoqSession(
+                    RAW_DIR, a.subject, a.cond, a.position, a.band, a.feat
+                )
+                print(f"窓が届き始めた（{st['sess'].dir.name}）")
+            st["sess"].window(w, t, prob_text, pos, led, f[1] if f else None)
+            return
+        if kind == "T":
+            _, w, proc, lat, q, backlog = p
+            rx = st["d"].pop(w, None)
+            if rx is None or st["sess"] is None:
+                st["bad"] += 1
+                return
+            st["timing"].append((proc, lat, q, backlog))
+            st["sess"].timing(w, rx, proc, lat, q, backlog)
+
+    def check_gap(self, now: float) -> None:
+        """D 行が UNOQ_LINE_GAP_S 秒以上届かなければ 1 回だけ表示する（陽性は
+        表示しない）。"""
+        st = self.st
+        if (
+            st["last_d"] is not None
+            and not st["gap_open"]
+            and now - st["last_d"] >= UNOQ_LINE_GAP_S
+        ):
+            st["gap_open"] = True
+            print(f"  窓の行が {now - st['last_d']:.0f} 秒届いていない")
+
+    def on_key(self, ch: str, note: str = "", now: float | None = None) -> None:
+        st = self.st
+        now = time.monotonic() if now is None else now
+        with st["lock"]:
+            if st["sess"] is None or st["offset"] is None:
+                print("  窓がまだ届いていない。記録していない")
+                return
+            off = st["offset"]
+            t_dev = int(round(self.pc_ms(now) - off))
+            st["marks"].append(off)
+        st["sess"].mark(t_dev, ch, note)
+
+
+def unoq_arg_error(a, port_explicit: bool) -> str | None:
+    """--unoq-detector の引数の検査。始めない理由の文か None。"""
+    if a.throat is not None:
+        return "--unoq-detector と --throat は同時に使えません"
+    if a.indicator is not None:
+        return "--unoq-detector では --indicator を使いません"
+    if port_explicit:
+        return "--unoq-detector では --port を使いません（装置は ssh でつなぐ）"
+    if a.subject != "self":
+        return "--unoq-detector は subject self のみ（FEAT は self だけ。docs/decisions/0037）"
+    if a.cond == "meal" and not (a.feat and a.no_rpc):
+        return (
+            "--unoq-detector の meal は --feat と --no-rpc の両方が要ります"
+            "（docs/decisions/0037 の 4・5、plan #47 の Q13）"
+        )
+    if not re.fullmatch(THROAT_HOST_RE, a.unoq_host) or a.unoq_host == "local":
+        return f"--unoq-host に使えない値です: {a.unoq_host!r}"
+    if not re.fullmatch(THROAT_DEVICE_RE, a.unoq_device):
+        return (
+            "--unoq-device は hw:CARD=<名前>[,DEV=<番号>] / hw:<番号>[,<番号>]"
+            f"（plughw: も可）だけ: {a.unoq_device!r}"
+        )
+    return None
+
+
+def header_error(
+    h: dict, exp: dict, feat: bool, no_rpc: bool, input_kind: str = "live"
+) -> str | None:
+    """H 行の値と期待の照合。違えば理由の文。"""
+    if h.get("fw") != UNOQ_FW:
+        return f"H の fw が {UNOQ_FW} ではありません: {h.get('fw')!r}"
+    if h.get("m4_config") != exp["m4_config"]:
+        return "H の m4_config が fixed_eval.M4_CONFIG（0038）と違います"
+    if h.get("model_sha256") != exp["model"]["sha256"]:
+        return "H の model_sha256 が fixed_eval.M4_MODEL（0038）と違います"
+    if h.get("code_sha256") != exp["code_sha256"]:
+        return (
+            "H の code_sha256 が手元の DEPLOY_FILES と違います"
+            "（cmake --build build-unoq --target deploy-unoq してから。UNO Q の"
+            " ~/zaitaku-mealpace-device/ に一覧の外の .py・.npy・.npz があれば人が消す）"
+        )
+    if h.get("input") != input_kind:
+        return f"H の input が {input_kind} ではありません: {h.get('input')!r}"
+    if input_kind == "live" and (
+        h.get("heartbeat_s") != UNOQ_HEARTBEAT_S
+        or h.get("heartbeat_timeout_s") != UNOQ_HEARTBEAT_TIMEOUT_S
+    ):
+        return (
+            "H の heartbeat_s・heartbeat_timeout_s が record.py と違います"
+            f"（{UNOQ_HEARTBEAT_S:g}・{UNOQ_HEARTBEAT_TIMEOUT_S:g} 秒。deploy-unoq してから）"
+        )
+    if bool(h.get("rpc")) == bool(no_rpc):
+        return "H の rpc が --no-rpc の指定と合いません"
+    if feat and (
+        h.get("feature_set") != exp["feature_set"]
+        or h.get("feature_names") != exp["feature_names"]
+    ):
+        return "H の feature_set・feature_names が FEAT の 82 次元（plan #47 の 5 節）と違います"
+    if not feat and "feature_names" in h:
+        return "--feat を付けていないのに H に feature_names があります"
+    return None
+
+
+def run_unoq(a, port_explicit: bool) -> None:
+    """--unoq-detector の記録（plan #47 の 7 節）。異常は sys.exit で終わる。"""
+    if os.name == "nt":
+        sys.exit("--unoq-detector は POSIX のみ")
+    err = unoq_arg_error(a, port_explicit)
+    if err:
+        sys.exit(err)
+    host, device = a.unoq_host, a.unoq_device
+    exp = expected_unoq()
+    for check in (asoundrc_error, busy_error, swap_error):
+        err = check(host)
+        if err:
+            sys.exit(err)
+    mixer, mixer_error = read_mixer(host, device)
+    if a.no_rpc:
+        # 前の検出器が最後の状態を残していても消す（plan #47 の 7 節）
+        err = led_off(host)
+        if err:
+            sys.exit(f"{err}。記録を始めません")
+        if not confirm_matrix_off():
+            sys.exit(
+                "マトリクスが消えていることの確かめ（Enter）ができません"
+                "（tty が無い）。記録を始めません"
+            )
+    rtt_start = measure_rtt(host, RTT_START_N, RTT_DISCARD)
+    if "error" in rtt_start:
+        sys.exit(
+            f"ssh の往復時間を測れませんでした（{rtt_start['error']}）。記録を始めません"
+        )
+    signal.signal(signal.SIGTERM, raise_system_exit)
+    dargs = detector_args(device, a.feat, a.no_rpc, exp)
+    argv = unoq_detector_argv(host, dargs)
+    t_launch = time.monotonic()
+    try:
+        stream = DetectorStream(argv)
+    except OSError as e:
+        sys.exit(f"検出器を起動できません（記録を始めません）: {e}")
+
+    recv = UnoqReceiver(a)
+    st = recv.st
+    on_line, on_key = recv.on_line, recv.on_key
+
+    # H 行を待つ。来なければ始めない（フォルダを作らない）。H の後に同じ読み
+    # 取りで届いた行は、照合が通ってから渡す
+    why = ""
+    held = []
+    try:
+        deadline = t_launch + UNOQ_HEADER_WAIT_S
+        while st["head"] is None and not stream.eof:
+            for ln, t in stream.lines(0.05):
+                if st["head"] is None:
+                    on_line(ln, t)
+                else:
+                    held.append((ln, t))
+            if st["head"] is None and time.monotonic() >= deadline:
+                why = f"H 行が {UNOQ_HEADER_WAIT_S:g} 秒以内に届きませんでした"
+                break
+        if st["head"] is None and not why:
+            why = "検出器が H 行の前に終わりました"
+        if st["head"] is not None:
+            why = header_error(st["head"][0], exp, a.feat, a.no_rpc) or ""
+    except KeyboardInterrupt:
+        why = "H 行を待つ間に中断しました"
+    if why:
+        stream.stop(lambda ln, t: None)
+        led_off(host)
+        sys.exit(
+            f"{why}。記録を始めません（子の終了コード {stream.proc.returncode}）\n"
+            f"子の標準エラーの末尾:\n{stream.stderr_tail()}"
+        )
+    head, t_head = st["head"]
+    print(
+        f"検出器: {host}（{device}）、FEAT {'あり' if a.feat else 'なし'}、"
+        f"RPC {'なし（マトリクスは消灯のまま）' if a.no_rpc else 'あり'}"
+    )
+
+    is_tty = sys.stdin.isatty()
+    tty_mode = TtyMode(sys.stdin.fileno()) if is_tty else None
+    if tty_mode is not None:
+        atexit.register(tty_mode.restore)
+    if is_tty:
+        print("recording... keys: s t c n q b o / Ctrl-C to stop")
+    else:
+        print("recording... tty が無いのでマーカー入力は無効")
+    thread = None
+    stop = "error"
+    deadline = None
+    try:
+        if tty_mode is not None:
+            tty_mode.enter()
+            reader = KeyReader(
+                sys.stdin.fileno(),
+                tty_mode,
+                lambda ch: on_key(ch) if ch in "stcnqb" else None,
+                lambda note: on_key("o", note),
+            )
+            thread = threading.Thread(target=reader.run, daemon=True)
+            thread.start()
+        for ln, t in held:
+            on_line(ln, t)
+        first_deadline = time.monotonic() + UNOQ_FIRST_WINDOW_WAIT_S
+        while True:
+            now = time.monotonic()
+            if st["sess"] is None:
+                if now >= first_deadline:
+                    stop = "no-window"
+                    break
+            elif deadline is None and a.duration > 0:
+                deadline = st["t0"] + a.duration
+                print(f"  --duration {a.duration:g} 秒で自動終了する")
+            if deadline is not None and now >= deadline:
+                stop = "duration"
+                break
+            for ln, t in stream.lines(0.05):
+                on_line(ln, t)
+            if stream.eof:
+                stop = "child-exit"
+                break
+            recv.check_gap(time.monotonic())
+    except KeyboardInterrupt:
+        stop = "interrupt"
+    except SystemExit:
+        stop = "interrupt"  # SIGTERM
+        raise
+    finally:
+        stream.stop(on_line)
+        if tty_mode is not None:
+            tty_mode.restore()
+            if thread is not None:
+                thread.join(timeout=1.0)
+        if st["end"] is None:
+            # E 行が来なかった（検出器が後始末を通らなかったおそれ）。消灯を送る
+            off_err = led_off(host)
+            if off_err:
+                print(f"  後始末の消灯: {off_err}")
+        sess = st["sess"]
+        if sess is not None:
+            finish_unoq(
+                a,
+                st,
+                sess,
+                stream,
+                exp,
+                head,
+                t_head - t_launch,
+                argv,
+                rtt_start,
+                mixer,
+                mixer_error,
+                stop,
+                host,
+                device,
+            )
+    if st["sess"] is None:
+        sys.exit(
+            f"最初の窓の行が届きませんでした（{stop}）。記録を始めません"
+            f"（子の終了コード {stream.proc.returncode}）\n"
+            f"子の標準エラーの末尾:\n{stream.stderr_tail()}"
+        )
+    if stop == "child-exit":
+        sys.exit(
+            "警告: 検出器が記録の途中で終わりました"
+            f"（終了コード {stream.proc.returncode}、標準エラーの末尾）\n"
+            f"{stream.stderr_tail()}"
+        )
+
+
+def finish_unoq(
+    a,
+    st,
+    sess,
+    stream,
+    exp,
+    head,
+    wait_s,
+    argv,
+    rtt_start,
+    mixer,
+    mixer_error,
+    stop,
+    host,
+    device,
+) -> None:
+    """終わりの往復時間・集計・meta.json・表示（陽性・prob・led は出さない）。"""
+    if st["gap_open"] and st["last_d"] is not None:
+        st["gaps"].append(time.monotonic() - st["last_d"])
+    rtt_end = measure_rtt(host, RTT_END_N, 0)
+    maxes = [r["max_ms"] for r in (rtt_start, rtt_end) if "max_ms" in r]
+    rtt_max = max(maxes) if maxes else None
+    rows = st["rows"]
+    offset = st["offset"]
+    meas, upper = rx_delays([(w, rx) for w, _, rx in rows], offset, rtt_max)
+    e2e = [t - (w + UNOQ_WINDOW_MS) for w, t, _ in rows]
+    proc = [p / 1000.0 for p, _, _, _ in st["timing"]]
+    lat = [x / 1000.0 for _, x, _, _ in st["timing"]]
+    lost, loss_rate = window_loss([w for w, _, _ in rows])
+    shift = max((m - offset for m in st["marks"]), default=0)
+    end = st["end"] or {}
+    extra = {
+        "window_ms": UNOQ_WINDOW_MS,
+        "hop_ms": UNOQ_HOP_MS,
+        "m4_config": exp["m4_config"],
+        "model": dict(exp["model"]),
+        "unoq_detector": {"header": head, "end": st["end"]},
+        "host": host,
+        "device": device,
+        "remote_command": argv[-1],
+        "mixer": mixer,
+        "first_line_wait_s": round(wait_s, 3),
+        "bad_lines": st["bad"],
+        "stop": stop,
+        "child_returncode": stream.proc.returncode,
+        "rpc": not a.no_rpc,
+        "heartbeat": {
+            "interval_s": UNOQ_HEARTBEAT_S,
+            "timeout_s": UNOQ_HEARTBEAT_TIMEOUT_S,
+            "sent": stream.hb_sent,
+            "write_errors": stream.hb_errors,
+        },
+        "ssh_rtt_ms": {"start": rtt_start, "end": rtt_end, "max_ms": rtt_max},
+        "rx_delay_ms": {"meas": _med_max(meas), "upper": _med_max(upper)},
+        "e2e_ms": _med_max(e2e),
+        "proc_ms": _quantiles(proc),
+        "lat_ms": _quantiles(lat),
+        "queue_max": max((q for _, _, q, _ in st["timing"]), default=0),
+        "backlog_max": max((b for _, _, _, b in st["timing"]), default=0),
+        "clock_offset_ms": offset,
+        "marker_offset_shift_max_ms": shift,
+        "line_gaps": {
+            "n": len(st["gaps"]),
+            "max_s": round(max(st["gaps"]), 3) if st["gaps"] else 0.0,
+        },
+        "windows": len(rows),
+        "windows_lost": lost,
+    }
+    if a.feat:
+        extra["feature_set"] = exp["feature_set"]
+        extra["feature_names"] = exp["feature_names"]
+    if mixer_error is not None:
+        extra["mixer_error"] = mixer_error
+    sess.close(extra)
+
+    def mm(d, unit="ms"):
+        if not d:
+            return "なし"
+        return f"中央値 {d['median']:.1f} {unit}・最大 {d['max']:.1f} {unit}"
+
+    q = extra["proc_ms"]
+    print(
+        f"検出器: 窓 {len(rows):,}（取りこぼしの推定 {lost}、{100 * loss_rate:.2f}%）"
+        f" / 読めない行 {st['bad']} / 止まり方 {stop}（検出器 {end.get('stop')}）"
+        f" / overrun の行 {end.get('overrun_lines')} / RPC の失敗 {end.get('rpc_errors')}"
+    )
+    print(
+        "  1 ホップの処理 proc_ms: "
+        + (
+            f"中央値 {q['median']:.1f}・95 パーセンタイル {q['p95']:.1f}・最大 {q['max']:.1f} ms"
+            if q
+            else "なし"
+        )
+        + f"（RPC {'あり' if not a.no_rpc else 'なし'}）"
+    )
+    print(
+        f"  受信の遅れ delay_meas {mm(extra['rx_delay_ms']['meas'])}"
+        f" / 推定の上限 delay_upper {mm(extra['rx_delay_ms']['upper'])}"
+        f"（ssh の往復時間の最大 {rtt_max} ms）"
+    )
+    print(
+        f"  窓の終端から行の投入まで e2e_ms {mm(extra['e2e_ms'])}"
+        "（装置の時計。固定の遅れの分だけ小さく出る）"
+    )
+    print(
+        f"  時計: anchor_spread_ms {end.get('anchor_spread_ms')}"
+        f" / clock_drift_min_ms {end.get('clock_drift_min_ms')}"
+        f" / clock_drift_max_ms {end.get('clock_drift_max_ms')}"
+        f" / 行の途切れ {extra['line_gaps']['n']} 回（最長 {extra['line_gaps']['max_s']} 秒）"
+    )
+    if mixer_error is not None:
+        print(f"  ミキサーを読めませんでした（記録は続けた）: {mixer_error}")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("--port", default=os.environ.get("PORT", "/dev/ttyACM0"))
+    # 既定は None（--unoq-detector との排他のために明示を見分ける）。下で PORT
+    # か /dev/ttyACM0 にする
+    ap.add_argument("--port", default=None)
     ap.add_argument("--baud", type=int, default=2000000)
     ap.add_argument("--subject", default=env_default("SUBJECT", "self"))
     ap.add_argument("--cond", default=env_default("COND", "water"))
@@ -1905,11 +2972,47 @@ def main():
         "省けば環境変数 THROAT_DEVICE、無ければ USB は "
         f"{THROAT_DEFAULT_DEVICE}、a2dp は pw-dump から自動で探す。--throat のときだけ効く",
     )
+    ap.add_argument(
+        "--unoq-detector",
+        action="store_true",
+        help="M4 の装置（UNO Q の detector.py）の行を ssh で受けて記録する（#47）。"
+        "--throat・--indicator・--port とは同時に使えない",
+    )
+    ap.add_argument(
+        "--unoq-host",
+        default=THROAT_DEFAULT_HOST,
+        help="--unoq-detector の ssh の宛先（user@host）",
+    )
+    ap.add_argument(
+        "--unoq-device",
+        default=THROAT_DEFAULT_DEVICE,
+        help="--unoq-detector の ALSA の PCM 名（hw / plughw）",
+    )
+    ap.add_argument(
+        "--feat",
+        action="store_true",
+        help="--unoq-detector で FEAT（82 次元）も受けて feat.csv に書く",
+    )
+    ap.add_argument(
+        "--no-rpc",
+        action="store_true",
+        help="--unoq-detector で検出器に --no-rpc を渡す（マトリクスに表示しない。"
+        "起動前に消灯を送り、目で確かめてから始める）",
+    )
     a = ap.parse_args()
+    port_explicit = a.port is not None
+    if a.port is None:
+        a.port = os.environ.get("PORT", "/dev/ttyACM0")
     if a.subject not in ("self", "p1"):
         sys.exit("subject は self か p1")
     if not re.fullmatch(r"[A-Za-z0-9-]+", a.cond):
         sys.exit("cond は英数字とハイフンのみ")
+    if a.unoq_detector:
+        # M4 の装置のセッション（#47）
+        run_unoq(a, port_explicit)
+        return
+    if a.feat or a.no_rpc:
+        sys.exit("--feat・--no-rpc は --unoq-detector のときだけ")
     if a.throat is not None:
         # 咽喉マイクだけのセッション。既定の動作の通り道は変えない
         run_throat(a)

@@ -130,7 +130,7 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
   基板の上の openocd が SWD で書く。`/tmp` は tmpfs で、再起動で消える。音声ではない。10/13 に書き込んだ（10/13 のコミットのスケッチ）。
   書き込みの直後に router の journal に `decoding packet: invalid packet, expected array` が数行出るが、その後の RPC は通る。
 - **Linux 側の配置**: `cmake --build build-unoq --target deploy-unoq`（rsync `--copy-links`。宛先は `-DUNOQ_HOST`、既定 `arduino@unoq.local`）で、
-  `device/unoq/DEPLOY_FILES` の一覧だけを `~/zaitaku-mealpace-device/` に配る（#51 の後は 14 個。下の「推論ランタイムの比較の計測」）。#44 の 9 つ（10/24）: `mcu_rpc.py`、`led_check.py`、`bench_infer.py`、`features_np.py`、
+  `device/unoq/DEPLOY_FILES` の一覧だけを `~/zaitaku-mealpace-device/` に配る（#51 の後は 14 個。下の「推論ランタイムの比較の計測」。#47 で入れ替えて今は別の 14 個。下の「検出器」）。#44 の 9 つ（10/24）: `mcu_rpc.py`、`led_check.py`、`bench_infer.py`、`features_np.py`、
   `mel40_htk_0_4000.npy`、`mel26_htk_0_4000.npy`、`features_np_ref.npz`、`postprocess.py`、`evaluate.py`。うち後ろの 6 つは `analysis/` へのリンクで、
   送る前に先が `analysis/` の直下の普通のファイルであることを確かめる（0035 の追記）。UNO Q の上はどれも普通のファイル。音声のファイルは無い。
   常駐させない（systemd のユニットは無い）。ファイルを書かない。実行は `python3 -B`（`__pycache__` を作らない）:
@@ -213,6 +213,44 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
 - **PD 給電の構成（10/13）**: PD 対応モバイルバッテリー → USB-C→3.5 mm 変換アダプタ（UGREEN CM721。DAC 搭載、PD 60 W パススルー）の PD の入口 → UNO Q。
   SH-12JK はこのアダプタの 3.5 mm に挿す。ALSA では `hw:CARD=Audio`。PC とは Wi-Fi の ssh だけ。この構成で `record.py --throat sh12jk-wired-unoq-usbaudio` の
   60 秒が使わない目安に当たらなかった（docs/log/2026-10-13.md）。
+
+## 検出器（`detector.py`。#47）
+
+- **配る一覧（14 個、10/29〜）**: `mcu_rpc.py`、`led_check.py`、`bench_infer.py`、`features_np.py`、`mel40_htk_0_4000.npy`、`mel26_htk_0_4000.npy`、`features_np_ref.npz`、
+  `postprocess.py`、`evaluate.py`、`detector.py`、`audio_in.py`、`m4_infer.py`、`led_rule.py`、`m4-0038.npz`。`m4_infer.py`・`led_rule.py` は `analysis/` の直下へ、
+  `m4-0038.npz` は `analysis/models/` へのリンク（`deploy-unoq` は `analysis/models/` の直下の `.npz` も受ける）。`bench_runtimes.py` と `cnn_rand0.*` の 4 つは外した
+  （リポジトリには残す。UNO Q の上の古いものは人が 10/29 に `rm` した。`--delete` は使わない）。配った後に `ls -A ~/zaitaku-mealpace-device/` が一覧と一致すること。
+  一覧の外の `.py`・`.npy`・`.npz` が残っていると、H 行の `code_sha256` が PC の値と合わず `record.py` は始めない。
+- **起動**（人が直接打つのは照合だけ。記録は `tools/record.py --unoq-detector` が ssh で起動する）。BLAS のスレッドを 1 つにする 3 つの変数を `env` で渡し
+  （`detector.py` も numpy の import の前に同じ値を置く。0040 決定 3）、`python3 -u -B`（`__pycache__` を作らない）:
+
+  ```
+  ssh arduino@unoq.local 'cd ~/zaitaku-mealpace-device && env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -B detector.py --selftest --expect-config "set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5" --expect-sha256 c786086f069c55c55b27eea860963c3c950c04b728fe65d52bc35a7a4a806d90'
+  ```
+
+  照合は `features_np_ref.npz` との差（1e-5）、im2col の新旧の差（乱数の重み、1e-6）、重みの sha256 と構成。違えば消灯のまま 2 で終わる。10/29 の結果: 参照 2.04e-08、
+  im2col 7.39e-09、一致。版とスレッド数は H 行（`--replay --no-rpc </dev/null` で窓 0 のまま出る）: numpy 2.2.4、`libopenblasp-r0.3.29.so`、スレッド 1。
+- **ライブ**（`--live [--device hw:CARD=Audio,DEV=0] [--feat] [--no-rpc]`）: `arecord` を子プロセスで起動して標準出力のパイプをメモリで読む（`audio_in.py` だけ。出力先は `-` だけ、
+  PCM 名は hw / plughw だけ）。行（H・F・D・T・E）は標準出力に出し、音声・配列は出さない（F 行の 82 次元だけ）。ファイルを書かない。コアダンプを無効にする
+  （`RLIMIT_CORE` 0 と `prctl(PR_SET_DUMPABLE, 0)`。core_pattern がパイプの収集には `RLIMIT_CORE` が効かないため。止められなければ始めない）。
+  ライブ・再生とも、`/proc/swaps` にディスクに出うるスワップ（zram 以外、または `/sys/block/zram*/backing_dev` が `none` でない zram）があれば（読めなくても）始めない
+  （終了コード 2。`record.py` も起動前に `/proc/swaps` の名前を確かめる）。
+  子の `arecord` は exec で dumpable が戻るので、`RLIMIT_CORE` 0（引き継ぐ）だけが効く。そのため `/proc/sys/kernel/core_pattern` がファイルに書く形（先頭が `|` でない。
+  kernel が `RLIMIT_CORE` 0 を守る）のときだけ始める。パイプの形はすべて受けない（終了コード 2、理由の文に core_pattern の値）。UNO Q の実物は `core`
+  （10/29 にメインが読み取りで確かめた。`fs.suid_dumpable` 0、`systemd-coredump` は入っていない、`/sys/block/zram0/backing_dev` は無い = 書き戻しの無い kernel。kernel 7.0.0、systemd 257）。
+- **ハートビート**: `record.py` は検出器の標準入力に 0.5 秒ごとに改行 1 バイトを書く。検出器（ライブ）は 2.0 秒何も届かなければ消灯して `heartbeat-timeout`（終了コード 6）で止まる。
+  UNO Q の sshd は `ClientAliveInterval` が既定の 0（`/etc/ssh/sshd_config` でコメントのまま。`sshd -T` は sudo なしでは読めない）で切断に気づかないので、それに頼らない。
+  10/29 の試験: PC の Wi-Fi を切ってから 2 秒で消えた。
+- **止め方と消灯**: 標準入力の EOF（`record.py` が閉じる）、SIGTERM・SIGHUP、ハートビートの時間切れ、標準出力の詰まり（キューが 2 秒分を超えたら `stdout-stall`、4）、
+  `overrun` の行（3）で止まり、どれも消灯を送ってから RPC を閉じる。窓の結果が 1.0 秒出なければ消灯を 1 回送る。`kill -9`・電源断では消灯を送れず、MCU は最後の状態を保持する
+  （MCU は時間切れを持たない）。そのとき `record.py` は E 行が来なかったことを見て `led_check.py off` を送る（10/29 の試験で消えた）。
+- **再生モード**（一致の確かめだけ）: `--replay --no-rpc [--feat]` は標準入力から S16_LE・48 kHz・2 ch を読む（ファイルを開かない）。PC から
+  `.venv/bin/python tools/unoq_replay_check.py data/raw/<学習用 meal> --feat`（M4-TRAIN の学習用 `meal` だけ。集計だけを出し、どこにもファイルを書かない）。
+  10/29: `20261026-190244_self_meal` で窓 3979、`prob` の差の最大 1.61e-07、`positive`・`led` の不一致 0、FEAT の差の最大 5.00e-08。
+- **確かめ方（読み取り）**: 記録の前の時刻を控え、後で `find ~ /tmp /var/tmp -xdev -type f -newermt "<時刻>"` が 0 件（配ったファイルは rsync が日時を保つので出ない）、
+  音声の拡張子の `find`（上の節）が 0 件、`~/zaitaku-mealpace-device/` に `__pycache__` が無いこと。スワップは `/usr/sbin/swapon --show`（ユーザーの PATH に無い）か
+  `cat /proc/swaps` で zram だけ（`record.py` は起動前に `/proc/swaps` を読み、zram 以外があれば始めない）。コアダンプは `ls /var/lib/systemd/coredump/ /var/crash/` が空
+  （10/29: どちらも空・無し）。
 
 ## 構成 A は使わない。構成 B も記録には使わない
 

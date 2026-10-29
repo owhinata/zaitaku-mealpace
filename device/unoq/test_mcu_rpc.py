@@ -390,7 +390,20 @@ NUMPY_ALLOWED = {
     "bench_infer.py",
     "bench_runtimes.py",
     "postprocess.py",
+    "detector.py",
+    "m4_infer.py",
 }
+# subprocess を import してよい配るファイル（arecord を起動する入力のモジュール
+# だけ。#47、plan #47 の 6.3）
+SUBPROCESS_ALLOWED = {"audio_in.py"}
+# os.environ に書いてよいのは detector.py の先頭（numpy の import より前）の
+# この 3 つの代入（値 "1"）だけ（docs/decisions/0040 決定 3、plan #47 の 6.3）
+ENV_ALLOWED_FILE = "detector.py"
+ENV_ALLOWED_KEYS = (
+    "OPENBLAS_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+)
 # 推論ランタイムのモジュール（Issue #51 の計測だけ）。import してよいのは
 # bench_runtimes.py だけ
 RUNTIME_MODULES = {"onnxruntime", "ai_edge_litert", "pyarmnn", "ncnn"}
@@ -406,21 +419,29 @@ WRITE_ATTRS = {
     "write_bytes",
 }
 EXPECTED_DEPLOY = [
+    "audio_in.py",
     "bench_infer.py",
-    "bench_runtimes.py",
-    "cnn_rand0.ncnn.param",
-    "cnn_rand0.ncnn.weights",
-    "cnn_rand0.onnx",
-    "cnn_rand0.tflite",
+    "detector.py",
     "evaluate.py",
     "features_np.py",
     "features_np_ref.npz",
     "led_check.py",
+    "led_rule.py",
+    "m4-0038.npz",
+    "m4_infer.py",
     "mcu_rpc.py",
     "mel26_htk_0_4000.npy",
     "mel40_htk_0_4000.npy",
     "postprocess.py",
 ]
+# analysis/models/ を指すリンクは .npz だけ（重み。plan #47 の Q3）
+MODELS = ANALYSIS / "models"
+
+
+def imported_modules_of(node):
+    if isinstance(node, ast.Import):
+        return {a.name.split(".")[0] for a in node.names}
+    return {node.module.split(".")[0]} if node.module else set()
 
 
 def imported_modules(path):
@@ -439,11 +460,14 @@ class TestStatic(unittest.TestCase):
         """6. 配る .py は音声・subprocess・scipy などを import せず、書き込みが
         無い。numpy は NUMPY_ALLOWED だけ。"""
         py = [n for n in deploy_files() if n.endswith(".py")]
-        self.assertEqual(len(py), 7)
+        self.assertEqual(len(py), 10)
         for name in py:
             with self.subTest(name=name):
                 names, tree = imported_modules(HERE / name)
-                self.assertFalse(names & FORBIDDEN_IMPORTS, names)
+                forbidden = FORBIDDEN_IMPORTS - (
+                    {"subprocess"} if name in SUBPROCESS_ALLOWED else set()
+                )
+                self.assertFalse(names & forbidden, names)
                 if name not in NUMPY_ALLOWED:
                     self.assertNotIn("numpy", names)
                 if name not in RUNTIME_ALLOWED:
@@ -486,11 +510,41 @@ class TestStatic(unittest.TestCase):
                 and node.value.id == "os"
             )
 
+        def allowed_env(name, tree):
+            """detector.py の先頭の 3 つの代入（numpy の import より前）。"""
+            if name != ENV_ALLOWED_FILE:
+                return set()
+            first_numpy = min(
+                n.lineno
+                for n in tree.body
+                if isinstance(n, (ast.Import, ast.ImportFrom))
+                and "numpy" in imported_modules_of(n)
+            )
+            ok = set()
+            for n in tree.body:
+                if (
+                    isinstance(n, ast.Assign)
+                    and n.lineno < first_numpy
+                    and len(n.targets) == 1
+                    and isinstance(n.targets[0], ast.Subscript)
+                    and is_environ(n.targets[0].value)
+                    and isinstance(n.targets[0].slice, ast.Constant)
+                    and n.targets[0].slice.value in ENV_ALLOWED_KEYS
+                    and isinstance(n.value, ast.Constant)
+                    and n.value.value == "1"
+                ):
+                    ok.add(id(n))
+            self.assertEqual(len(ok), len(ENV_ALLOWED_KEYS))
+            return ok
+
         py = [n for n in deploy_files() if n.endswith(".py")]
         for name in py:
             with self.subTest(name=name):
                 _, tree = imported_modules(HERE / name)
+                exempt = allowed_env(name, tree)
                 for node in ast.walk(tree):
+                    if id(node) in exempt:
+                        continue
                     targets = []
                     if isinstance(node, ast.Assign):
                         targets = node.targets
@@ -524,7 +578,8 @@ class TestStatic(unittest.TestCase):
 
     def test_deploy_list(self):
         """7. DEPLOY_FILES は device/unoq/ の中の実在のファイルか、analysis/ の
-        直下の普通のファイルを指すリンクだけ。"""
+        直下の普通のファイル（または analysis/models/ の直下の .npz）を指す
+        リンクだけ。"""
         files = deploy_files()
         self.assertEqual(sorted(files), EXPECTED_DEPLOY)
         for name in files:
@@ -544,7 +599,10 @@ class TestStatic(unittest.TestCase):
                 self.assertFalse(p.name.startswith("test_"))
                 if link.is_symlink():
                     self.assertFalse(os.path.isabs(os.readlink(link)))
-                    self.assertEqual(p.parent, ANALYSIS)
+                    if p.parent == MODELS:
+                        self.assertEqual(p.suffix, ".npz")
+                    else:
+                        self.assertEqual(p.parent, ANALYSIS)
                     self.assertEqual(p.name, name)
                 else:
                     self.assertEqual(p.parent, HERE)

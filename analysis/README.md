@@ -12,8 +12,9 @@ PC 側の解析・評価。ファームウェアが何で書かれていても�
 - `make_runtime_models.py` 乱数の重みの CNN を ONNX・TFLite・ncnn に書き出す（UNO Q の推論ランタイムの比較の計測用。学習済みではない。#51、docs/decisions/0039）
 - `final_eval.py` 咽喉マイクの評価側を、事前に登録した 2 つの構成で 1 回だけ採点する（#40、docs/decisions/0034）
 - `m4_compare.py` M4 の誤検出を減らす候補（後処理・種の平均・hard negative）を M4 の学習側の交差検証だけで比べ、構成（docs/decisions/0038）と最終モデルを作る（#45）
+- `m4_infer.py`   M4 の推論を装置（UNO Q の `detector.py`）と PC で同じコードで行う（重みの読み込み・`model_prob`・1 窓ずつ進める `Detector`・`code_sha256`。#47。`device/unoq/m4_infer.py` はこのファイルへのリンク）
 - `evaluate_detector.py` M2 の検出器のセッション（`detect.csv`・`events.csv`）を `evaluate.py` の数え方で採点した報告を出す（#23、docs/decisions/0021）
-- `led_rule.py`   `detect.csv` の `positive` と `window_t_ms` から LED の状態（1 黄 / 2 緑）を docs/decisions/0018 の規則で再計算する（#25。`firmware/detector/led_rule.h` と同じ式。評価には使わない）
+- `led_rule.py`   `detect.csv` の `positive` と `window_t_ms` から LED の状態（1 黄 / 2 緑）を docs/decisions/0018 の規則で再計算する（#25。`firmware/detector/led_rule.h` と同じ式。評価には使わない）。1 窓ずつの `LedStepper` は装置の `detector.py` も使う（#47。`led_states` はその繰り返し）
 - `ei_upload.py`  M2 の特徴量ベクトル（1 窓 1 項目）を Edge Impulse に投入する（#21。生の音声・IMU は上げない）
 - `m2_norm_header.py` `m2_norm.json` → `firmware/detector/m2_norm.h`（正規化の定数。#22）
 - `m2_scorer.py`  書き出した C++ ライブラリを PC 上で動かす実行ファイルで窓を採点する scorer（`evaluate_detector.py --scorer` の形。#22）
@@ -456,8 +457,8 @@ python analysis/m4_compare.py data/raw --final-model analysis/models/m4-0038.npz
   `numpy.savez`（`allow_pickle` を使わない）で保存する。鍵: `config`（`M4-CONFIG` の値）・`format`（1）、CNN は種ごとに `s<種>/conv1.weight` など
   PyTorch の名前の重み（float32）と `s<種>/mean`・`s<種>/std`（float64、40）、LR は `std_mean`・`std_std`・`coef`（52、陽性の向き）・`intercept`。保存の直後に
   `load_model` で読み戻し、学習側の全窓で確率の差の最大 1e-6 以下・後処理の出力の完全な一致を確かめ、外れたらファイルを消して止まる。報告に
-  `M4-MODEL: path=… sha256=…` の行を出す。`load_model`・`model_prob` は numpy と `features_np` だけで計算する（#47 が使う。ただし `m4_compare.py` の
-  import は scikit-learn・librosa・torch の経路を含むので、装置に配るときは #47 で切り出す）。
+  `M4-MODEL: path=… sha256=…` の行を出す。`load_model`・`model_prob` などの推論の部分は #47 で `m4_infer.py` に移した（`m4_compare.py` は同じ名前を
+  再輸出する。`m4_compare.py` の import は scikit-learn・librosa・torch の経路を含むので装置に配れない。下の「装置と PC で共有する M4 の推論」）。
 - `fixed_eval.py` の `M4_CONFIG`・`M4_MODEL`（ステップ 1 では `None`）と `m4_config_lines_match`・`m4_config_file_matches`: 0038 の `M4-CONFIG:`・`M4-MODEL:` で
   始まる行と定数の一字一句の一致。
 - ファイルは書かない（`--figures` の PNG と `--final-model` の重みを除く）。波形・特徴量の値・個々の窓の確率は出さない。計算の予算は本番 1 回が PC で 3 時間以内。
@@ -497,7 +498,24 @@ python analysis/evaluate_detector.py data/raw --scorer path/to/m2_scorer.py   # 
   `-dirty` を付けて止めない（#27 の M2 の数字はコミット済みの状態で走らせる）。
 
 `split.py` は `fw` が `detector` のセッションを M1 の分割（`train` / `eval`）に入れず、戻り値の `detector` に列挙する。
-`fw` が `detector` でないのに `detect.csv` か `feat.csv` があるセッションは止まる。
+`fw` が `unoq-detector`（M4 の装置のセッション。#47）も同じ扱い（`--kind throat` では `excluded`。`m4_compare.list_train` も同じ集合で見る）。
+`fw` がどちらでもないのに `detect.csv` か `feat.csv` があるセッションは止まる。`evaluate_detector.py` は `fw` = `detector` だけを拾う（変えていない。M4 の採点の入口は #49）。
+
+## 装置と PC で共有する M4 の推論（`m4_infer.py`。#47）
+
+- `m4_compare.py` から移したもの: `CONFIG_KEYS`・`CNN_SHAPES`・`N_MEL`・`N_LR`・`MODEL_FORMAT`・`CNN_SET`・`LR_SET`・`HN_WEIGHT`・`parse_config`・`config_mask`・
+  `_expected_keys`・`_check_arrays`・`load_model`・`model_prob`（`m4_compare` は同じ物を再輸出する）。依存は numpy・`features_np`・`postprocess`・`led_rule` と標準ライブラリだけ。
+- `Detector(model, feat=False).step(seg16k, window_t_ms) -> (prob, positive, led, feat | None)`: 1 窓（16 kHz・16000 サンプル・`/ 32768` の後の float32）を
+  `mfe40`（`feat=True` なら `features_np.mfe_and_feat` で FEAT の 82 次元も）→ `model_prob`（窓 1 つ）→ `postprocess.PostStepper`（0038 の enter 0.85・exit 0.65・不応期 0.5 秒、
+  t = 0.25 k）→ `led_rule.LedStepper` の順に進める。`model_prob` を窓 1 つずつ呼んだ値とは同じ式（差 1e-12 以内）。まとめて呼んだ値（バッチ）とは float32 の行列の積の
+  和の順が変わるので 1e-8 程度の差がある（einsum の版でも同じ。テストは 1e-6 で確かめる）。`positive`・`led` は `post_mask`・`led_states` と完全に一致。
+- `sha256_file`、`code_sha256(paths)`: 拡張子が `.py`・`.npy`・`.npz` のファイルを名前の順に並べ、各行「`<名前> <sha256>`」をつないだ文字列の sha256。
+  装置は配った先のディレクトリの中、PC（`tools/record.py --unoq-detector`）は `device/unoq/DEPLOY_FILES` の行で計算し、H 行の `code_sha256` と照らす。
+- `features_np.mfe_and_feat(seg)`: `mfe40` と同じ値（ビット一致）と FEAT の 82 次元（`FEAT82_NAMES`。式は `docs/data-schema.md` の装置のセッション）。
+- `features_np._conv3x3` は im2col ＋ 行列の積（docs/decisions/0040 決定 1）。旧実装（einsum）は `test_features_np.py` に写してあり、乱数の重み・`m4-0038.npz`・
+  `features_np_ref.npz` で差 1e-6 以下（参照とは 1e-5 以下）を確かめる。
+- PC の道具（`tools/`）: `unoq_replay_check.py`（学習用 `meal` の `throat.wav` を装置の再生モードに流し、PC の再計算と比べる。集計だけを出し、ファイルを書かない）、
+  `unoq_session_check.py`（評価用 `meal` の採否の材料。`detect.csv`・`feat.csv` は時刻の列だけを読む）。
 
 ## M2 の scorer と閾値（`m2_norm_header.py`・`m2_scorer.py`・`m2_threshold.py`・`ei_testing_result.py`）
 

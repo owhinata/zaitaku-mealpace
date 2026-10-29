@@ -32,6 +32,18 @@ data/raw/20261008-101500_self_water/
   meta.json
 ```
 
+M4 の装置のセッション（`meta.json` の `fw` が `unoq-detector`。UNO Q の Linux 側の `detector.py` が推論し、`tools/record.py --unoq-detector` が ssh で
+行を受けて書く。音声のファイルはできない。#47、下の「装置（UNO Q）のセッション」）の構成:
+
+```
+data/raw/20261030-120000_self_water/
+  detect.csv        t_ms, window_t_ms, positive, prob, led          （M2 と同じ列・同じ順。値の意味は下）
+  feat.csv          t_ms, window_t_ms, f0, ..., f81                  （--feat のとき。self のみ）
+  detect_rx.csv     window_t_ms, rx_ms, proc_us, lat_us, queue, backlog
+  events.csv        t_ms, label, note
+  meta.json
+```
+
 ## 共通
 
 - 時刻の基準は装置の `millis()`。すべてのストリームを同じクロックで刻印する。
@@ -249,6 +261,81 @@ data/raw/20261008-101500_self_water/
 
 - 構成 B の追記（`device` の形、`device_source`、`stall`、`pipewire`）も既存のファイル・列・単位・フレーム形式を変えていないので、記録済みのセッションの変換は要らない（docs/decisions/0030）。
 
+## 装置（UNO Q）のセッション（`fw` = `unoq-detector`。#47）
+
+`tools/record.py --unoq-detector` が UNO Q の `~/zaitaku-mealpace-device/detector.py --live` を ssh で起動し、標準出力の行を受けて書く。
+検出器は音声をディスクに書かず、標準出力・標準エラー・RPC に波形を出さない（CLAUDE.md、docs/decisions/0025・0035）。最初の D 行が届いたときにフォルダを作る。
+
+### 時計
+
+- **装置の時計**: 検出器の起動からの ms（UNO Q の `CLOCK_MONOTONIC`）。`detect.csv`・`feat.csv` の `t_ms`・`window_t_ms` と `events.csv` の `t_ms` はこの時計。
+- `window_t_ms`（窓 k）= `round(anchor + 250 k)`。`anchor` は、最初の窓を出すまで（入力の最初の 1.0 秒）に届いた入力のブロック i ごとの
+  `c_i = 到着時刻 − 1000 × (そのブロックの最後の標本までの累計の標本数) ÷ 48000` の最小（下側の包絡）で、以後は動かさない。窓は入力の先頭から
+  16 kHz の 4000 標本ごと（標本の数から決まるので 0.25 秒の等間隔）。`o start` は使わない（PC の評価の格子とは別）。
+- 測れる範囲（`meta.json` の `unoq_detector.end`）: `anchor_spread_ms`（最初の 1.0 秒の `c_i` の最大 − 最小）、`clock_drift_min_ms`・`clock_drift_max_ms`
+  （記録の全体の `c_i` の最小・最大 − `anchor`。到着の揺れと、単調時計と ALSA の標本の時計のずれの合計で、2 つは区別できない）。
+- 測れない部分: ALSA・USB オーディオ・arecord の中で標本が取られてからパイプに出るまでの**固定の遅れ**（全ブロックに共通なので包絡にも drift にも
+  現れない）。見込みは arecord の 1 ピリオド（125 ms）程度まで（**推測**。#47 では測らない）。この遅れの分、窓の時刻は真の時刻より遅い側にずれる。
+- **PC の時刻**: すべて `pc_ms` = PC の単調時計の、最初の D 行を受けた時刻からの ms（`detect_rx.csv` の `rx_ms`）。2 つの時計は合わせていない。
+  `offset` = それまでに受けた全 D 行の `(rx_ms − t_ms)` の最小（下側の包絡。真の時計の差 ＋ 片方向の遅れの最小 `d_min` に近い）。
+- `events.csv` の `t_ms` = キーを受けた `pc_ms` − そのときの `offset`（装置の時計に直した値）。最初の D 行より前のキーは記録しない。
+  最後の `offset` は `meta.json` の `clock_offset_ms`、キーを押した時点の `offset` と最後の値の差の最大は `marker_offset_shift_max_ms`。
+
+### ファイル
+
+- `detect.csv`: 1 行 = 1 窓（1.0 秒、ホップ 0.25 秒）。列と順は M2 と同じ。値は D 行のまま。
+  - `t_ms`: 装置がその窓の行を出力のキューに入れる直前の時刻（装置の時計）。
+  - `positive`: **0038 の後処理（ヒステリシス enter 0.85・exit 0.65 ＋ 不応期 0.5 秒）の出力**。M2 の「`prob >= threshold`」とは意味が違う（`meta.json` に `threshold` は無い）。
+  - `prob`: 3 つの種の CNN の確率の算術平均（0〜1、9 桁の有効数字）。`led`: 0018 の規則で装置が計算した `1` / `2`（`--no-rpc` でも計算して書く。消灯 `0` は行に出ない）。
+    LED の表示は嚥下の「目安」で、評価には使わない。
+  - `e2e_ms` = `t_ms − (window_t_ms + 1000)`: 装置の同じ時計での、窓の終端から行をキューに入れるまでの遅れ（パイプや ALSA に溜まっていた時間を含む。
+    上の固定の遅れの分だけ小さく出る）。`meta.json` の `e2e_ms`（中央値・最大）。
+- `feat.csv`（`--feat` のとき）: `t_ms`（同じ窓の `detect.csv` の `t_ms`）、`window_t_ms`、`f0 … f81`。FEAT の 82 次元（`feature_set` = `m4-0037-feat82`、
+  docs/decisions/0037 の 4）。窓（16 kHz・16000 標本）にプリエンファシス → 25 ms の Hamming・10 ms のホップ・FFT 512 の `|FFT|² ÷ 512` を `P`（98 × 257）として:
+  - `mel_mean_00`〜`mel_mean_39`: `L = log(P @ MEL40ᵀ + 1e-10)` を float32 にしたもの（= `mfe40`）の時間方向の平均。
+  - `mel_std_00`〜`mel_std_39`: 同じ `L` の時間方向の標準偏差（÷ n）。
+  - `log_energy_mean`・`log_energy_max`: フレームごとの `log(P の行の和 + 1e-10)`（自然対数）の平均・最大。
+  - 正規化の前の値。窓より細かい時間の値・CNN の重み・中間層の出力を含めない。9 桁の有効数字。名前は `meta.json` の `feature_names`（この順）。
+    生の計測データとして扱い、`data/raw/` の外に出さない・コミットしない。
+- `detect_rx.csv`: 1 行 = 1 窓。`window_t_ms`、`rx_ms`（その窓の D 行を PC が受けた `pc_ms`）、`proc_us`・`lat_us`・`queue`・`backlog`（同じ窓の T 行）。
+  `prob`・`positive`・`led` を含めない。
+  - `proc_us`: 窓 k で新しく入った 4000 標本（16 kHz の番号 `[4000 k + 12000, 4000 k + 16000)`）の入力処理（`/ 32768`・間引き・リングへの書き込み。
+    ブロックが 2 つのホップにまたがるときは標本の数の割合で分ける）＋ 窓の処理（特徴量・FEAT・CNN × 3・平均・後処理・LED・行の投入）＋ RPC の往復
+    （`--no-rpc` なら 0）。0040 決定 6 の「1 ホップ全体」。
+  - `lat_us`: 窓 k の最後の標本を運んだブロックの到着から T 行を入れるまで（前の窓の処理を待った分を含む）。
+  - `queue`: T 行を入れる時点の出力のキューの行数。`backlog`: その時点で、読んだブロックの中でまだ処理していない 16 kHz の標本の数。
+- 受信の遅れ（docs/decisions/0037 の 5 の条件 4 の材料。当て方は評価用 `meal` の前に人が 0037 に追記する）:
+  `delay_meas = (rx_ms − clock_offset_ms) − (window_t_ms + 1000)`（下側の値）、
+  `delay_upper = delay_meas + rtt_max_ms`（`rtt_max_ms` = 記録の前後に同じ宛先へ ssh の `cat` で測った往復時間の最大。片方向の遅れは往復時間を超えない
+  ので推定の上限とする。記録の間の遅れを必ず上回る保証は無い）。`meta.json` の `rx_delay_ms`（`meas`・`upper` の中央値・最大）。
+
+### meta.json（`fw` = `unoq-detector`）
+
+共通のキー（`subject`・`cond`・`position`・`band`・`firmware_sha`・`notes`）に加えて:
+`fw` = `unoq-detector`、`sample_rates` = `{"imu_hz": 0, "audio_hz": 48000, "analog_hz": 0}`（取り込み）、
+`sensors` = `[{"id": "throat", "part": "SH-12JK", "iface": "sh12jk-wired-unoq-usbaudio"}]`、`window_ms` 1000、`hop_ms` 250、`m4_config`（0038 の M4-CONFIG）、
+`model`（`{"path", "sha256"}`）、`feature_set`・`feature_names`（`--feat` のとき）、`unoq_detector`（`header` = H 行、`end` = E 行（来なければ null））、
+`host`・`device`・`remote_command`、`mixer`（`amixer sget` の出力）、`first_line_wait_s`、`bad_lines`（読めない・形や順の違う行の数。書かない）、
+`stop`（`interrupt` / `duration` / `child-exit` / `error`）、`child_returncode`、`rpc`（`--no-rpc` なら false）、
+`ssh_rtt_ms`（`start`・`end` の `n`・`median_ms`・`min_ms`・`max_ms` と、大きいほうの `max_ms`）、`rx_delay_ms`、`e2e_ms`、
+`proc_ms`・`lat_ms`（`n`・`median`・`p95`・`max`）、`queue_max`・`backlog_max`、`clock_offset_ms`、`marker_offset_shift_max_ms`、
+`line_gaps`（D 行が 1.0 秒以上届かなかった回数 `n` と最長 `max_s`）、`windows`・`windows_lost`、
+`heartbeat`（`interval_s` 0.5・`timeout_s` 2.0・書いた数 `sent`・書けなかった数 `write_errors`）。`threshold` は書かない。
+- ハートビート: `record.py` は検出器の標準入力に 0.5 秒ごとに改行 1 バイトを書く（音声ではない）。検出器（ライブ）は 2.0 秒以上何も届かなければ消灯して
+  `heartbeat-timeout` で止まる（PC の Wi-Fi が切れたとき。人の決定 10/29）。
+
+### 検出器の標準出力の行（`detector.py`。1 行 = 空白区切り）
+
+- `H <JSON>`（最初に 1 回）: `fw`、`m4_config`、`model_sha256`、`code_sha256`（配った `.py`・`.npy`・`.npz` を名前の順に「`<名前> <sha256>`」の行に並べた文字列の
+  sha256）、`window_ms`、`hop_ms`、`input`（`live` / `replay`）、`device`、`rpc`、`python`・`numpy`・`blas`・`threads`、`heartbeat_s`・`heartbeat_timeout_s`（ライブのとき。0.5・2.0 秒）、
+  `feature_set`・`feature_names`（`--feat` のとき）。
+- `F <window_t_ms> <f0> … <f81>`（`--feat` のとき、D 行の直前）。数の配列を出すのはこの行だけ（長さ 82）。
+- `D <window_t_ms> <t_ms> <prob> <positive> <led>`（窓ごと）。
+- `T <window_t_ms> <proc_us> <lat_us> <queue> <backlog>`（窓ごと、同じ窓の D 行と RPC の後。整数）。
+- `E <JSON>`（終わりに 1 回）: `windows`、`stop`（`eof` / `signal` / `overrun` / `stdout-stall` / `stdout-closed` / `heartbeat-timeout` / `error`）、`rpc`、`overrun_lines`、
+  `rpc_errors`、`anchor_spread_ms`、`clock_drift_min_ms`、`clock_drift_max_ms`、`queue_max`、`cpu_s`、`arecord_cpu_s`、`wall_s`。
+- H・E の値は数・文字列・真偽・文字列の配列だけ。再生モード（`--replay`。標準入力の音声。一致の確かめだけ）では `anchor` = 0 で、時計の診断値に意味は無い。
+
 ## シリアルのフレーム形式（装置 → PC）
 
 ```
@@ -277,3 +364,4 @@ DETECT / FEAT と `detect.csv`・`feat.csv`・検出器の `meta.json` の追記
 開始時の合図（PC → 装置の `M`、docs/decisions/0006 の追記）もファイル・列・単位・フレーム形式を変えていないので、変換は要らない。
 咽喉マイクのセッション（`throat.wav`・`throat_chunks.csv`・`fw` = `pc-throat`）の追記も既存のファイル・列・単位・フレーム形式を変えていないので、
 変換は要らない（docs/decisions/0029）。
+装置のセッション（`fw` = `unoq-detector`、`detect_rx.csv`。#47）の追記も既存のファイル・列・単位・フレーム形式を変えていないので、変換は要らない。

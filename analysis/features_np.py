@@ -11,10 +11,12 @@
              つなぐと decimate3 の出力の先頭と一致する（遅れは入力 30 サンプル）。
 特徴量（1 窓 = 16000 サンプル、16 kHz）:
   mfe40  対数メル 40 本（0〜4000 Hz）の (98, 40) float32（features_v2.mfe_one）。
+  mfe_and_feat  mfe40 と、FEAT の 82 次元（窓ごとの要約。#47、0037 の 4）。
   a52    MFCC 13（メル 26 本、0〜4000 Hz）の平均・最大・標準偏差・デルタの絶対値の
          平均（52 次元。features_v2.a52_segment）。
 メル行列は PC で librosa.filters.mel から作った .npy（make_features_np_consts.py）
 を読む。cnn_forward は小さな CNN の numpy の順伝播（学習は compare.py）。
+畳み込みは im2col ＋ 行列の積（docs/decisions/0040 決定 1）。
 
 波形を返すのは間引きの関数だけ。特徴量と順伝播の関数は波形を戻り値に含めない。
 どの関数もファイルを書かず、標準出力に出さない。
@@ -117,7 +119,9 @@ class Decimate3:
         y = _fir_down(self._buf[off:], count)
         self._k += count
         drop = DECIMATE * self._k - _HALF - self._buf_start
-        self._buf = self._buf[drop:]
+        # 要る末尾だけを別の配列にする（スライスのままだと連結した入力の全体を
+        # 参照し続ける。#47 の adversarial-review の指摘）
+        self._buf = self._buf[drop:].copy()
         self._buf_start += drop
         return y
 
@@ -180,6 +184,36 @@ def mfe40(seg: np.ndarray) -> np.ndarray:
     return logmel(x, MEL40).astype(np.float32)
 
 
+# FEAT の 82 次元（docs/decisions/0037 の 4、plan #47 の 5 節。feature_set
+# m4-0037-feat82）。窓の中の 98 フレームを時間方向に畳んだ要約だけ
+FEAT82_SET = "m4-0037-feat82"
+FEAT82_NAMES = (
+    tuple(f"mel_mean_{i:02d}" for i in range(N_MEL_CNN))
+    + tuple(f"mel_std_{i:02d}" for i in range(N_MEL_CNN))
+    + ("log_energy_mean", "log_energy_max")
+)
+
+
+def mfe_and_feat(seg: np.ndarray) -> tuple:
+    """1 窓の波形（16000 サンプル）→ (mfe40 (98, 40) float32, FEAT (82,)
+    float64)。mfe は mfe40(seg) とビット一致する。FEAT は正規化の前の値で、
+    L = mfe（float32）の時間方向の平均 40・標準偏差（÷ n）40 と、フレーム
+    ごとの log(|FFT|² ÷ 512 の和 + 1e-10) の平均・最大（plan #47 の 5 節）。
+    フレームごとの値は返さない。16000 に満たなければ両方とも全部 0。"""
+    if len(seg) < WINDOW_SAMPLES:
+        return (
+            np.zeros((N_FRAMES, N_MEL_CNN), dtype=np.float32),
+            np.zeros(len(FEAT82_NAMES)),
+        )
+    x = np.asarray(seg[:WINDOW_SAMPLES], dtype=np.float64)
+    P = power(preemph(x))
+    M = np.log(P @ MEL40.T + LOG_FLOOR).astype(np.float32)
+    L = M.astype(np.float64)
+    E = np.log(P.sum(axis=1) + LOG_FLOOR)
+    feat = np.concatenate((L.mean(axis=0), L.std(axis=0), [E.mean(), E.max()]))
+    return M, feat
+
+
 def delta(C: np.ndarray) -> np.ndarray:
     """(フレーム数, 係数) → 同じ形のデルタ。中心の係数 k / 60（k = −4…4）、
     端は 4 番目・n − 5 番目の値の複製（librosa.feature.delta の width 9、
@@ -224,13 +258,20 @@ def a52(seg: np.ndarray) -> np.ndarray:
 
 
 def _conv3x3(x: np.ndarray, W: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """x (B, Ci, H, W)、W (Co, Ci, 3, 3) → (B, Co, H, W)。pad 1、相互相関。"""
+    """x (B, Ci, H, W)、W (Co, Ci, 3, 3) → (B, Co, H, W)。pad 1、相互相関。
+
+    im2col ＋ 行列の積（docs/decisions/0040 決定 1。bench_runtimes._conv_im2col
+    と同じ式）: パディング → sliding_window_view → (B, Ci × 9, H × W) に並べ
+    直す → W.reshape(Co, −1) @ cols。前の einsum の版との差はテスト
+    （test_features_np の TestIm2col）で 1e-6 以下を確かめる。"""
     B, Ci, H, Wd = x.shape
+    Co = W.shape[0]
     xp = np.pad(x, ((0, 0), (0, 0), (1, 1), (1, 1)))
     cols = np.lib.stride_tricks.sliding_window_view(xp, (3, 3), axis=(2, 3))
-    # cols (B, Ci, H, W, 3, 3)
-    out = np.einsum("bchwij,ocij->bohw", cols, W, optimize=True)
-    return out + b[None, :, None, None]
+    # (B, Ci, H, W, 3, 3) → (B, Ci × 9, H × W)。W の (Ci, 3, 3) と同じ並び
+    cols = cols.transpose(0, 1, 4, 5, 2, 3).reshape(B, Ci * 9, H * Wd)
+    out = W.reshape(Co, -1) @ cols
+    return out.reshape(B, Co, H, Wd) + b[None, :, None, None]
 
 
 def _maxpool2(x: np.ndarray) -> np.ndarray:

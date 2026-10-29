@@ -49,7 +49,8 @@ M3 の咽喉マイクの記録（#39）の手順は「咽喉マイク（M3）」
 
 | # | コマンド | やること | 打つマーカー | 目安 |
 |---|---|---|---|---|
-| M4 学習 | `.venv/bin/python tools/record.py --throat sh12jk-wired-unoq-usbaudio --position lateral-below-cricoid --band sh12jk-strap --cond meal --duration 1800` | 実際の食事。叩き 5 回 → 装着 → `o start`（会話ありは `o conv`）→ 食べる → 最後の嚥下から 5 秒後に Ctrl-C | `s`・`c`・`t`・`o`（0023 のまま） | 3 本、締めは docs/decisions/0037。評価用（装置）は #47 の後に行を足す |
+| M4 学習 | `.venv/bin/python tools/record.py --throat sh12jk-wired-unoq-usbaudio --position lateral-below-cricoid --band sh12jk-strap --cond meal --duration 1800` | 実際の食事。叩き 5 回 → 装着 → `o start`（会話ありは `o conv`）→ 食べる → 最後の嚥下から 5 秒後に Ctrl-C | `s`・`c`・`t`・`o`（0023 のまま） | 3 本、締めは docs/decisions/0037 |
+| M4 評価 | `.venv/bin/python tools/record.py --unoq-detector --feat --no-rpc --position lateral-below-cricoid --band sh12jk-strap --cond meal --duration 1800` | 装置（UNO Q の `detector.py`）で録る。起動の直後に消灯を送るので、マトリクスが消えていることを目で確かめて Enter → 装着 → 「窓が届き始めた」の後に `o start`（会話ありは `o conv`）→ 食べる → 最後の嚥下から 5 秒後に Ctrl-C。叩きはしない | `s`・`c`・`t`・`o`（0023 のまま） | 3 本以上・収集日 2 日以上、2026-11-01〜11-04（0037）。直後に `tools/unoq_session_check.py` |
 
 ## 装着と環境
 
@@ -423,6 +424,7 @@ M1 の「捨てる」（そのまま）:
 - 椅子に座り、食卓で食べる。テレビ・音楽は入れない（会話ありの相手の声は入ってよい）。
 - UNO Q とアダプタは食卓の上、ケーブルを動かさない位置に置く。`~/.asoundrc`・`/etc/asound.conf` を置かない（0029）。ミキサーは変えない（`Mic Capture` 58、on）。
 - **評価用では UNO Q のマトリクスが自分から見えない向きに置く（覆ってよい）。** 表示が見えると `s` の押し方が引きずられるおそれがある（M2 の表示器をつながなかったのと同じ理由）。
+  #47 で、これを「RPC なしで動かす（`--no-rpc`。マトリクスは消灯のまま）」と読み替えた（人の決定 10/29。docs/decisions/0037 の追記）。目的は同じで、表示そのものが出ないので、より強い。
 
 ### 学習用 `meal` の記録（PC の経路）
 
@@ -436,15 +438,31 @@ M1 の「捨てる」（そのまま）:
 
 ### 評価用 `meal` の記録（装置の経路）
 
-- 装置の起動（`record.py --unoq-detector` の引数、FEAT を有効にする設定）、PC の受け口、止め方、採否を確かめる道具は **#47 で確定する**。ここに書くのは手順の形だけ。
-1. 装着 → `record.py --unoq-detector ...`（#47）を起動 → 窓の行が届き始めたのを確かめてから `o start`。
-2. 以降は学習用の 3〜5 と同じ（叩きはしない）。
-3. 記録の間、`detect.csv` の陽性・`led` を見ない。
+#47 で確定した（docs/decisions/0037 の追記）。0037 の冒頭の人の決定（10/24）「評価用の `meal` の間はマトリクスを自分から見えない向きに置く」は、
+**RPC なしで動かす（`--no-rpc`、マトリクスは消灯のまま）**と読み替える（人の決定 10/29）。`led` の列は `--no-rpc` でも装置が 0018 の規則で計算して
+`detect.csv` に残す（`meta.json` に `rpc: false`）。LED の表示は嚥下の「目安」で、判定ではない。
+
+1. 前日まで: `cmake --build build-unoq --target deploy-unoq` の後に `record.py` の照合（H 行の `code_sha256`）が通ること。評価用の期間（11/1〜11/4）に配るファイルを変えない
+   （変えたら、それより前の評価用 `meal` は M4 の数字に使わない。0037 の 5）。
+2. UNO Q とアダプタを食卓に置く。`arecord` を動かしていないこと（`record.py` が起動前に確かめ、動いていれば始めない）。
+3. 装着 → リポジトリのルートで端末から直接:
+   `.venv/bin/python tools/record.py --unoq-detector --feat --no-rpc --position lateral-below-cricoid --band sh12jk-strap --cond meal --duration 1800`
+   （`cond` = `meal` では `--feat` と `--no-rpc` が無いと始まらない。`recording... keys:` と「窓が届き始めた」の表示を確かめる。「tty が無いので…」と出たら止め、
+   フォルダを消してやり直す。叩きはしない）。起動の直後に `record.py` が消灯を送り（失敗すれば記録は始まらない）、「マトリクスが消えていることを目で確かめてから
+   続ける（Enter）」と出るので、**マトリクスが消えていることを目で確かめてから** Enter を押す（確かめたら、以後はマトリクスを見ない）。
+4. 窓が届き始めてから `o start`（会話ありはその後に `o conv`）。`o start` の後、最初のマーカーまで 5 秒以上あける。最初の窓より前のキーは記録されない。
+5. 食べる。マーカーは学習用と同じ（`s`・`c`・`t`・`o`）。記録の間に画面の数字を見ない（数字は出ない）。装置が動いていることは、画面に「窓の行が N 秒届いていない」が
+   出ないことで分かる（出たら途切れの秒数を控える。陽性は表示されない）。
+6. 最後の嚥下から 5 秒以上待って Ctrl-C。
+- `record.py` は検出器の標準入力に 0.5 秒ごとにハートビート（改行 1 バイト。音声ではない）を書く。PC の Wi-Fi が切れると、検出器は 2 秒で消灯して止まり
+  （`heartbeat-timeout`）、PC 側は `child-exit` で終わる。そのセッションは捨てる（0037 の 5 の 2・3 に当たる見込み）。
 
 ### 各セッションの直後にすること（採否は人。数字を見る前に決める）
 
 1. Ctrl-C の直後、ほかの出力を見る前に、`s` の打ち忘れ・打ち遅れの体感を「ほぼ無し / 数回 / 多い」で控える（0023）。
-2. 学習用: `.venv/bin/python tools/throat_check.py data/raw/<セッション> --tap-mode enter`。評価用: #47 の時刻の確かめの道具（陽性を出さない）。
+2. 学習用: `.venv/bin/python tools/throat_check.py data/raw/<セッション> --tap-mode enter`。評価用: `.venv/bin/python tools/unoq_session_check.py data/raw/<セッション>`
+   （0037 の 5 の捨てる条件（装置）1〜9 を「当たる / 当たらない」と数で出す。`detect.csv`・`feat.csv` は時刻の列だけを読み、陽性・`prob`・`led`・FEAT の値を出さない。
+   条件 4（受信の遅れ）と時計のずれは、評価用 `meal` の前に人が 0037 に追記する規則を目安に当てる。追記の前は値だけを出す）。
 3. docs/decisions/0037 の 5 の捨てる条件（学習用 / 評価用）に当たるかを、振幅・特徴量・分類器の結果・陽性を見る前に決める。捨てるものはフォルダごと消す。
 4. log の集計表を書く（下）。
 
