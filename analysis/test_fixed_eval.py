@@ -25,7 +25,7 @@ MEAL_TRAIN = (
 EVAL_3 = (
     "20261101-120000_self_meal",
     "20261101-190000_self_meal",
-    "20261103-120000_self_meal",
+    "20261031-120000_self_meal",
 )
 
 
@@ -120,14 +120,14 @@ class F3AssertM4Eval(unittest.TestCase):
 
     def test_passes_three_or_more(self):
         one_day = (
-            "20261102-080000_self_meal",
-            "20261102-120000_self_meal",
-            "20261102-190000_self_meal",
+            "20261030-080000_self_meal",
+            "20261030-120000_self_meal",
+            "20261030-190000_self_meal",
         )
         edges = (
-            "20261101-000000_self_meal",
-            "20261102-120000_self_meal",
-            "20261104-235959_self_meal",
+            "20261029-000000_self_meal",
+            "20261030-120000_self_meal",
+            "20261101-235959_self_meal",
         )
         for names in (EVAL_3, one_day, edges):  # 2 日・1 日・窓の両端
             with self.subTest(names=names):
@@ -136,7 +136,7 @@ class F3AssertM4Eval(unittest.TestCase):
 
     def test_stops_on_mismatch(self):
         with mock.patch.object(fixed_eval, "M4_EXPECTED_EVAL", EVAL_3):
-            for names in (EVAL_3[:2], EVAL_3 + ("20261104-120000_self_meal",)):
+            for names in (EVAL_3[:2], EVAL_3 + ("20261031-120000_self_meal",)):
                 with self.subTest(n=len(names)):
                     with self.assertRaises(SystemExit) as cm:
                         fixed_eval.assert_m4_eval(names)
@@ -144,8 +144,8 @@ class F3AssertM4Eval(unittest.TestCase):
 
     def test_stops_outside_window(self):
         for out in (
-            "20261031-235959_self_meal",
-            "20261105-000000_self_meal",
+            "20261028-235959_self_meal",  # 窓の初日（10/29）の前日
+            "20261102-000000_self_meal",  # 打ち切り（11/1）の翌日
         ):
             names = EVAL_3[:2] + (out,)
             with self.subTest(out=out):
@@ -167,7 +167,7 @@ SYNTH_0037 = """# 0037 合成
 本文の `M4-` の説明の行は、行頭が M4- ではないので数えない。
 
 ```
-M4-EVAL-WINDOW: from=2026-11-01 to=2026-11-04
+M4-EVAL-WINDOW: from=2026-10-29 to=2026-11-01
 M4-TRAIN-CUTOFF: 2026-10-28
 M4-TRAIN: （学習用の記録の締めの後に追記）
 M4-EVAL: （評価用の記録の打ち切りと採否の後に追記）
@@ -188,7 +188,7 @@ class F4M4LinesMatch(unittest.TestCase):
 
     def test_synthetic_one_char_off(self):
         for old, new in (
-            ("to=2026-11-04", "to=2026-11-05"),
+            ("to=2026-11-01", "to=2026-11-02"),
             ("CUTOFF: 2026-10-28", "CUTOFF: 2026-10-29"),
             ("締めの後に追記", "締めの後で追記"),
         ):

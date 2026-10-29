@@ -401,7 +401,7 @@ python analysis/final_eval.py data/raw                          # 評価側を 1
 - `fixed_eval.py`: 0034 の評価側の 7 本（`FINAL-EVAL`）が学習側に入る分割では、`train_eval.py --throat`・`compare.py`・`visualize.py` がデータを読む前に
   止まる（後日セッションを足しても評価側を学習・交差検証に戻さない）。印があるときは、`--throat` と `compare.py` の報告の冒頭に「評価側は採点済み」の 1 行が出る。
 - `fixed_eval.py` の M4 の定数と検査（#46、docs/decisions/0037）: M4 は日付の境と名前の固定の一覧で分ける（締め `M4_TRAIN_CUTOFF` = 20261028、
-  評価側の窓 `M4_EVAL_FROM`〜`M4_EVAL_TO` = 20261101〜20261104）。M3 の 21 本（`M4_TRAIN_M3`。M3 の評価側だった 7 本を含む）は M4 では学習側。
+  評価側の窓 `M4_EVAL_FROM`〜`M4_EVAL_TO` = 20261029〜20261101。0037 の追記（10/29）で同じ日数のまま前倒し）。M3 の 21 本（`M4_TRAIN_M3`。M3 の評価側だった 7 本を含む）は M4 では学習側。
   `assert_m4_train` は締めより後の日付・`M4_EXPECTED_EVAL` の名前・21 本の欠け・`M4_EXPECTED_TRAIN` との不一致で止まり、`assert_m4_eval` は
   `M4_EXPECTED_EVAL` が `None`（一覧の追記の前）・一覧との不一致・窓の外の日付・3 本未満で止まる。`m4_lines_match` は 0037 の `M4-` で始まる行と
   定数の一致を返し、印のパスは `M4_MARKER`（`docs/log/m4-final-49.txt`）。どれも名前だけを見てデータを開かない。呼ぶのは #45（学習の入口）と

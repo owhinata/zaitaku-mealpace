@@ -20,7 +20,7 @@ from train_eval import NEGATIVE, POSITIVE, Scored, SessionData
 
 M3_21 = fixed_eval.M4_TRAIN_M3
 MEAL_1 = "20261025-120000_self_meal"
-LATE = "20261029-120000_self_meal"
+LATE = "20261029-120000_self_meal"  # 締め（10/28）より後。窓の前倒し（10/29〜）で評価側の窓に入る
 EVAL_NAME = "20261101-120000_self_meal"
 M1_NAME = "20260921-104059_self_quiet"
 DET_NAME = "20261002-203031_self_meal"
@@ -96,8 +96,8 @@ class ListingTest(unittest.TestCase):
         with mock.patch.object(split, "_meta", side_effect=spy):
             L = mc.list_train(root)
         self.assertEqual(L.train, sorted(M3_21 + (MEAL_1,)))
-        self.assertEqual(L.after_cutoff, [LATE])
-        self.assertEqual(L.eval_window, [EVAL_NAME])
+        self.assertEqual(L.after_cutoff, [])  # 締めの翌日が窓の初日なので、ここに入る名前は無い
+        self.assertEqual(L.eval_window, [LATE, EVAL_NAME])
         self.assertEqual(
             sorted(L.excluded), sorted([M1_NAME, DET_NAME, P1_NAME])
         )
@@ -117,7 +117,8 @@ class ListingTest(unittest.TestCase):
         )
         make_dir(root, EVAL_NAME, raw_meta="[]")
         L = mc.list_train(root)
-        self.assertEqual(L.after_cutoff, [LATE])
+        self.assertEqual(L.after_cutoff, [])
+        self.assertEqual(L.eval_window, [LATE, EVAL_NAME])
 
     def test_stops_on_checks(self):
         cases = {
