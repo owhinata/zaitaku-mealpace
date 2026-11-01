@@ -91,8 +91,15 @@ M4_EXPECTED_TRAIN: tuple | None = M4_TRAIN_M3 + (
     "20261027-203815_self_meal",
     "20261028-193716_self_meal",
 )
-# 評価用の記録の打ち切りと採否の後、#49 が評価側を開く前に名前を入れる
-M4_EXPECTED_EVAL: tuple | None = None
+# 評価用の記録の打ち切り（2026-11-01）と採否の後、#49 が評価側を開く前に名前を入れた
+# （2026-11-01。M4 のどの性能の数字も見ていない時点。0037 の追記）。評価用 meal 4 本
+# （10/30・10/31 ×2・11/1。採否は人、docs/log/2026-10-30〜11-01.md）
+M4_EXPECTED_EVAL: tuple | None = (
+    "20261030-201124_self_meal",
+    "20261031-145803_self_meal",
+    "20261031-195410_self_meal",
+    "20261101-134412_self_meal",
+)
 M4_MARKER = "docs/log/m4-final-49.txt"  # 固定のパス。作るのは #49 の入口
 M4_MARKER_NOTE = (
     f"- M4 の評価側は採点済み（印 `{M4_MARKER}` あり。docs/decisions/0037）。"

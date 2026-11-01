@@ -4,8 +4,9 @@
 合成の名前だけを使う。data/ は使わない。読むファイルはリポジトリの
 docs/decisions/ の 0034 と 0037 だけ（本文の行の照合）。印は一時フォルダに置く。
 M4_EXPECTED_TRAIN・M4_EXPECTED_EVAL は mock.patch.object で差し替える。実物の
-M4_EXPECTED_TRAIN は 2026-10-28 に名前が入ったので、合成の名前の検査は None に
-差し替えて動かし、実物の照合（test_real_0037_matches）だけ実物の値で動かす。
+M4_EXPECTED_TRAIN は 2026-10-28 に、M4_EXPECTED_EVAL は 2026-11-01 に名前が入ったので、
+合成の名前の検査は None に差し替えて動かし、実物の照合（test_real_0037_matches）だけ
+実物の値で動かす。
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import fixed_eval
 
 M3_21 = fixed_eval.EXPECTED_TRAIN + fixed_eval.EXPECTED_EVAL
 REAL_TRAIN = fixed_eval.M4_EXPECTED_TRAIN  # 実物（0037 の M4-TRAIN）
+REAL_EVAL = fixed_eval.M4_EXPECTED_EVAL  # 実物（0037 の M4-EVAL）
 MEAL_TRAIN = (
     "20261025-120000_self_meal",
     "20261027-190000_self_meal",
@@ -57,11 +59,14 @@ class F1M3Lists(unittest.TestCase):
 
 class F2AssertM4Train(unittest.TestCase):
     def setUp(self):
-        # 実物の M4_EXPECTED_TRAIN には 2026-10-28 に名前が入った。合成の名前のテストは
-        # 一覧の固定の前の状態（None）で動かす
+        # 実物の M4_EXPECTED_TRAIN には 2026-10-28 に、M4_EXPECTED_EVAL には 2026-11-01 に
+        # 名前が入った。合成の名前のテストは一覧の固定の前の状態（None）で動かす
         p = mock.patch.object(fixed_eval, "M4_EXPECTED_TRAIN", None)
         p.start()
         self.addCleanup(p.stop)
+        q = mock.patch.object(fixed_eval, "M4_EXPECTED_EVAL", None)
+        q.start()
+        self.addCleanup(q.stop)
 
     def test_passes_21_plus_meal_before_cutoff(self):
         fixed_eval.assert_m4_train(M3_21 + MEAL_TRAIN)
@@ -113,9 +118,10 @@ class F2AssertM4Train(unittest.TestCase):
 
 class F3AssertM4Eval(unittest.TestCase):
     def test_stops_when_list_is_none(self):
-        self.assertIsNone(fixed_eval.M4_EXPECTED_EVAL)
-        with self.assertRaises(SystemExit) as cm:
-            fixed_eval.assert_m4_eval(EVAL_3)
+        # 実物には 2026-11-01 に名前が入った。追記の前の状態（None）で止まることを確かめる
+        with mock.patch.object(fixed_eval, "M4_EXPECTED_EVAL", None):
+            with self.assertRaises(SystemExit) as cm:
+                fixed_eval.assert_m4_eval(EVAL_3)
         self.assertIn("M4-EVAL", str(cm.exception))
 
     def test_passes_three_or_more(self):
@@ -177,11 +183,14 @@ M4-EVAL: （評価用の記録の打ち切りと採否の後に追記）
 
 class F4M4LinesMatch(unittest.TestCase):
     def setUp(self):
-        # 実物の M4_EXPECTED_TRAIN には 2026-10-28 に名前が入った。合成の名前のテストは
-        # 一覧の固定の前の状態（None）で動かす
+        # 実物の M4_EXPECTED_TRAIN には 2026-10-28 に、M4_EXPECTED_EVAL には 2026-11-01 に
+        # 名前が入った。合成の名前のテストは一覧の固定の前の状態（None）で動かす
         p = mock.patch.object(fixed_eval, "M4_EXPECTED_TRAIN", None)
         p.start()
         self.addCleanup(p.stop)
+        q = mock.patch.object(fixed_eval, "M4_EXPECTED_EVAL", None)
+        q.start()
+        self.addCleanup(q.stop)
 
     def test_synthetic_match(self):
         self.assertTrue(fixed_eval.m4_lines_match(SYNTH_0037))
@@ -222,7 +231,10 @@ class F4M4LinesMatch(unittest.TestCase):
         text = (fixed_eval.REPO_ROOT / fixed_eval.M4_DECISION).read_text(
             encoding="utf-8"
         )
-        with mock.patch.object(fixed_eval, "M4_EXPECTED_TRAIN", REAL_TRAIN):
+        with (
+            mock.patch.object(fixed_eval, "M4_EXPECTED_TRAIN", REAL_TRAIN),
+            mock.patch.object(fixed_eval, "M4_EXPECTED_EVAL", REAL_EVAL),
+        ):
             self.assertTrue(fixed_eval.m4_lines_match(text))
             self.assertEqual(
                 _decision_lines(fixed_eval.M4_DECISION, "M4-"),
@@ -230,6 +242,11 @@ class F4M4LinesMatch(unittest.TestCase):
             )
             # 2026-10-28 の固定: M3 の 21 本と学習用 meal 5 本
             self.assertEqual(len(REAL_TRAIN), 26)
+            # 2026-11-01 の固定: 評価用 meal 4 本（窓 10/29〜11/1 の中、学習側と重ならない）
+            self.assertEqual(len(REAL_EVAL), 4)
+            self.assertFalse(set(REAL_EVAL) & set(REAL_TRAIN))
+            fixed_eval.assert_m4_eval(REAL_EVAL)
+            fixed_eval.assert_m4_train(REAL_TRAIN)
             self.assertEqual(REAL_TRAIN[:21], M3_21)
             self.assertTrue(all(n.endswith("_self_meal") for n in REAL_TRAIN[21:]))
             self.assertTrue(all(n[:8] <= fixed_eval.M4_TRAIN_CUTOFF for n in REAL_TRAIN))
@@ -250,11 +267,14 @@ M4-MODEL: {model}
 
 class F6M4Config(unittest.TestCase):
     def setUp(self):
-        # 実物の M4_EXPECTED_TRAIN には 2026-10-28 に名前が入った。合成の名前のテストは
-        # 一覧の固定の前の状態（None）で動かす
+        # 実物の M4_EXPECTED_TRAIN には 2026-10-28 に、M4_EXPECTED_EVAL には 2026-11-01 に
+        # 名前が入った。合成の名前のテストは一覧の固定の前の状態（None）で動かす
         p = mock.patch.object(fixed_eval, "M4_EXPECTED_TRAIN", None)
         p.start()
         self.addCleanup(p.stop)
+        q = mock.patch.object(fixed_eval, "M4_EXPECTED_EVAL", None)
+        q.start()
+        self.addCleanup(q.stop)
         # 実物の M4_CONFIG には 2026-10-28 に 0038 の値が入った。合成の値のテストは
         # 0038 を書く前の状態（None）から動かす
         q = mock.patch.object(fixed_eval, "M4_CONFIG", None)

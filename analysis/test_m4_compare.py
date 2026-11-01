@@ -75,11 +75,14 @@ def build_raw(base: Path, extra_meal=(MEAL_1,), late=True) -> Path:
 
 class ListingTest(unittest.TestCase):
     def setUp(self):
-        # 実物の M4_EXPECTED_TRAIN には 2026-10-28 に名前が入った。合成の名前のテストは
-        # 一覧の固定の前の状態（None）で動かす
+        # 実物の M4_EXPECTED_TRAIN には 2026-10-28 に、M4_EXPECTED_EVAL には 2026-11-01 に
+        # 名前が入った。合成の名前のテストは一覧の固定の前の状態（None）で動かす
         p = mock.patch.object(fixed_eval, "M4_EXPECTED_TRAIN", None)
         p.start()
         self.addCleanup(p.stop)
+        q = mock.patch.object(fixed_eval, "M4_EXPECTED_EVAL", None)
+        q.start()
+        self.addCleanup(q.stop)
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.base = Path(self._tmp.name)
@@ -452,7 +455,10 @@ class RunCase(unittest.TestCase):
             RunCase.tmp = Path(tmp.name)
             RunCase.root = build_raw(RunCase.tmp)
             # 合成の名前は実物の M4_EXPECTED_TRAIN（2026-10-28 に固定）と違う
-            with mock.patch.object(fixed_eval, "M4_EXPECTED_TRAIN", None):
+            with (
+                mock.patch.object(fixed_eval, "M4_EXPECTED_TRAIN", None),
+                mock.patch.object(fixed_eval, "M4_EXPECTED_EVAL", None),
+            ):
                 RunCase.names = mc.list_train(RunCase.root).train
             RunCase.calls = []
             RunCase.trainer = mc.Trainer(fake_fit(RunCase.calls), fake_score)
