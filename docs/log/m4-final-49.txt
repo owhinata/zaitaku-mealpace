@@ -1,0 +1,6 @@
+# #49 M4 の評価側の採点の印（docs/decisions/0037 の 7・0041）。この印があれば analysis/m4_final_eval.py は止まる
+started: 2026-11-01T16:23:01+09:00
+commit: 497b066fd92986376c98f10b545593373beb6ef9
+decisions: 0037 0038 0041
+command: python analysis/m4_final_eval.py data/raw
+sessions: 20261030-201124_self_meal 20261031-145803_self_meal 20261031-195410_self_meal 20261101-134412_self_meal
