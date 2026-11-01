@@ -517,6 +517,43 @@ python analysis/evaluate_detector.py data/raw --scorer path/to/m2_scorer.py   # 
 - PC の道具（`tools/`）: `unoq_replay_check.py`（学習用 `meal` の `throat.wav` を装置の再生モードに流し、PC の再計算と比べる。集計だけを出し、ファイルを書かない）、
   `unoq_session_check.py`（評価用 `meal` の採否の材料。`detect.csv`・`feat.csv` は時刻の列だけを読む）。
 
+## M4 の評価側の採点（`m4_final_eval.py`。#49）
+
+手順・記録の範囲・出す数字・切り分けの定義は `docs/decisions/0041-m4-final-eval-procedure.md`（評価側を開く前に固定し、コミットしてから実行する）。
+対象は 0037 の `M4-EVAL` の 4 本（`fixed_eval.M4_EXPECTED_EVAL`。`evaluate_detector.scan_root` は使わない）、構成は 0038。評価側を **1 回だけ**採点する。
+採点するのは装置の `detect.csv` の `positive`（0038 の後処理の出力）で、PC では採点し直さない。`evaluate_detector.py`（M2 の数字を出したコード）は変えず、
+その関数（`DetectRow`・`SessionData`・`cough_linked`・`led_mismatch`・`_runs`）と `evaluate`・`train_eval.sum_metrics`・`m4_compare.classify_run`・`fp_runs` を使う。
+
+```
+python analysis/m4_final_eval.py data/raw     # 引数は root だけ
+```
+
+- **引数は root だけ。** 構成・閾値・後処理・対象・記録の範囲を選ぶ引数も、再実行の引数（`--reproduce` など）も無い。
+- **印の前に止まる条件**（評価側のファイルを 1 つも開かない。印も作らない）: 追跡しているファイルに未コミットの変更がある、`analysis/`・`tools/`・`device/`・
+  `docs/decisions/`・`docs/evaluation.md` に未コミットの変更か未追跡のファイルがある、git が使えない、0037・0038・0041 が無い・git に追跡されていない、
+  0037 の `M4-` の行・0038 の `M4-CONFIG`・`M4-MODEL` の行・0041 の `M4-EVAL-PROC:` の行（定数 `PROC_LINE`）が一字一句一致しない、`M4_EXPECTED_EVAL` が `None`・
+  `assert_m4_eval` に当たる、印 `docs/log/m4-final-49.txt` がある（リンクを含む）、依存を import できない、`analysis/models/m4-0038.npz` の sha256 が `M4-MODEL` と違う、
+  4 本のフォルダが `root` 直下に無い・ディレクトリでない・シンボリックリンク（`lstat` だけで見る）。
+- **印（1 回だけにする仕組み）**: 固定のパス `docs/log/m4-final-49.txt` を `O_EXCL` で排他作成し、書き込み・fsync・close（親のディレクトリも fsync）の後に評価側を開く。
+  中身は開始時刻・HEAD のコミット・決定（0037 0038 0041）・コマンド・4 本の名前だけ（数字は書かない）。印は、その後の手順で止まっても消さない。
+- **印の後・数字の前に止まる条件**（印は残る。標準出力は実行の条件だけ、標準エラーに `未完了:` の行、終了コード 1）: `meta.json` の照合（`fw` `unoq-detector`・
+  `m4_config`・`model.sha256`・`feature_set`・`feature_names`・`rpc` false・`window_ms`・`hop_ms`・`unoq_detector.header.code_sha256` が手元の `DEPLOY_FILES` の値と一致）、
+  `events.csv` の `o start`（ちょうど 1 つ、最初の窓より前でない、終わりより前、その前に `s`・`t`・`c` が無い）、終わりの 1.5 秒以内の `s`、`detect.csv`・`feat.csv` の
+  形と時刻（0021）、`feat.csv` の窓が `detect.csv` の部分集合、窓の隣との差が 250 ms、`PostStepper` と `post_mask` の一致、誤検出の主分類の合計の一致。
+  実行の条件・報告の書き出しと flush の失敗（容量不足・パイプの切断）も同じ扱い（印は残る。`未完了:` に段の名前と例外の型の名前だけ、終了コード 1）。
+  標準出力が閉じていても、失敗した出力先の記述子を `/dev/null` に差し替えるので、終了時の再 flush のメッセージ（「Exception ignored」・終了コード 120）は出ない。
+- **記録の範囲**: 始まり = `o start`、採点に入れる窓 = 開始が `o start` 以上（0041。0021 の始まりの読み替え）、終わり = 0021 のまま。装置と PC の一致だけは全窓で見る。
+- **出すもの**（標準出力に Markdown。最後に `完了:` の行）: セッションごとの表、合算・混同行列・評価に使ったセッション一覧、合格線（0.85 / 1.0 回/分）との比較
+  （満たす / 満たさない）、参考値（常時陽性・陽性窓の割合・収集日ごと・会話の有無ごと）、装置と PC の一致（`positive`・丸めの候補の窓・`led`）、切り分け
+  （`classify_run` の主分類・`cough_linked`・見逃しの ±3.0 秒・塊の長さ）、M2・M3 と並べる表、注記。
+- **出さないもの**: 波形、FEAT の値と集計、個々の窓の `prob`、行の中身、例外のメッセージとトレースバック（印の後の想定外の例外は型の名前だけ）。
+  `feat.csv` は各行の先頭 2 列（`t_ms`・`window_t_ms`）のほかを保持も変換もしない。ファイルに書くのは印だけ。
+- 依存は `.venv`（`m4_compare` を import するので scikit-learn を含む。torch は要らない）。
+- テスト（`test_m4_final_eval.py`、plan #49 の E1〜E10）は合成のリポジトリ（0037・0038・0041 の文、重みの代わりのファイル、`DEPLOY_FILES`）と合成の 4 本の
+  セッションを一時フォルダに作り、`fixed_eval.REPO_ROOT`・`fixed_eval.M4_MODEL`・`train_eval._git` を差し替える。印の前に `root` の中を開かないこと
+  （`open`・`io.open` を見張る）、診断に値・行の中身が出ないこと、装置と PC の一致（9 桁の有効数字の `prob` から）を確かめる。`data/` は使わない。
+  実物から読むのは docs/decisions の 0027・0036・0037・0038・0041 の本文だけ。
+
 ## M2 の scorer と閾値（`m2_norm_header.py`・`m2_scorer.py`・`m2_threshold.py`・`ei_testing_result.py`）
 
 Issue #22。Edge Impulse から書き出した C++ ライブラリ（`firmware/detector/src/`。zip の中身をそのまま置き、編集しない）を PC 上で動かし、
