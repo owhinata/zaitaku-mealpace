@@ -1,6 +1,6 @@
 # 現在地
 
-更新: 2026-11-01
+更新: 2026-11-02
 
 ## 段階
 
@@ -334,6 +334,7 @@ M0 準備の関門は 9/20 に通過（docs/decisions/0010、`gate-M0`）。
   `visualize.py` の `side="m4train"`（`meal` は 300 秒ごとの頁、細かい表示を描かない）、`fixed_eval.py` の `M4_CONFIG`・`M4_MODEL`（`None`）と 0038 の行の照合。
   テストは analysis 418 → 472（device/unoq 30・tools 88 は変わらず）。予行（`--smoke`）の結果は docs/log/2026-10-24.md「#45 ステップ 1」。
 - ロボセンサー技研への問い合わせ未送付（代替センサ、docs/decisions/0002、#5）。
+- GitHub Projects `zaitaku-mealpace - Development Management`（`https://github.com/users/owhinata/projects/6`、Private）を 11/2 に作った（docs/decisions/0046）。フィールド 8 つと View 5 つ（Overview / Execution Board / Milestone / Gate / Risks & Decisions / Roadmap）、#1〜#59 を登録して初期値を付けた。正の所在と更新の規則は docs/workflow.md「GitHub Projects」。グループ化・並び順・Board の列・Roadmap の日付欄は API に無く、人が Web UI で設定する。
 
 ## 次にやること
 

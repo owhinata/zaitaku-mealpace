@@ -95,6 +95,48 @@ plan の素案づくりと Codex の plan レビューの実施も subagent が�
 - ラベルは `firmware` / `analysis` / `docs` の3つ。
 - 各 Milestone の末尾に「判定」Issue を置き、閉じるのは人だけ。
 
+## GitHub Projects
+
+進捗・関門・リスク・判断待ち・日程を 1 か所で見るための Project（`https://github.com/users/owhinata/projects/6`、
+docs/decisions/0046）。Issue の本文・ラベル・Milestone・open / close は Project のために変えない。
+
+**正の所在**
+
+- Issue の open / close: GitHub の Issue（変わらず）。
+- Status（Todo / In Progress / Blocked / In Review / Done）: Project が正。`docs/status.md` には書かない（「セッション」3 と同じ）。
+- Gate Result（Pending / Passed / Failed / Conditional）: `docs/decisions/` の判定記録の写し。記録が無いものは Pending。
+  Issue が Closed でも判定が「通過しない」なら Failed（M2・M4）。
+- Decision Status: Decided は、人の決定が Issue の本文・コメントか `docs/decisions/` に書かれているもの。
+  決定の記録（decision ファイル）を書く作業が残っていても Decided。
+- 日付（Start date / Due date）: `docs/plan.md` と Milestone の期限、Issue 本文に書かれた期限だけを写す。推測で入れない。
+  M5 の Issue は `docs/status.md`「次にやること」の目安の期間を Start / Due にする（#56 は本文の公開日 11/10 を Due にする）。
+
+**Status の対応**
+
+| 状況 | Status |
+|---|---|
+| 着手前 | Todo |
+| plan の素案づくり、実装中 | In Progress |
+| Codex の plan レビュー中、関門のレビュー中、人が報告を見る待ち | In Review |
+| 人の決定・実機の作業・外部の回答を待っていて進められない | Blocked |
+| 人が Issue を閉じた | Done |
+
+**いつ誰が更新するか**
+
+- 更新はメイン。セッションの出口（`docs/status.md` の更新）で、その Issue の Status を直す。subagent は Project を触らない。
+- Milestone の起票のとき、草案に Item Type・Priority・Impact・日付を含め、人が確認してから登録する。
+  Priority の Critical は、期限が固定で外すと応募に響くものだけ。
+- 関門の判定を人が `docs/decisions/` に記録したら、Gate Result を写す。
+- フィールドと View を増やさない。足すなら `docs/decisions/` に記録してから。
+
+**View と週次の見直し**
+
+- Project Overview（Table、Milestone でグループ化）、Execution Board（Board、Status の列、Open のみ）、
+  Milestone / Gate（Item Type = Gate）、Risks & Decisions（Item Type = Risk か Decision）、
+  Delivery Roadmap（Start / Due、Milestone のマーカー）。
+- 週 1 回の見直し（「セッション」4）は、Overview で進捗、Milestone / Gate で関門の見通し、Risks & Decisions で
+  顕在化したリスクと人の判断待ち、Roadmap で期限を見る。
+
 ## レビュー（Codex）
 
 Codex の呼び出しは codex plugin（`/codex:*`）に一本化する。
