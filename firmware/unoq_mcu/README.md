@@ -1,8 +1,9 @@
 # firmware/unoq_mcu/ — UNO Q の MCU 側（LED マトリクスの目安）
 
 Arduino UNO Q の MCU 側のスケッチ（Issue #38、docs/decisions/0035）。Linux 側の検出器（`device/unoq/detector.py`、#47）が RPC の `zm_set_state(int)` で
-状態（0 消灯 / 1 流れる波線 / 2 微笑む顔）を渡し、MCU は受けた状態を 8×13 の LED マトリクスに画にするだけ。表示の規則（docs/decisions/0018）と 1.0 秒の消灯は
-Linux 側が持つ。図形と順序は `firmware/indicator/` へのリンク。MCU は音声・特徴量・確率を受けない。LED は表示だけで、ベッド・車椅子・ブザーなどの制御は付けない。
+状態（0 消灯 / 1 流れる波線 / 2 微笑む顔）を渡し、MCU は受けた状態を 8×13 の LED マトリクスに画にする。表示の規則（docs/decisions/0018 の保持と、
+窓の結果が 1.0 秒出ないときの消灯）は Linux 側が持つ。MCU は `loop()` が `zm_set_state` の受信に気づいてから約 2 秒（2000 ms）次の受信が無ければ自分で消灯する
+（docs/decisions/0049、`rx_hold.h`。Linux と MCU の間が切れたときに古い目安が残らないため）。図形と順序は `firmware/indicator/` へのリンク。MCU は音声・特徴量・確率を受けない。LED は表示だけで、ベッド・車椅子・ブザーなどの制御は付けない。
 LED の状態は評価に使わない。ビルドと書き込み・配置は docs/unoq-setup.md「MCU のスケッチと Linux 側の配置」。
 
 下の 2 つは `firmware/indicator/README.md` の「装置に貼る表示」「介助者に渡すカード」を写したもの（#47。「喉の動きと音から」を「喉元の音（咽喉マイク）から」に

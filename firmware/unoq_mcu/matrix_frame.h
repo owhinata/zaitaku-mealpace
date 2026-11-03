@@ -2,7 +2,7 @@
 // RPC で受けた状態の範囲の検査（Issue #38、plan 38d 第 2 節）。
 // Arduino に依存しない（PC のホストテスト host/test_unoq_mcu.sh でも
 // ビルドする）。図形の表は shapes.h（firmware/indicator/ へのリンク。#32 の
-// 生成物）。表示の規則（0018 の保持・消灯のタイムアウト）は持たない（M4）。
+// 生成物）。0018 の保持は持たない。MCU の消灯は rx_hold.h（0049）。
 #pragma once
 #include <stdint.h>
 

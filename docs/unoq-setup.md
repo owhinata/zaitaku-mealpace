@@ -116,9 +116,16 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
 ## MCU のスケッチと Linux 側の配置（#38、docs/decisions/0035）
 
 - **MCU 側のスケッチ**: `firmware/unoq_mcu/`（RPC で `zm_set_state(int)` を公開し、8×13 の LED マトリクスに状態 0 = 全消灯、1 = 流れる波線、2 = 微笑む顔を出すだけ。
-  図形と順序は `firmware/indicator/` へのシンボリックリンク。行は上下を反転して書き、UNO Q では波線が左から右へ流れて見える（人が可とした）。LED3 は使わない。表示の規則は M4。0035 決定 7）。
-  今入っているのは 10/13 22:5x JST に書き込んだ波線と顔の版（その前に LED3 の緑の版、顔だけの版を書いた）。
+  図形と順序は `firmware/indicator/` へのシンボリックリンク。行は上下を反転して書き、UNO Q では波線が左から右へ流れて見える（人が可とした）。LED3 は使わない。0035 決定 7）。
+  0018 の保持は持たない（Linux 側の `detector.py` が持つ）。MCU は `loop()` が `zm_set_state` の受信に気づいてから約 2 秒（2000 ms）次の受信が無ければ自分で消灯する（#52、0049）。
+  今入っているのは 2026-11-03 10:43 JST に書き込んだ自律消灯の版（#52、0049。時間切れの後は次の受信まで消灯を保つ版。スケッチ 90,348 B。docs/log/2026-11-03.md「#52」）。
+  USB を直挿しできないときは ssh 経由でも書ける: remoteocd が運ぶ 3 つのファイル（`flash_sketch.cfg`、zephyr の elf、スケッチの `.bin`）を scp で `/tmp/remoteocd/` に置き、
+  基板上で `/opt/openocd/bin/openocd -s /opt/openocd -f /opt/openocd/openocd_gpiod.cfg -c "set filename0 <elf>" -c "set filename1 <bin>" -f /tmp/remoteocd/flash_sketch.cfg`
+  （`arduino` は gpiod グループ）。手順と出力は docs/log/2026-11-03.md「#52」。
+  その前は 10/13 22:5x JST の波線と顔の版（さらに前に LED3 の緑の版、顔だけの版を書いた）。
   コア `arduino:zephyr@1.0.0`、`Arduino_RouterBridge@0.4.3`（依存 `Arduino_RPClite` 0.3.1）、FQBN `arduino:zephyr:unoq`。版は基板の上の `~/.arduino15` と同じ。
+  UGREEN アダプタ（PD 給電 + USB オーディオ）が UNO Q の USB-C を占めている間は、PC から adb に見えない。書き込みのときはアダプタを外して PC に直挿しし
+  （`lsusb` に `2341:0078` が出る）、終わったらアダプタを戻す（11/3、#52）。
   書き込みは UNO Q の USB-C を PC に直につなぎ、`arduino-cli board list` に出るポート（`/dev/ttyACM0`、`configuration: ADB Configuration`）で:
 
   ```
@@ -139,7 +146,7 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
   ssh arduino@unoq.local 'python3 -B ~/zaitaku-mealpace-device/led_check.py wave'    # smile / off / bench --n 100 --warmup 5
   ```
 
-  `wave`・`smile` は表示したまま終わる。`bench` は顔と消灯を交互に送って往復を測る（状態を渡して応答が返るまで。描画は含まない）。最後に消灯を送る。
+  `wave`・`smile` は状態を送って終わり、表示は約 2 秒で MCU が消す（`loop()` が受信に気づいてから約 2 秒（2000 ms）次の受信が無いため。0049）。`bench` は顔と消灯を交互に送って往復を測る（状態を渡して応答が返るまで。描画は含まない）。最後に消灯を送る。
 
   1 窓あたりの処理時間の計測（#44。合成入力だけ、ファイルを書かない、標準出力は集計の行だけ。最初に `features_np_ref.npz` との照合をし、NG なら測らない。
   RPC は消灯を送るだけで、最後にも消灯を送る）。1 スレッド指定と既定（ssh のセッションの値を引き継がない）の 2 回:
@@ -242,8 +249,12 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
   UNO Q の sshd は `ClientAliveInterval` が既定の 0（`/etc/ssh/sshd_config` でコメントのまま。`sshd -T` は sudo なしでは読めない）で切断に気づかないので、それに頼らない。
   10/29 の試験: PC の Wi-Fi を切ってから 2 秒で消えた。
 - **止め方と消灯**: 標準入力の EOF（`record.py` が閉じる）、SIGTERM・SIGHUP、ハートビートの時間切れ、標準出力の詰まり（キューが 2 秒分を超えたら `stdout-stall`、4）、
-  `overrun` の行（3）で止まり、どれも消灯を送ってから RPC を閉じる。窓の結果が 1.0 秒出なければ消灯を 1 回送る。`kill -9`・電源断では消灯を送れず、MCU は最後の状態を保持する
-  （MCU は時間切れを持たない）。そのとき `record.py` は E 行が来なかったことを見て `led_check.py off` を送る（10/29 の試験で消えた）。
+  `overrun` の行（3）で止まり、どれも消灯を送ってから RPC を閉じる。窓の結果が 1.0 秒出なければ消灯を 1 回送る。`kill -9`・`arduino-router` の停止では Linux 側が消灯を送れないが、
+  MCU が、`loop()` が最後の受信に気づいてから約 2 秒（2000 ms）で消す（#52、0049）。電源断は MCU ごと消える。`record.py` は E 行が来なかったことを見て `led_check.py off` を送る後始末を
+  今までどおり行う（10/29 の試験で消えた。MCU の消灯とどちらが先かは区別しない）。
+  `arduino-router` の停止の確かめ（#52）は `record.py --unoq-detector` の経路で行う（ハートビートが続く）。`record.py` は窓ごとの行を表示せず、窓が届き始めた時・
+  1 秒以上届かない時（「窓の行が N 秒届いていない」）・届き直した時（「窓の行が届き直した（途切れ N 秒）」）だけを表示する。router を止めている間は、`record.py` が動き続けていて
+  「窓の行が N 秒届いていない」が出ないことを確かめる（言えるのは「1 秒以上の途切れは表示されなかった」まで）。router を戻してから Ctrl-C で止め、終わりの集計の「RPC の失敗」を控える。
 - **再生モード**（一致の確かめだけ）: `--replay --no-rpc [--feat]` は標準入力から S16_LE・48 kHz・2 ch を読む（ファイルを開かない）。PC から
   `.venv/bin/python tools/unoq_replay_check.py data/raw/<学習用 meal> --feat`（M4-TRAIN の学習用 `meal` だけ。集計だけを出し、どこにもファイルを書かない）。
   10/29: `20261026-190244_self_meal` で窓 3979、`prob` の差の最大 1.61e-07、`positive`・`led` の不一致 0、FEAT の差の最大 5.00e-08。

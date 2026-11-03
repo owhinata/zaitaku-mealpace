@@ -1,7 +1,7 @@
 // firmware/unoq_mcu/host/test_unoq_mcu.cpp — UNO Q の MCU 側の PC 上のテスト
 // （Issue #38、plan 38d 第 4 節）。状態の範囲の検査、フレームの組み立て
 // （上下反転・13 列の左寄せ・右端の列は消灯）、同じフレームを書き直さない
-// こと、led_tick() と同じ関数の組の流れ。
+// こと、led_tick() と同じ関数の組の流れ、自律消灯（rx_hold、#52・0049）。
 // Arduino に依存しない（led_out.cpp と rpc_server.cpp は足さない）。
 // shapes.h・shape_seq.*・led_rule.h は firmware/unoq_mcu/ のリンクを通して
 // 読む。data/ を使わない。実行: bash firmware/unoq_mcu/host/test_unoq_mcu.sh
@@ -11,6 +11,7 @@
 
 #include "led_rule.h"
 #include "matrix_frame.h"
+#include "rx_hold.h"
 #include "shape_seq.h"
 #include "shapes.h"
 
@@ -185,6 +186,127 @@ static void test_7_bad_rpc_is_off() {
   CHECK_EQ(s.last, -1);
 }
 
+// ---------- rx_hold（Issue #52、docs/decisions/0049） ----------
+
+// 8. 起動から受信なし → いつでも 0
+static void test_8_rx_no_rx_is_off() {
+  RxHold h;
+  rx_hold_init(&h);
+  for (uint32_t t = 0; t < 10000; t += 7)
+    CHECK_EQ(rx_hold_shown(&h, 0, LED_GREEN, t), LED_OFF);
+}
+
+// 9. 気づいた直後と 1999 ms は状態、2000 ms で 0
+static void test_9_rx_off_at_2000() {
+  CHECK_EQ(UNOQ_RX_OFF_MS, 2000);
+  RxHold h;
+  rx_hold_init(&h);
+  CHECK_EQ(rx_hold_shown(&h, 1, LED_GREEN, 5000), LED_GREEN);
+  CHECK_EQ(rx_hold_shown(&h, 1, LED_GREEN, 5000 + 1999), LED_GREEN);
+  CHECK_EQ(rx_hold_shown(&h, 1, LED_GREEN, 5000 + 2000), LED_OFF);
+  CHECK_EQ(rx_hold_shown(&h, 1, LED_GREEN, 5000 + 60000), LED_OFF);
+}
+
+// 10. 同じ seq が続いても時刻を取り直さない
+static void test_10_rx_same_seq_no_refresh() {
+  RxHold h;
+  rx_hold_init(&h);
+  for (uint32_t t = 100; t < 100 + 2000; t += 5)
+    CHECK_EQ(rx_hold_shown(&h, 3, LED_YELLOW, t), LED_YELLOW);
+  CHECK_EQ(rx_hold_shown(&h, 3, LED_YELLOW, 100 + 2000), LED_OFF);
+}
+
+// 11. seq が進めば同じ状態でも取り直す（0.25 秒ごとの受信なら 10 秒でも
+// 消えない）
+static void test_11_rx_refresh_every_250ms() {
+  RxHold h;
+  rx_hold_init(&h);
+  uint32_t seq = 0;
+  for (uint32_t t = 0; t <= 10000; t += 10) {
+    if (t % 250 == 0) seq++;
+    CHECK_EQ(rx_hold_shown(&h, seq, LED_YELLOW, t), LED_YELLOW);
+  }
+}
+
+// 12. 状態 0 を受けても取り直す（0 のまま）。消灯の後に受ければ戻る
+static void test_12_rx_off_state_and_recover() {
+  RxHold h;
+  rx_hold_init(&h);
+  CHECK_EQ(rx_hold_shown(&h, 1, LED_OFF, 0), LED_OFF);
+  CHECK_EQ(h.has_rx, 1);
+  CHECK_EQ(h.last_rx_ms, 0);
+  CHECK_EQ(rx_hold_shown(&h, 2, LED_OFF, 1500), LED_OFF);
+  CHECK_EQ(h.last_rx_ms, 1500);
+  CHECK_EQ(rx_hold_shown(&h, 2, LED_GREEN, 9000), LED_OFF);  // 時間切れ
+  CHECK_EQ(rx_hold_shown(&h, 3, LED_GREEN, 9001), LED_GREEN);
+  CHECK_EQ(rx_hold_shown(&h, 3, LED_GREEN, 9001 + 1999), LED_GREEN);
+  CHECK_EQ(rx_hold_shown(&h, 3, LED_GREEN, 9001 + 2000), LED_OFF);
+}
+
+// 13. millis() の一周（0xFFFFFF00 付近から 0 をまたぐ）
+static void test_13_rx_millis_wrap() {
+  RxHold h;
+  rx_hold_init(&h);
+  const uint32_t t0 = 0xFFFFFF00u;
+  CHECK_EQ(rx_hold_shown(&h, 1, LED_GREEN, t0), LED_GREEN);
+  CHECK_EQ(rx_hold_shown(&h, 1, LED_GREEN, 0x00000010u), LED_GREEN);
+  CHECK_EQ(rx_hold_shown(&h, 1, LED_GREEN, t0 + 1999), LED_GREEN);
+  CHECK_EQ(rx_hold_shown(&h, 1, LED_GREEN, t0 + 2000), LED_OFF);
+}
+
+// 14. seq の一周（0xFFFFFFFF → 0）も受信として数える
+static void test_14_rx_seq_wrap() {
+  RxHold h;
+  rx_hold_init(&h);
+  CHECK_EQ(rx_hold_shown(&h, 0xFFFFFFFFu, LED_YELLOW, 0), LED_YELLOW);
+  CHECK_EQ(rx_hold_shown(&h, 0, LED_YELLOW, 1900), LED_YELLOW);
+  CHECK_EQ(rx_hold_shown(&h, 0, LED_YELLOW, 1900 + 1999), LED_YELLOW);
+  CHECK_EQ(rx_hold_shown(&h, 0, LED_YELLOW, 1900 + 2000), LED_OFF);
+}
+
+// 16. 時間切れの後は、最後の受信から 2^32 ms を超えて一周しても 0 のまま
+// （次の受信までラッチ。adversarial-review の指摘、#52）
+static void test_16_rx_off_latched_over_wrap() {
+  RxHold h;
+  rx_hold_init(&h);
+  const uint32_t t0 = 1000;
+  CHECK_EQ(rx_hold_shown(&h, 1, LED_GREEN, t0), LED_GREEN);
+  CHECK_EQ(rx_hold_shown(&h, 1, LED_GREEN, t0 + 2000), LED_OFF);
+  CHECK_EQ(h.has_rx, 0);
+  for (uint32_t t = t0 + 2001; t < t0 + 10000; t += 97)
+    CHECK_EQ(rx_hold_shown(&h, 1, LED_GREEN, t), LED_OFF);
+  // last_rx_ms + 0x100000000 + 100（uint32 で）。ラッチが無いと再点灯する
+  const uint32_t wrapped = (uint32_t)((uint64_t)t0 + 0x100000000ull + 100);
+  CHECK_EQ(rx_hold_shown(&h, 1, LED_GREEN, wrapped), LED_OFF);
+  CHECK_EQ(rx_hold_shown(&h, 1, LED_GREEN, wrapped + 1000), LED_OFF);
+  // 新しい受信で戻る
+  CHECK_EQ(rx_hold_shown(&h, 2, LED_GREEN, wrapped + 1001), LED_GREEN);
+}
+
+// 15. led_tick() と同じ流れ（rx_hold_shown → shape_seq_frame →
+// matrix_view_update）で、時間切れのときに全消灯のフレームを 1 回だけ書く
+static void test_15_rx_flow_writes_off_once() {
+  Sim s;
+  sim_init(&s);
+  RxHold h;
+  rx_hold_init(&h);
+  sim_tick(&s, rx_hold_shown(&h, 0, LED_OFF, 0), 0);  // 起動の消灯
+  CHECK_EQ(s.writes, 1);
+  sim_tick(&s, rx_hold_shown(&h, 1, LED_GREEN, 100), 100);
+  CHECK_EQ(s.writes, 2);
+  CHECK_EQ(s.last, SHAPE_SMILE);
+  for (uint32_t t = 101; t < 100 + 2000; ++t)
+    sim_tick(&s, rx_hold_shown(&h, 1, LED_GREEN, t), t);
+  CHECK_EQ(s.writes, 2);
+  for (uint32_t t = 100 + 2000; t < 100 + 6000; ++t)
+    sim_tick(&s, rx_hold_shown(&h, 1, LED_GREEN, t), t);
+  CHECK_EQ(s.writes, 3);
+  CHECK_EQ(s.last, -1);
+  uint8_t m[MATRIX_ROWS][MATRIX_COLS];
+  matrix_frame_compose(s.last, m);
+  CHECK_EQ(count_on(m), 0);
+}
+
 int main() {
   test_1_state_from_rpc();
   test_2_compose();
@@ -193,6 +315,15 @@ int main() {
   test_5_wave_every_200ms();
   test_6_smile_then_off();
   test_7_bad_rpc_is_off();
+  test_8_rx_no_rx_is_off();
+  test_9_rx_off_at_2000();
+  test_10_rx_same_seq_no_refresh();
+  test_11_rx_refresh_every_250ms();
+  test_12_rx_off_state_and_recover();
+  test_13_rx_millis_wrap();
+  test_14_rx_seq_wrap();
+  test_15_rx_flow_writes_off_once();
+  test_16_rx_off_latched_over_wrap();
   printf("test_unoq_mcu: %d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

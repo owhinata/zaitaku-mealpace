@@ -4,12 +4,15 @@ UNO Q の上で:
 python3 -B ~/zaitaku-mealpace-device/led_check.py wave|smile|off|bench
 
 - wave: 流れる波線（状態 1）にして終わる。smile: 微笑む顔（状態 2）にして
-  終わる（どちらも人が目で見る）。off: 消して終わる。
+  終わる（どちらも人が目で見る）。off: 消して終わる。MCU は loop() が受信に
+  気づいてから約 2 秒（2000 ms）次の状態が届かなければ自分で消す
+  （docs/decisions/0049）ので、wave・smile の表示は約 2 秒で消える。
 - bench: 微笑む顔と消灯を交互に送り、1 回ごとの往復（状態を渡して応答が
   返るまで。描画は含まない）を測って、件数・中央値・95 パーセンタイル・
   最大（ms）を標準出力に出す。最後（例外のときも）に消灯を送る。
 
-画の確かめだけで、表示の規則（docs/decisions/0018。M4）は持たない。
+画の確かめだけで、表示の規則（docs/decisions/0018）は持たない（規則は
+detector.py が持つ）。
 RPC は mcu_rpc.py の中だけ。ファイルは書かない。標準ライブラリだけ。
 """
 
@@ -57,11 +60,13 @@ def run_bench(link, n, warmup, clock=time.perf_counter_ns):
 _SHOW = {
     "wave": (
         mcu_rpc.STATE_WAVE,
-        "表示を流れる波線にしました（確かめ。表示の規則はまだ無い）",
+        "表示を流れる波線にしました（確かめ。MCU は次の状態が約 2 秒"
+        "届かなければ消します）",
     ),
     "smile": (
         mcu_rpc.STATE_SMILE,
-        "表示を微笑む顔にしました（確かめ。表示の規則はまだ無い）",
+        "表示を微笑む顔にしました（確かめ。MCU は次の状態が約 2 秒"
+        "届かなければ消します）",
     ),
     "off": (mcu_rpc.STATE_OFF, "表示を消しました（確かめ）"),
 }

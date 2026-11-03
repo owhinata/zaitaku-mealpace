@@ -5,7 +5,9 @@
 //
 // provide のハンドラはライブラリの別スレッド（"bridge"）で動く。ハンドラは
 // 範囲を検査して状態を渡すだけで、描画しない（描画は loop() の led_tick）。
-// 応答は状態を渡した時点で返る（描画の完了は含まない）。
+// 応答は状態を渡した時点で返る（描画の完了は含まない）。受けたこと（範囲外を
+// 含む）は led_set_state が数え、loop() が気づいてから約 2 秒（2000 ms）次の
+// 受信が無ければ MCU が消灯する（docs/decisions/0049）。
 #include "rpc_server.h"
 #include "led_out.h"
 #include "matrix_frame.h"

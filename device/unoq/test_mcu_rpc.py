@@ -633,7 +633,7 @@ class TestStatic(unittest.TestCase):
                     self.assertNotRegex(
                         text, r'(?m)^\s*#\s*include\s*[<"]Arduino_LED_Matrix'
                     )
-                if rel.startswith("matrix_frame"):
+                if rel.startswith(("matrix_frame", "rx_hold")):
                     self.assertNotRegex(
                         text, r'(?m)^\s*#\s*include\s*[<"]Arduino\.h'
                     )

@@ -642,6 +642,22 @@ class InProcess(unittest.TestCase):
         self.assertTrue(e["rpc"])
         self.assertFalse(json.loads(lines2[-1][2:])["rpc"])
 
+    def test_r11_same_state_resent_every_window(self):
+        """#52（0049 決定 3）: 状態が変わらなくても窓ごと（0.25 秒ごと）に
+        送る。変化したときだけに間引かない（MCU は loop() が受信に気づいて
+        から約 2 秒次の受信が無ければ消灯するので、窓が出ている間は送り続ける）。
+        """
+        pcm = self.f.pcm[: 48000 * 4 * 8]  # 8 秒（合成）
+        rc, lines, log, _, err = self.run_main(["--replay"], [pcm])
+        self.assertEqual(rc, 0, err)
+        leds = [int(ln.split()[5]) for ln in self.windows(lines)]
+        repeats = sum(1 for a, b in zip(leds, leds[1:]) if a == b)
+        # 同じ状態が続く区間があること（無ければこのテストは確かめられない）
+        self.assertGreater(repeats, 0)
+        sent = log[1:-2]  # 最初の消灯と、最後の消灯・close を除く
+        self.assertEqual(len(sent), len(leds))
+        self.assertEqual(sent, leds)
+
     def test_r2_idle_one_second_sends_off(self):
         a = self.f.pcm[: 48000 * 4 * 3]
         b = self.f.pcm[48000 * 4 * 3 : 48000 * 4 * 5]
