@@ -433,6 +433,8 @@ EXPECTED_DEPLOY = [
     "mel26_htk_0_4000.npy",
     "mel40_htk_0_4000.npy",
     "postprocess.py",
+    # 単独モードのユーザーユニット（0050）。code_sha256 には入らない
+    "zaitaku-detector.service",
 ]
 # analysis/models/ を指すリンクは .npz だけ（重み。plan #47 の Q3）
 MODELS = ANALYSIS / "models"

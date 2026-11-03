@@ -108,6 +108,8 @@ ssh arduino@<UNO Q> 'find ~ /tmp -xdev -type f \( -iname "*.wav" -o -iname "*.ra
 新しいファイルに音声の形式のものが無く、音声の拡張子のファイルが 0 件であること（docs/log/2026-10-08.md と同じ方法）。
 `~/.local/state/wireplumber/stream-properties` は確認から除く。`pw-record` のストリームが来ると WirePlumber が音量・ミュートの復元の状態を書くテキストで、音声ではない（10/10 の実測）。
 ほかに音声ではない既知のもの（10/13）: `~/.bash_history`（人の対話のシェルの履歴）、`/tmp/.X0-lock`（起動のたびに X が作る）、`~/zaitaku-mealpace-device/` の配ったファイル（下）。
+自動起動のユニットを有効にした後（#53、0050）: `~/.config/systemd/user/zaitaku-detector.service` と `~/.config/systemd/user/default.target.wants/zaitaku-detector.service`
+（どちらもシンボリックリンク。`find -type f` には出ない。下の「自動起動」の確かめ方で `find -type l` で見る）、journald のファイル（`/var/log/journal` か `/run/log/journal`。文だけ）。
 #51 の計測用の venv がある間（10/24〜）: `~/zaitaku-mealpace-bench-venv/` の下のファイル（pip が入れたもの）、`~/.cache/pip/`（pip のキャッシュ）、
 `~/.cache/Microsoft/DeveloperTools/.onnxruntime/` の `deviceid`・`onnxruntime.db`（ONNX Runtime 1.31 が import のたびに作る・書き直す。0039 決定 6）。
 `~/.cache/mesa_shader_cache/`（Mesa の GPU のシェーダのキャッシュ。10/24 14:44 にできた。計測は `MESA_SHADER_CACHE_DISABLE=true` で増やさない）。
@@ -140,7 +142,7 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
   `device/unoq/DEPLOY_FILES` の一覧だけを `~/zaitaku-mealpace-device/` に配る（#51 の後は 14 個。下の「推論ランタイムの比較の計測」。#47 で入れ替えて今は別の 14 個。下の「検出器」）。#44 の 9 つ（10/24）: `mcu_rpc.py`、`led_check.py`、`bench_infer.py`、`features_np.py`、
   `mel40_htk_0_4000.npy`、`mel26_htk_0_4000.npy`、`features_np_ref.npz`、`postprocess.py`、`evaluate.py`。うち後ろの 6 つは `analysis/` へのリンクで、
   送る前に先が `analysis/` の直下の普通のファイルであることを確かめる（0035 の追記）。UNO Q の上はどれも普通のファイル。音声のファイルは無い。
-  常駐させない（systemd のユニットは無い）。ファイルを書かない。実行は `python3 -B`（`__pycache__` を作らない）:
+  常駐は単独モードのユーザーユニット 1 つだけ（`zaitaku-detector.service`、#53、0050。下の「自動起動」）。ファイルを書かない。実行は `python3 -B`（`__pycache__` を作らない）:
 
   ```
   ssh arduino@unoq.local 'python3 -B ~/zaitaku-mealpace-device/led_check.py wave'    # smile / off / bench --n 100 --warmup 5
@@ -228,6 +230,7 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
   `m4-0038.npz` は `analysis/models/` へのリンク（`deploy-unoq` は `analysis/models/` の直下の `.npz` も受ける）。`bench_runtimes.py` と `cnn_rand0.*` の 4 つは外した
   （リポジトリには残す。UNO Q の上の古いものは人が 10/29 に `rm` した。`--delete` は使わない）。配った後に `ls -A ~/zaitaku-mealpace-device/` が一覧と一致すること。
   一覧の外の `.py`・`.npy`・`.npz` が残っていると、H 行の `code_sha256` が PC の値と合わず `record.py` は始めない。
+  11/3（#53）から一覧に `zaitaku-detector.service`（単独モードのユニット）を足して 15 個。`.service` は `code_sha256` に入らない（`.py`・`.npy`・`.npz` だけを数える）。
 - **起動**（人が直接打つのは照合だけ。記録は `tools/record.py --unoq-detector` が ssh で起動する）。BLAS のスレッドを 1 つにする 3 つの変数を `env` で渡し
   （`detector.py` も numpy の import の前に同じ値を置く。0040 決定 3）、`python3 -u -B`（`__pycache__` を作らない）:
 
@@ -255,6 +258,8 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
   `arduino-router` の停止の確かめ（#52）は `record.py --unoq-detector` の経路で行う（ハートビートが続く）。`record.py` は窓ごとの行を表示せず、窓が届き始めた時・
   1 秒以上届かない時（「窓の行が N 秒届いていない」）・届き直した時（「窓の行が届き直した（途切れ N 秒）」）だけを表示する。router を止めている間は、`record.py` が動き続けていて
   「窓の行が N 秒届いていない」が出ないことを確かめる（言えるのは「1 秒以上の途切れは表示されなかった」まで）。router を戻してから Ctrl-C で止め、終わりの集計の「RPC の失敗」を控える。
+  単独モード（`--live --standalone`、#53、0050）の止まり方: SIGTERM（`systemctl --user stop`。0 で終わり、再起動しない）、入力の終わり（アダプタが無い・抜けた。0 以外）、`overrun`（3）。
+  ハートビートと標準出力の詰まりは無い（標準入力を読まず、標準出力に行を出さない）。`kill -9` は MCU の約 2 秒で消え、ユニットの `Restart` が約 2 秒後に起動し直す。
 - **再生モード**（一致の確かめだけ）: `--replay --no-rpc [--feat]` は標準入力から S16_LE・48 kHz・2 ch を読む（ファイルを開かない）。PC から
   `.venv/bin/python tools/unoq_replay_check.py data/raw/<学習用 meal> --feat`（M4-TRAIN の学習用 `meal` だけ。集計だけを出し、どこにもファイルを書かない）。
   10/29: `20261026-190244_self_meal` で窓 3979、`prob` の差の最大 1.61e-07、`positive`・`led` の不一致 0、FEAT の差の最大 5.00e-08。
@@ -262,6 +267,46 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
   音声の拡張子の `find`（上の節）が 0 件、`~/zaitaku-mealpace-device/` に `__pycache__` が無いこと。スワップは `/usr/sbin/swapon --show`（ユーザーの PATH に無い）か
   `cat /proc/swaps` で zram だけ（`record.py` は起動前に `/proc/swaps` を読み、zram 以外があれば始めない）。コアダンプは `ls /var/lib/systemd/coredump/ /var/crash/` が空
   （10/29: どちらも空・無し）。
+
+## 自動起動（単独モード、#53、docs/decisions/0050）
+
+電源投入から PC なしで、検出器がマトリクスに目安だけを出す。PC に何も送らず、UNO Q にファイルを書かず、journald には文だけを残す。
+ユニットは `device/unoq/zaitaku-detector.service`（`deploy-unoq` で `~/zaitaku-mealpace-device/` に配る）。
+
+- **前提**: 0049 の MCU のスケッチ（約 2 秒の自律消灯）を書き込み済みであること。それより前の版では有効にしない。linger が有効（上の表）。
+  `flock` に `-F`（`--no-fork`）があること（`flock --version`、`flock --help | grep -e --no-fork`。**無ければ有効にせず、plan を直す**）。
+  user manager のグループ: `systemd-run --user --wait -P id` に `arduino-router`（router のソケット）と `audio`（ALSA）があること。
+  非対話の ssh から `systemctl --user` を打つときは `XDG_RUNTIME_DIR=/run/user/$(id -u)` を付ける（10/8 の `pw-dump` と同じ。実機で要否を確かめる）。下の例では省いている。
+- **有効にする（1 回だけ）**:
+
+  ```
+  systemctl --user link ~/zaitaku-mealpace-device/zaitaku-detector.service
+  systemctl --user enable zaitaku-detector
+  systemctl --user start zaitaku-detector
+  ```
+
+- **止める・戻す**: `systemctl --user stop zaitaku-detector`（消灯して止まる。再起動しない）、`start`、外すときは `disable`（リンクは `systemctl --user disable` が `default.target.wants/` から外す。
+  `~/.config/systemd/user/zaitaku-detector.service` のリンクは `rm` で外す）。
+- **状態**: `systemctl --user status zaitaku-detector`、`journalctl --user -u zaitaku-detector -b --no-pager`。止まった・失敗した理由の文は `detector: ` で始まる。
+  始めの文に `code_sha256` の先頭 12 桁が出る（どの版が動いたかを log に書く）。
+- **再起動の上限**: 0 以外で終わると 2 秒後に起動し直す。120 秒に 10 回を超えると `failed` で止まる（アダプタを挿し忘れたなど）。直したら
+  `systemctl --user reset-failed zaitaku-detector && systemctl --user start zaitaku-detector`。
+  記録のロックが取れなかったとき（75）は再起動しない（`failed`）。記録の後に `start`。
+- **配り直し**: `stop` → `cmake --build build-unoq --target deploy-unoq` → `systemctl --user daemon-reload` → `--selftest`（上の「検出器」）→ `start`。
+  ユニットの `--expect-config`・`--expect-sha256` は重みと構成の値なので、直すのは重み・構成を替えたときだけ（`device/unoq/test_detector.py` の sa6 が `analysis/fixed_eval.py` と照らす）。
+- **記録の前に `stop`、後に `start`**: `record.py --unoq-detector` と UNO Q を通す `record.py --throat` は、起動前にユニットの状態を読み、動いている（`activating` = 再起動の待ちを含む）なら
+  始めない。UNO Q の上の記録の子（`arecord`・`pw-record`）と検出器は、どれも `flock -n -F -E 75 /home/arduino` の下で起動するので、同時には動かない（取れない側は 75 で終わる）。
+  `detector.py --live` を手で直接起動するときも `exec flock -n -F -E 75 /home/arduino …` を前に付ける（付けないと排他が効かない。0050 決定 4）。
+- **確かめ方（読み取り）**:
+  - 普通のファイル: 記録の前の時刻を控え、`find ~ /tmp /var/tmp -xdev -type f -newermt "<時刻>"` が 0 件。音声の拡張子の `find`（上の節）が 0 件、`__pycache__` 無し、
+    `ls /var/lib/systemd/coredump/ /var/crash/` が空。
+  - リンク: 時刻に頼らず `find ~ -xdev -type l` で全部出して見る。ユニットの 2 つのリンク（`~/.config/systemd/user/zaitaku-detector.service` と
+    `~/.config/systemd/user/default.target.wants/zaitaku-detector.service`）の先が、`~/zaitaku-mealpace-device/zaitaku-detector.service` か
+    `~/.config/systemd/user/zaitaku-detector.service` のどちらかであること。ほかに知らないリンクが無いこと。
+  - journald: `journalctl --user -u zaitaku-detector -b --no-pager -o cat` について、まず全行で D/T/F/H/E の形の行（`D `・`T `・`F `・`H `・`E ` で始まる、または `detector: ` の後が
+    その形）が 0 であることを確かめる。そのうえで「`detector: ` の行」「systemd の既知の行（`Started`・`Stopped`・`Stopping`・`Main process exited`・`Failed with result`・
+    `Scheduled restart job`・`Consumed` など）」「どちらでもない行」の 3 つに分けて数える。3 つ目が 1 行でもあれば中身の種類を調べる。中身は log に貼らず、数と文の種類だけを書く。
+    journald の置き場所（`ls /var/log/journal`。あれば永続、無ければ `/run` で揮発）も書く。
 
 ## 構成 A は使わない。構成 B も記録には使わない
 

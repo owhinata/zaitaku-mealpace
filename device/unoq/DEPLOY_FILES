@@ -12,3 +12,4 @@ audio_in.py
 m4_infer.py
 led_rule.py
 m4-0038.npz
+zaitaku-detector.service

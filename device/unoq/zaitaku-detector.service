@@ -1,0 +1,27 @@
+# 在宅MealPace の検出器（単独モード、マトリクスの目安だけ。docs/decisions/0050）
+# 置き場所: ~/zaitaku-mealpace-device/（deploy-unoq）。有効にする手順は docs/unoq-setup.md
+# 「自動起動（単独モード）」。ロックのパス /home/arduino は tools/record.py の
+# UNOQ_LOCK_DIR と同じ（記録と同時に動かさない。0050 決定 4）。
+[Unit]
+Description=zaitaku-mealpace detector (standalone, LED only, docs/decisions/0050)
+After=sound.target
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+Type=simple
+WorkingDirectory=%h/zaitaku-mealpace-device
+Environment=OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/flock -n -F -E 75 /home/arduino /usr/bin/python3 -B %h/zaitaku-mealpace-device/detector.py --live --standalone --device hw:CARD=Audio,DEV=0 --expect-config "set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5" --expect-sha256 c786086f069c55c55b27eea860963c3c950c04b728fe65d52bc35a7a4a806d90
+Restart=on-failure
+RestartSec=2
+RestartPreventExitStatus=75
+StandardInput=null
+StandardOutput=null
+StandardError=journal
+LimitCORE=0
+KillMode=mixed
+TimeoutStopSec=5
+
+[Install]
+WantedBy=default.target

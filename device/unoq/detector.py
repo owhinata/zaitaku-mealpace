@@ -8,6 +8,14 @@
   再生（一致の確かめ。PC の学習用の記録の音声を標準入力で受ける。書かない）:
       ... detector.py --replay --no-rpc [--feat] --expect-config ... --expect-sha256 ...
   照合だけ: ... detector.py --selftest --expect-config ... --expect-sha256 ...
+  単独モード（Issue #53、docs/decisions/0050。systemd のユーザーユニット
+  zaitaku-detector.service が flock の下で起動する。PC なし、目安だけ）:
+      ... python3 -B detector.py --live --standalone [--device <PCM 名>] \\
+      --expect-config '<M4-CONFIG>' --expect-sha256 <sha256>
+  単独モードは標準入力を読まず（ハートビートを見ない）、標準出力に行を出さない
+  （H・F・D・T・E のどれも出さない）。--feat・--no-rpc とは併用しない。止まった
+  ときの消灯は MCU の 2 秒（0049）が受け持つ。標準エラーには始めに code_sha256 の
+  先頭 12 桁、終わりに窓の数と失敗の数を 1 行ずつ出す（窓ごとの値は出さない）。
 
 手順: 照合（features_np_ref.npz との差 1e-5、im2col の新旧の差 1e-6）→ 重み
 （m4-0038.npz）の sha256 と構成の照合（違えば消灯のまま 2 で終わる）→ 試しの推論
@@ -190,6 +198,23 @@ class Output:
             return False
         self._th.join(timeout=timeout)
         return not self._th.is_alive() and not self.failed
+
+
+class NullOutput:
+    """単独モードの出口（0050）。Output と同じ口で、行を捨てる。スレッドを
+    起こさず、標準出力に触れない。"""
+
+    failed = False
+    qmax = 0
+
+    def qsize(self):
+        return 0
+
+    def put(self, line, check=True):
+        return
+
+    def finish(self, timeout=WRITER_JOIN_S):
+        return True
 
 
 def _writer(q, state, out=None):
@@ -547,7 +572,9 @@ def header(model_sha, a, model):
         "blas": mapped_blas(),
         "threads": thread_count(),
     }
-    if a.live:
+    if a.standalone:
+        h["standalone"] = True
+    elif a.live:
         h["heartbeat_s"] = HEARTBEAT_S
         h["heartbeat_timeout_s"] = HEARTBEAT_TIMEOUT_S
     if a.feat:
@@ -568,11 +595,19 @@ def parse_args(argv):
     ap.add_argument("--device", default=None)
     ap.add_argument("--feat", action="store_true")
     ap.add_argument("--no-rpc", action="store_true")
+    # 単独モード（0050）: 標準入力・標準出力を使わない。目安だけ
+    ap.add_argument("--standalone", action="store_true")
     ap.add_argument("--expect-config", required=True)
     ap.add_argument("--expect-sha256", required=True)
     a = ap.parse_args(argv)
     if a.device is not None and not a.live:
         ap.error("--device は --live のときだけ")
+    if a.standalone and not a.live:
+        ap.error("--standalone は --live のときだけ")
+    if a.standalone and a.feat:
+        ap.error("--standalone では --feat を使わない（行を出さない）")
+    if a.standalone and a.no_rpc:
+        ap.error("--standalone では --no-rpc を使わない（目安だけを出す）")
     if a.live and a.device is None:
         a.device = audio_in.DEFAULT_DEVICE
     return a
@@ -641,7 +676,14 @@ def main(
         stdin_fd = sys.stdin.buffer.fileno()
     # スレッド数は writer のスレッドを起こす前に数える（BLAS のスレッドの確かめ）
     head = header(model_sha, a, model)
-    out = Output(3 if a.feat else 2, stdout=stdout)
+    if a.standalone:
+        out = NullOutput()
+        _log(
+            "単独モードで始める（標準出力に行を出さない。code_sha256 先頭 12 桁 "
+            f"{head['code_sha256'][:12]}）"
+        )
+    else:
+        out = Output(3 if a.feat else 2, stdout=stdout)
     rpc = None if a.no_rpc else Rpc(open_link)
     src = None
     stop, code = "error", EXIT_ERROR
@@ -663,15 +705,18 @@ def main(
             src = audio_in.ReplayInput(stdin_fd)
         send = rpc.set if rpc is not None else (lambda led: None)
         pipe = Pipeline(det, out, send, a.live, t0_ns)
-        fds = [src.fileno()] + ([stdin_fd] if a.live else [])
+        # 標準入力を見るのは record.py から起動したライブだけ（単独モードの
+        # 標準入力は /dev/null。読むと EOF で止まる）
+        watch_stdin = a.live and not a.standalone
+        fds = [src.fileno()] + ([stdin_fd] if watch_stdin else [])
         idle_sent = False
-        hb = Heartbeat(HEARTBEAT_TIMEOUT_S) if a.live else None
+        hb = Heartbeat(HEARTBEAT_TIMEOUT_S) if watch_stdin else None
         while True:
             r = select.select(fds, [], [], SELECT_S)[0]
             if out.failed:
                 stop, code = "stdout-closed", EXIT_CLOSED
                 break
-            if a.live and stdin_fd in r:
+            if watch_stdin and stdin_fd in r:
                 if not os.read(stdin_fd, 4096):
                     stop, code = "eof", EXIT_OK
                     break
@@ -757,7 +802,14 @@ def main(
     out.put(emit("E", end), check=False)
     if code != EXIT_STALL:
         out.finish()
-    _log(f"終わり（{stop}）")
+    if a.standalone:
+        _log(
+            f"終わり（{stop}）windows={end['windows']}"
+            f" rpc_errors={end['rpc_errors']}"
+            f" overrun_lines={end['overrun_lines']}"
+        )
+    else:
+        _log(f"終わり（{stop}）")
     return code
 
 

@@ -21,10 +21,12 @@ ALSA と音声の入力を扱うのはこのモジュールだけ（docs/decisio
 
 import collections
 import ctypes
+import errno
 import os
 import re
 import select
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -208,22 +210,64 @@ class ReplayInput(_Input):
         super().__init__(sys.stdin.buffer.fileno() if fd is None else fd)
 
 
+def lock_fds(fd_dir="/proc/self/fd"):
+    """受け継いだディレクトリの fd（0〜2 以外）の並び。flock -F が exec の後も
+    持たせるロックの fd（docs/decisions/0050 決定 4）で、arecord にも渡して
+    arecord が終わるまでロックを残す。fstat だけ（読まない・書かない）。
+    列挙できなければ InputError（ロックを渡せたかが分からないので arecord を
+    起こさない。fail-closed）。ロックの fd が無ければ空（flock の下で起動して
+    いない。起こしてよい）。"""
+    try:
+        names = os.listdir(fd_dir)
+    except OSError as e:
+        raise InputError(
+            f"受け継いだ fd を確かめられない（{fd_dir}）ので入力を開かない: "
+            f"{type(e).__name__}"
+        ) from None
+    out = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        fd = int(name)
+        if fd <= 2:
+            continue
+        try:
+            st = os.fstat(fd)
+        except OSError as e:
+            if e.errno == errno.EBADF:
+                continue  # listdir が使った fd（もう閉じている）
+            # ロックの fd かもしれないものを確かめられない（fail-closed）
+            raise InputError(
+                f"受け継いだ fd を確かめられない（fd {fd}、"
+                f"{errno.errorcode.get(e.errno, e.errno)}）ので入力を開かない"
+            ) from None
+        if stat.S_ISDIR(st.st_mode):
+            out.append(fd)
+    return tuple(sorted(out))
+
+
 class LiveInput(_Input):
     """arecord の子プロセスの標準出力から読む。argv はテストのときだけ差し替える
     （PC の python3 で PCM を出す偽の arecord。CLI からは差し替えられない）。"""
 
     kind = "live"
+    FD_DIR = "/proc/self/fd"  # テストのときだけ差し替える
 
     def __init__(self, device=DEFAULT_DEVICE, argv=None):
         check_device(device)
         self.device = device
         self.argv = arecord_argv(device) if argv is None else list(argv)
+        # 受け継いだロックの fd を arecord にも渡す（検出器が SIGKILL で死んで
+        # も、arecord が終わるまでロックが外れない。0050 決定 4）。確かめられ
+        # なければ InputError のまま上げる（arecord を起こさない）
+        self.pass_fds = lock_fds(self.FD_DIR)
         try:
             self.proc = subprocess.Popen(
                 self.argv,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                pass_fds=self.pass_fds,
             )
         except OSError as e:
             raise InputError(f"arecord を起動できません: {e}") from None

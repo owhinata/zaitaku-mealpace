@@ -172,3 +172,13 @@ docs/decisions/0025「0001 との関係」の「Linux 側の Python の配置の
   約 2 秒（2000 ms）次の受信が無ければ、MCU が自分でマトリクスを全消灯にする（`firmware/unoq_mcu/rx_hold.h`）。保持は今までどおり持たない（Linux 側の `detector.py` が持つ）。
 - `zm_set_state(int)` の名前・引数・戻り値、状態 0 / 1 / 2 と 2 つの画、RPC と Arduino の API を呼ぶモジュール（`rpc_server.cpp`・`led_out.cpp`）は変えない。
 - 「確かめたこと（10/13）」の記述は 10/13 の事実として残す。
+
+## 追記（2026-11-03、Issue #53）: 常駐のユニット
+
+上の決定の本文は変えない。
+
+- 決定 1 の「常駐させない（systemd のユニットは作らない）」を docs/decisions/0050 の決定 3 で改めた: 常駐は単独モードのユーザーユニット 1 つ（`zaitaku-detector.service`）だけ。
+  ユニットは `device/unoq/` に置き、DEPLOY_FILES で `~/zaitaku-mealpace-device/` に配る（`.service` は `code_sha256` に入らない）。人が 1 回だけ `systemctl --user link` と `enable` を行う。
+- 決定 2 の「記録の間は配ったプログラムを動かさない」は、ユニットにも当てる。UNO Q の上の記録の子と検出器は同じ `flock` のロック（`/home/arduino`）の下で起動し、
+  同時には動かない（0050 決定 4）。記録の経路は今までどおり標準のコマンドの標準出力を ssh で PC に流すだけ（`flock` も標準のコマンド。UNO Q にファイルを作らない）。
+- 決定 3（配ったプログラムはファイルを書かない）は変えない。

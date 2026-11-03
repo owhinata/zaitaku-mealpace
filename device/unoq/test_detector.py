@@ -13,6 +13,7 @@ PCM を出す）で同じプロセスの中で確かめる。data/ は使わな�
 
 import ast
 import contextlib
+import errno
 import io
 import json
 import os
@@ -26,6 +27,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -923,6 +925,271 @@ def _write_all(fd, data):
         view = view[n:]
 
 
+class StandaloneTest(unittest.TestCase):
+    """単独モード（--live --standalone、Issue #53、docs/decisions/0050）。偽の
+    arecord と偽の McuLink だけ（実機・音声のファイルを使わない）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.f = fixture()
+
+    feed = InProcess.feed  # 書くスレッドつきのパイプ（InProcess と同じ）
+
+    FAKE_SRC = (
+        "import sys, time\n"
+        "data = sys.stdin.buffer.read()\n"
+        "o = sys.stdout.buffer\n"
+        "for i in range(0, len(data), 24000):\n"
+        "    o.write(data[i:i+24000]); o.flush(); time.sleep(0.002)\n"
+        "if len(sys.argv) < 2:\n"
+        "    time.sleep(30)\n"
+    )
+
+    def run_standalone(self, seconds=3, term_after=3.0, syn=False, end=False):
+        """(rc, 標準出力, 標準エラー, 偽の McuLink の記録, 所要の秒数)。
+        標準入力は /dev/null（systemd と同じ）。end なら偽の arecord は送り
+        終えたら終わる（入力が途中で終わる）。でなければ term_after 秒後に
+        SIGTERM。"""
+        pcm = self.f.pcm[: 48000 * 4 * seconds]
+        if syn:
+            model, sha = self.f.syn / "m4-0038.npz", self.f.syn_sha
+        else:
+            model, sha = detector.MODEL_PATH, M4_SHA
+        with tempfile.TemporaryDirectory() as d:
+            pcm_path = pathlib.Path(d) / "pcm.raw"
+            pcm_path.write_bytes(pcm)
+            fake = [
+                "sh",
+                "-c",
+                f'exec "{sys.executable}" -I -c "$0" "$@" < "{pcm_path}"',
+                self.FAKE_SRC,
+                *(["end"] if end else []),
+            ]
+            null = os.open(os.devnull, os.O_RDONLY)
+            timer = None
+            if not end:
+                timer = threading.Timer(
+                    term_after, os.kill, (os.getpid(), signal.SIGTERM)
+                )
+                timer.start()
+            log = []
+            out = io.StringIO()
+            err = io.StringIO()
+            t0 = time.monotonic()
+            try:
+                with contextlib.redirect_stderr(err):
+                    rc = detector.main(
+                        [
+                            "--live",
+                            "--standalone",
+                            "--expect-config",
+                            CFG,
+                            "--expect-sha256",
+                            sha,
+                        ],
+                        open_link=lambda: FakeLink(log),
+                        live_argv=fake,
+                        stdin_fd=null,
+                        stdout=out,
+                        model_path=model,
+                    )
+            finally:
+                if timer is not None:
+                    timer.cancel()
+                os.close(null)
+            dt = time.monotonic() - t0
+        return rc, out.getvalue(), err.getvalue(), log, dt
+
+    def test_sa1_runs_without_heartbeat_and_prints_nothing(self):
+        rc, out, err, log, dt = self.run_standalone()
+        self.assertEqual(rc, 0, err)
+        # ハートビートの 2.0 秒を超えても、/dev/null の EOF でも止まらない
+        self.assertGreater(dt, 2.5)
+        self.assertEqual(out, "")
+        self.assertIn("単独モードで始める", err)
+        self.assertIn("終わり（signal）windows=", err)
+        self.assertIn("rpc_errors=0", err)
+        self.assertIn("overrun_lines=0", err)
+        # 最初の消灯、窓ごとの led、（窓が止まって 1 秒の消灯）、最後の消灯
+        self.assertEqual(log[0], 0)
+        self.assertEqual(log[-2:], [0, "close"])
+        n = urc.device_windows(48000 * 3)
+        self.assertGreaterEqual(len(log), 1 + n + 2)
+
+    def test_sa2_stderr_has_no_window_values(self):
+        # 合成の重みで陽性の窓（顔 = 2）を含む入力
+        rc, out, err, log, _ = self.run_standalone(seconds=3, syn=True)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, "")
+        # 同じ入力の窓ごとの prob（再生、行あり）
+        pcm = self.f.pcm[: 48000 * 4 * 3]
+        r, th = self.feed([pcm])
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                rc2 = detector.main(
+                    [
+                        "--replay",
+                        "--no-rpc",
+                        "--expect-config",
+                        CFG,
+                        "--expect-sha256",
+                        self.f.syn_sha,
+                    ],
+                    stdin_fd=r,
+                    stdout=buf,
+                    model_path=self.f.syn / "m4-0038.npz",
+                )
+        finally:
+            os.close(r)
+            th.join(timeout=30)
+        self.assertEqual(rc2, 0)
+        probs = [
+            ln.split()[3]
+            for ln in buf.getvalue().splitlines()
+            if ln[:2] == "D "
+        ]
+        self.assertTrue(probs)
+        lines = err.splitlines()
+        self.assertTrue(lines)
+        for ln in lines:
+            with self.subTest(line=ln[:40]):
+                self.assertTrue(ln.startswith("detector: "), ln)
+                body = ln[len("detector: ") :]
+                self.assertIsNone(re.match(r"[HFDTE] ", body), ln)
+        for p in probs:
+            if len(p) >= 6:  # 短い値（0 など）は文の数と紛れる
+                self.assertNotIn(p, err)
+
+    def test_sa3_rejects_feat_no_rpc_replay_selftest(self):
+        base = ["--expect-config", CFG, "--expect-sha256", M4_SHA]
+        for extra in (
+            ["--live", "--standalone", "--feat"],
+            ["--live", "--standalone", "--no-rpc"],
+            ["--replay", "--standalone"],
+            ["--selftest", "--standalone"],
+        ):
+            with self.subTest(extra=extra):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as cm:
+                        detector.parse_args(extra + base)
+                self.assertEqual(cm.exception.code, 2)
+        a = detector.parse_args(["--live", "--standalone"] + base)
+        self.assertTrue(a.standalone)
+        self.assertFalse(detector.parse_args(["--live"] + base).standalone)
+
+    def test_sa4_input_end_exits_1_for_restart(self):
+        rc, out, err, log, _ = self.run_standalone(seconds=1, end=True)
+        self.assertEqual(rc, detector.EXIT_ERROR)
+        self.assertEqual(out, "")
+        self.assertIn("終わり（error）windows=", err)
+        self.assertEqual(log[-2:], [0, "close"])
+
+    def test_sa5_static_null_output_has_no_writes(self):
+        tree = ast.parse((HERE / "detector.py").read_text(encoding="utf-8"))
+        cls = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.ClassDef) and n.name == "NullOutput"
+        ]
+        self.assertEqual(len(cls), 1)
+        src = ast.unparse(cls[0])
+        for w in ("write", "stdout", "threading", "open(", "print("):
+            self.assertNotIn(w, src)
+        out = detector.NullOutput()
+        out.put("D 0 0 0.5 0 1")
+        self.assertEqual(
+            (out.qsize(), out.failed, out.finish()), (0, False, True)
+        )
+
+    def unit_lines(self):
+        text = (HERE / "zaitaku-detector.service").read_text(encoding="utf-8")
+        return [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
+
+    def test_sa6_unit_matches_fixed_eval_and_record(self):
+        fixed_eval, _, _ = record.analysis_modules()
+        lines = self.unit_lines()
+        keys = {}
+        for ln in lines:
+            if "=" in ln and not ln.startswith("["):
+                k, v = ln.split("=", 1)
+                keys.setdefault(k, []).append(v)
+        (start,) = keys["ExecStart"]
+        lock = f"/usr/bin/flock -n -F -E 75 {record.UNOQ_LOCK_DIR} "
+        self.assertTrue(start.startswith(lock), start)
+        self.assertEqual(record.UNOQ_LOCK_BUSY, 75)
+        cfg = re.search(r'--expect-config "([^"]*)"', start).group(1)
+        self.assertEqual(cfg, fixed_eval.M4_CONFIG)
+        sha = re.search(r"--expect-sha256 (\S+)", start).group(1)
+        self.assertEqual(
+            sha, record.m4_model_fields(fixed_eval.M4_MODEL)["sha256"]
+        )
+        args = start.split()
+        self.assertIn("--live", args)
+        self.assertIn("--standalone", args)
+        self.assertIn("-B", args)
+        self.assertNotIn("--feat", args)
+        self.assertNotIn("--no-rpc", args)
+        self.assertNotIn("ExecStartPre", keys)
+        self.assertEqual(keys["After"], ["sound.target"])
+        for k, v in (
+            ("Restart", "on-failure"),
+            ("RestartSec", "2"),
+            ("RestartPreventExitStatus", "75"),
+            ("StartLimitBurst", "10"),
+            ("StartLimitIntervalSec", "120"),
+            ("StandardInput", "null"),
+            ("StandardOutput", "null"),
+            ("StandardError", "journal"),
+            ("LimitCORE", "0"),
+            ("KillMode", "mixed"),
+            ("WantedBy", "default.target"),
+        ):
+            with self.subTest(key=k):
+                self.assertEqual(keys[k], [v])
+        (env,) = keys["Environment"]
+        for want in (
+            "OPENBLAS_NUM_THREADS=1",
+            "OMP_NUM_THREADS=1",
+            "MKL_NUM_THREADS=1",
+        ):
+            self.assertIn(want, env.split())
+        self.assertIn("zaitaku-detector.service", deploy_files())
+        self.assertEqual(record.UNOQ_SERVICE, "zaitaku-detector.service")
+        # 0018 の文言の決まり（装置を主語にした語を使わない）
+        text = (HERE / "zaitaku-detector.service").read_text(encoding="utf-8")
+        for bad in (
+            "判定",
+            "判断",
+            "指示",
+            "警告",
+            "安全",
+            "異常",
+            "alert",
+            "watchdog",
+            "safe",
+        ):
+            self.assertNotIn(bad, text)
+
+    def test_sa7_service_not_in_code_sha256(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d) / "a.py"
+            p.write_text("x = 1\n", encoding="utf-8")
+            s = pathlib.Path(d) / "zaitaku-detector.service"
+            s.write_text("[Unit]\n", encoding="utf-8")
+            self.assertEqual(
+                m4_infer.code_sha256([p, s]), m4_infer.code_sha256([p])
+            )
+        names = deploy_files()
+        full = m4_infer.code_sha256(HERE / n for n in names)
+        rest = m4_infer.code_sha256(
+            HERE / n for n in names if not n.endswith(".service")
+        )
+        self.assertEqual(full, rest)
+        self.assertEqual(full, record.local_code_sha256())
+        self.assertNotIn(".service", m4_infer.CODE_SUFFIXES)
+
+
 class HeartbeatTest(unittest.TestCase):
     """偽の時計で Heartbeat の判定。"""
 
@@ -1094,6 +1361,167 @@ class PipelineTest(unittest.TestCase):
             p2.feed(self.block(6000), 5_000 * ms, 0)
         self.assertEqual(p2.anchor, 0.0)
         self.assertTrue(out2.lines[0].startswith("D 0 "))
+
+
+class LockFdTest(unittest.TestCase):
+    """受け継いだロックのディレクトリの fd を arecord にも渡す（0050 決定 4、
+    adversarial-review の指摘）。偽の arecord（PC の python3）だけ。"""
+
+    # 自分の fd の一覧（0〜2 以外、/proc の中を除く）を標準エラーに出して終わる
+    FD_DUMP = (
+        "import os, sys\n"
+        "for n in sorted(os.listdir('/proc/self/fd'), key=int):\n"
+        "    try:\n"
+        "        t = os.readlink('/proc/self/fd/' + n)\n"
+        "    except OSError:\n"
+        "        continue\n"
+        "    if int(n) > 2 and not t.startswith('/proc/'):\n"
+        "        sys.stderr.write('FD ' + n + ' ' + t + '\\n')\n"
+    )
+
+    def child_fds(self):
+        src = audio_in.LiveInput(
+            argv=[sys.executable, "-I", "-c", self.FD_DUMP]
+        )
+        try:
+            src.proc.wait(timeout=30)
+            tail = src.stderr_tail()
+            passed = src.pass_fds
+        finally:
+            src.close()
+        got = {ln.split(" ", 2)[2] for ln in tail if ln.startswith("FD ")}
+        return got, passed
+
+    def test_l1_dir_fd_is_passed_to_child(self):
+        if not os.path.isdir("/proc/self/fd"):
+            self.skipTest("/proc が無い")
+        with tempfile.TemporaryDirectory() as d:
+            real = os.path.realpath(d)
+            fd = os.open(real, os.O_RDONLY)
+            try:
+                got, passed = self.child_fds()
+                self.assertIn(fd, passed)
+                self.assertIn(real, got)
+            finally:
+                os.close(fd)
+            # 開いていなければ渡さない（余分な fd が無い）
+            got2, passed2 = self.child_fds()
+            self.assertNotIn(fd, passed2)
+            self.assertNotIn(real, got2)
+            want = {os.readlink(f"/proc/self/fd/{n}") for n in passed2}
+            self.assertEqual(got2, want)
+
+    def test_l2_only_directories_and_no_proc(self):
+        r, w = os.pipe()
+        try:
+            fds = audio_in.lock_fds()
+            self.assertNotIn(r, fds)  # パイプ・普通のファイルは渡さない
+            self.assertNotIn(w, fds)
+            self.assertTrue(all(fd > 2 for fd in fds))
+        finally:
+            os.close(r)
+            os.close(w)
+        # 列挙できなければ例外（fail-closed。2 回目の adversarial-review）
+        with self.assertRaises(audio_in.InputError):
+            audio_in.lock_fds("/nonexistent/proc/fd")
+
+    def test_l4_fstat_failure_other_than_ebadf_is_fail_closed(self):
+        if not os.path.isdir("/proc/self/fd"):
+            self.skipTest("/proc が無い")
+        real_fstat = os.fstat
+        with tempfile.TemporaryDirectory() as d:
+            mark = pathlib.Path(d) / "started"
+            fake = [
+                sys.executable,
+                "-I",
+                "-c",
+                f"open({str(mark)!r}, 'w').close()",
+            ]
+            fd = os.open(os.path.realpath(d), os.O_RDONLY)
+            try:
+
+                def denied(n, *a, **k):
+                    if n == fd:
+                        raise PermissionError(errno.EACCES, "denied")
+                    return real_fstat(n, *a, **k)
+
+                with mock.patch.object(audio_in.os, "fstat", denied):
+                    with self.assertRaises(audio_in.InputError) as cm:
+                        audio_in.LiveInput(argv=fake)
+                self.assertIn(f"fd {fd}", str(cm.exception))
+                self.assertIn("EACCES", str(cm.exception))
+                time.sleep(0.3)
+                self.assertFalse(mark.exists())  # 起こしていない
+            finally:
+                os.close(fd)
+
+    def test_l5_fstat_ebadf_is_skipped_and_child_starts(self):
+        if not os.path.isdir("/proc/self/fd"):
+            self.skipTest("/proc が無い")
+        real_fstat = os.fstat
+        with tempfile.TemporaryDirectory() as d:
+            fd = os.open(os.path.realpath(d), os.O_RDONLY)
+            try:
+
+                def gone(n, *a, **k):
+                    if n == fd:
+                        raise OSError(errno.EBADF, "closed")
+                    return real_fstat(n, *a, **k)
+
+                with mock.patch.object(audio_in.os, "fstat", gone):
+                    fds = audio_in.lock_fds()
+                    src = audio_in.LiveInput(
+                        argv=[sys.executable, "-I", "-c", "pass"]
+                    )
+                try:
+                    self.assertEqual(src.proc.wait(timeout=30), 0)
+                finally:
+                    src.close()
+                self.assertNotIn(fd, fds)
+                self.assertNotIn(fd, src.pass_fds)
+            finally:
+                os.close(fd)
+
+    def test_l3_unlistable_fd_dir_does_not_start_child(self):
+        with tempfile.TemporaryDirectory() as d:
+            mark = pathlib.Path(d) / "started"
+            fake = [
+                sys.executable,
+                "-I",
+                "-c",
+                f"open({str(mark)!r}, 'w').close()",
+            ]
+            with mock.patch.object(
+                audio_in.LiveInput, "FD_DIR", "/nonexistent/proc/fd"
+            ):
+                with self.assertRaises(audio_in.InputError):
+                    audio_in.LiveInput(argv=fake)
+                # detector.main は入力を開けない経路で 1（Restart の対象）
+                log = []
+                null = os.open(os.devnull, os.O_RDONLY)
+                try:
+                    with contextlib.redirect_stderr(io.StringIO()) as err:
+                        rc = detector.main(
+                            [
+                                "--live",
+                                "--standalone",
+                                "--expect-config",
+                                CFG,
+                                "--expect-sha256",
+                                M4_SHA,
+                            ],
+                            open_link=lambda: FakeLink(log),
+                            live_argv=fake,
+                            stdin_fd=null,
+                        )
+                finally:
+                    os.close(null)
+            time.sleep(0.3)
+            self.assertFalse(mark.exists())  # 偽の arecord は起動していない
+        self.assertEqual(rc, detector.EXIT_ERROR)
+        self.assertIn("受け継いだ fd を確かめられない", err.getvalue())
+        self.assertIn("終わり（error）", err.getvalue())
+        self.assertEqual(log[-2:], [0, "close"])
 
 
 class StaticTest(unittest.TestCase):

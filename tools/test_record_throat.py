@@ -233,7 +233,20 @@ class ThroatMainTest(unittest.TestCase):
         pw_dump: list[str] | None = None,
         env: dict | None = None,
         no_alsa_checks: bool = False,
+        service_state: str = "inactive",
     ) -> tuple[int, str]:
+        self.service_hosts = []
+
+        def service_check_argv(h):
+            # 自動起動の検出器のユニットの状態（0050 決定 4）
+            self.service_hosts.append(h)
+            return [
+                sys.executable,
+                "-I",
+                "-c",
+                f"print({service_state!r})",
+            ]
+
         if throat_argv is None:
             cargv = self.child_argv(**(child or {}))
 
@@ -287,6 +300,7 @@ class ThroatMainTest(unittest.TestCase):
                 record, "pipewire_check_argv", pipewire_check_argv
             ),
             mock.patch.object(record, "pw_dump_argv", pw_dump_argv),
+            mock.patch.object(record, "service_check_argv", service_check_argv),
             mock.patch.dict(os.environ, environ, clear=True),
             mock.patch.object(sys, "argv", argv),
             mock.patch.object(sys, "stdin", io.StringIO()),
@@ -449,6 +463,84 @@ class ThroatMainTest(unittest.TestCase):
         self.assertIn("子プロセスが最初の音声のバイトの前に終わりました", out)
         self.assertIn("No such device", out)
         self.assertEqual(self.sessions(), [])
+
+    def test_h18_service_running_or_lock_busy_stops_before_folder(self):
+        """自動起動の検出器との排他（Issue #53、0050 決定 4）。"""
+        # ユニットが動いている（再起動の待ちを含む）・状態を読めない → 子を
+        # 起動しない
+        for state in ("active", "activating", "deactivating", "", "x"):
+            with self.subTest(state=state):
+                self.argv_seen = []
+                code, out = self.run_main(
+                    *self.W, "--cond", "quiet", service_state=state
+                )
+                self.assertEqual(code, 1, out)
+                self.assertIn("始めません", out)
+                self.assertEqual(self.argv_seen, [])
+                self.assertEqual(self.sessions(), [])
+        # 止まっている → 始める（ここでは子をすぐ終わらせて形だけ見る）
+        for state in ("inactive", "failed"):
+            with self.subTest(state=state):
+                self.argv_seen = []
+                code, out = self.run_main(
+                    *self.W,
+                    "--cond",
+                    "quiet",
+                    "--duration",
+                    "0.3",
+                    service_state=state,
+                )
+                self.assertEqual(code, 0, out)
+                self.assertEqual(len(self.argv_seen), 1)
+                for p in self.sessions():
+                    for f in p.iterdir():
+                        f.unlink()
+                    p.rmdir()
+        # 子がロックを取れずに 75 で終わる → ロックの文、フォルダを作らない
+        code, out = self.run_main(
+            *self.W,
+            "--cond",
+            "quiet",
+            child={"total": 0, "exit_code": record.UNOQ_LOCK_BUSY},
+        )
+        self.assertEqual(code, 1, out)
+        self.assertIn("ロックを持っています", out)
+        self.assertEqual(self.sessions(), [])
+        # PC の上（local）ではユニットを確かめない
+        self.run_main(
+            "--throat",
+            "sh12jk-wired-pc",
+            "--throat-host",
+            "local",
+            "--throat-device",
+            "hw:CARD=Generic_1,DEV=0",
+            "--duration",
+            "0.3",
+        )
+        self.assertEqual(self.service_hosts, [])
+
+    def test_h19_lock_dir_is_fixed_for_any_ssh_user(self):
+        """ロックのパスは ssh のユーザーで変わらない固定の絶対パス。"""
+        for host in ("arduino@unoq.local", "other@unoq.local", "unoq.local"):
+            with self.subTest(host=host):
+                for argv in (
+                    record.throat_argv(host, "hw:CARD=Audio,DEV=0"),
+                    record.throat_argv(host, BT_NODE, "a2dp"),
+                ):
+                    self.assertTrue(
+                        argv[-1].startswith(
+                            "exec flock -n -F -E 75 /home/arduino "
+                        ),
+                        argv[-1],
+                    )
+                    self.assertNotIn("$HOME", argv[-1])
+        self.assertEqual(record.UNOQ_LOCK_DIR, "/home/arduino")
+        # local の arecord にはロックを付けない
+        self.assertEqual(record.throat_argv("local", "hw:0")[0], "arecord")
+        self.assertIn(
+            "systemctl --user is-active zaitaku-detector.service",
+            record.service_check_argv("arduino@unoq.local")[-1],
+        )
 
     def test_h6_child_exits_midway(self):
         code, out = self.run_main(
@@ -1119,7 +1211,8 @@ class ThroatArgvTest(unittest.TestCase):
                 "-o",
                 "ServerAliveCountMax=3",
                 "arduino@unoq.local",
-                "exec env XDG_RUNTIME_DIR=/run/user/$(id -u) pw-record"
+                "exec flock -n -F -E 75 /home/arduino"
+                " env XDG_RUNTIME_DIR=/run/user/$(id -u) pw-record"
                 " --target bluez_input.00_11_22_33_44_55.2 --rate 48000"
                 " --channels 2 --format s16 -P '{ node.dont-reconnect = true"
                 " node.dont-fallback = true node.name = zm-throat-record }'"
@@ -1200,7 +1293,7 @@ class ThroatArgvTest(unittest.TestCase):
                 "-o",
                 "ServerAliveCountMax=3",
                 "arduino@unoq.local",
-                "exec arecord -D hw:CARD=Audio,DEV=0 -f S16_LE -r 48000 -c 2 -t raw -B 2000000 -F 125000 -v -",
+                "exec flock -n -F -E 75 /home/arduino arecord -D hw:CARD=Audio,DEV=0 -f S16_LE -r 48000 -c 2 -t raw -B 2000000 -F 125000 -v -",
             ],
         )
         local = record.throat_argv("local", "hw:CARD=Generic_1,DEV=0")

@@ -96,6 +96,14 @@ amixer は行わない）。最初のバイトの後に pw-dump をもう 1 回�
 のストリームが目的のノードにだけつながっているかを meta.json の
 throat.pipewire.link_check に残す。受信が THROAT_STALL_S 秒止まったら記録を止める
 （stop = stall、終了コード 1）。
+
+UNO Q の自動起動の検出器との排他（Issue #53、docs/decisions/0050 決定 4）: UNO Q の
+上の子（arecord・pw-record・detector.py）は、どれも `flock -n -F -E 75
+/home/arduino`（UNOQ_LOCK_DIR。単独モードのユニットと同じロック）の下で起動する。
+ロックが取れなければ子は 75 で終わり、記録を始めない（フォルダを作らない）。
+起動前に `systemctl --user is-active zaitaku-detector.service` も読み、ユニットが
+動いている（起動中・再起動の待ちを含む）なら始めない（--unoq-detector と UNO Q を
+通す --throat。--throat-host local は確かめない）。
 """
 
 from __future__ import annotations
@@ -893,9 +901,26 @@ def throat_arg_error(a) -> str | None:
     return None
 
 
+# UNO Q の上の排他のロック（docs/decisions/0050 決定 4）。記録の子と検出器は
+# どれもこのディレクトリに flock を掛けて起動する。固定の絶対パス（ssh の
+# ユーザーで変わる $HOME は使わない）。device/unoq/zaitaku-detector.service の
+# ExecStart と同じ文字
+UNOQ_LOCK_DIR = "/home/arduino"
+# ロックが取れないときの子の終了コード（flock -E）
+UNOQ_LOCK_BUSY = 75
+UNOQ_LOCK_PREFIX = f"exec flock -n -F -E {UNOQ_LOCK_BUSY} {UNOQ_LOCK_DIR} "
+UNOQ_LOCK_BUSY_TEXT = (
+    "UNO Q で別の記録か検出器がロックを持っています（記録と検出器を同時に"
+    "動かさない。docs/decisions/0050 決定 4）"
+)
+
+
 def remote_arecord(device: str) -> str:
-    """ssh で UNO Q に渡す文字列（標準出力へ出すだけ）。"""
-    return f"exec arecord -D {shlex.quote(device)} {' '.join(ARECORD_ARGS)}"
+    """ssh で UNO Q に渡す文字列（標準出力へ出すだけ。ロックの下で起動）。"""
+    return (
+        UNOQ_LOCK_PREFIX
+        + f"arecord -D {shlex.quote(device)} {' '.join(ARECORD_ARGS)}"
+    )
 
 
 def resolve_throat_device(a) -> tuple[str | None, str]:
@@ -913,9 +938,10 @@ def resolve_throat_device(a) -> tuple[str | None, str]:
 
 
 def remote_pw_record(device: str) -> str:
-    """ssh で UNO Q に渡す pw-record の文字列（標準出力へ出すだけ）。"""
+    """ssh で UNO Q に渡す pw-record の文字列（標準出力へ出すだけ。ロックの
+    下で起動）。"""
     return (
-        f"exec {PW_ENV} pw-record --target {shlex.quote(device)}"
+        UNOQ_LOCK_PREFIX + f"{PW_ENV} pw-record --target {shlex.quote(device)}"
         " --rate 48000 --channels 2 --format s16"
         f" -P {shlex.quote(PW_PROPS)} --raw -"
     )
@@ -1672,6 +1698,11 @@ def run_throat(a) -> None:
     host, device = a.throat_host, a.throat_device
     kind = THROAT_IFACES[a.throat][1]
     pw_info = None
+    if host != "local":
+        # 自動起動の検出器が動いていれば始めない（0050 決定 4。保証は flock）
+        err = service_error(host)
+        if err:
+            sys.exit(err)
     if kind == "a2dp":
         # asoundrc の検査と amixer の代わりに PipeWire の状態を確かめる
         err, device, pw_info = pipewire_check(host, device)
@@ -1720,6 +1751,8 @@ def run_throat(a) -> None:
         raise
     if first is None:
         stream.stop(lambda d: None)
+        if host != "local" and stream.proc.returncode == UNOQ_LOCK_BUSY:
+            why = UNOQ_LOCK_BUSY_TEXT
         sys.exit(
             f"{why}。記録を始めません（子の終了コード {stream.proc.returncode}）\n"
             f"子の標準エラーの末尾:\n{stream.stderr_tail()}"
@@ -1971,8 +2004,8 @@ def expected_unoq() -> dict:
 def detector_command(args: list[str]) -> str:
     """ssh で UNO Q に渡す文字列（0040 決定 3 の env、python3 -u -B）。"""
     return (
-        f"cd {UNOQ_DEVICE_DIR} && exec {UNOQ_ENV} python3 -u -B detector.py "
-        + " ".join(shlex.quote(x) for x in args)
+        f"cd {UNOQ_DEVICE_DIR} && {UNOQ_LOCK_PREFIX}{UNOQ_ENV}"
+        " python3 -u -B detector.py " + " ".join(shlex.quote(x) for x in args)
     )
 
 
@@ -2021,6 +2054,53 @@ def busy_check_argv(host: str) -> list[str]:
         host,
         "exec sh -c 'pgrep -x arecord || pgrep -x pw-record'",
     ]
+
+
+# 単独モードのユーザーユニット（device/unoq/zaitaku-detector.service、0050）
+UNOQ_SERVICE = "zaitaku-detector.service"
+# is-active の 1 行目のうち、止まっている（始めてよい）もの
+SERVICE_STOPPED = ("inactive", "failed")
+# 動いている・動き出しうるもの（activating は Restart の待ちを含む）
+SERVICE_RUNNING = (
+    "active",
+    "activating",
+    "deactivating",
+    "reloading",
+    "refreshing",
+)
+
+
+def service_check_argv(host: str) -> list[str]:
+    """自動起動の検出器のユニットの状態を読む（読むだけ。0050 決定 4）。"""
+    return [
+        "ssh",
+        *SSH_OPTS,
+        host,
+        f"exec {PW_ENV} systemctl --user is-active {UNOQ_SERVICE}",
+    ]
+
+
+def service_error(host: str) -> str | None:
+    """ユニットが動いていれば始めない理由の文。is-active は activating でも
+    0 以外を返すので、終了コードではなく 1 行目の文字で見る。"""
+    r = _run_check(service_check_argv(host), UNOQ_CHECK_TIMEOUT_S)
+    if r is None:
+        return (
+            "UNO Q の自動起動の検出器の状態を確かめられませんでした。始めません"
+        )
+    state = (r.stdout.splitlines() or [""])[0].strip()
+    if state in SERVICE_STOPPED:
+        return None
+    if state in SERVICE_RUNNING:
+        return (
+            f"UNO Q で自動起動の検出器（{UNOQ_SERVICE}）が動いています（{state}）。"
+            "記録と同時に動かさない（docs/decisions/0050 決定 4）。"
+            f"ssh {host} 'systemctl --user stop zaitaku-detector' で止めてから。始めません"
+        )
+    return (
+        "UNO Q の自動起動の検出器の状態を確かめられませんでした"
+        f"（{state[:80] or '空'}、終了コード {r.returncode}）。始めません"
+    )
 
 
 def swap_check_argv(host: str) -> list[str]:
@@ -2653,7 +2733,8 @@ def run_unoq(a, port_explicit: bool) -> None:
         sys.exit(err)
     host, device = a.unoq_host, a.unoq_device
     exp = expected_unoq()
-    for check in (asoundrc_error, busy_error, swap_error):
+    # service_error は busy_error より前（ユニットの子を「記録の経路」と出す前に）
+    for check in (asoundrc_error, service_error, busy_error, swap_error):
         err = check(host)
         if err:
             sys.exit(err)
@@ -2709,6 +2790,8 @@ def run_unoq(a, port_explicit: bool) -> None:
         why = "H 行を待つ間に中断しました"
     if why:
         stream.stop(lambda ln, t: None)
+        if st["head"] is None and stream.proc.returncode == UNOQ_LOCK_BUSY:
+            why = UNOQ_LOCK_BUSY_TEXT
         led_off(host)
         sys.exit(
             f"{why}。記録を始めません（子の終了コード {stream.proc.returncode}）\n"

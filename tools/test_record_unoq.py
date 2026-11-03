@@ -147,6 +147,7 @@ class UnoqMainTest(unittest.TestCase):
         rtt=ECHO,
         header_wait=5.0,
         detector_argv=None,
+        service_state="inactive",
     ):
         det = dict(det or {})
         det.setdefault("pidfile", str(self.pidfile))
@@ -186,6 +187,11 @@ class UnoqMainTest(unittest.TestCase):
                 record,
                 "busy_check_argv",
                 lambda h: py(f"import sys; sys.exit({busy_code})"),
+            ),
+            mock.patch.object(
+                record,
+                "service_check_argv",
+                lambda h: py(f"print({service_state!r})"),
             ),
             mock.patch.object(
                 record,
@@ -366,6 +372,40 @@ class UnoqMainTest(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("H 行が 0.5 秒以内に届きませんでした", out)
         self.assertEqual(self.sessions(), [])
+
+    def test_u3b_service_running_or_lock_busy_does_not_start(self):
+        """自動起動の検出器との排他（Issue #53、0050 決定 4）。"""
+        for state in ("active", "activating", "reloading", "", "unknown"):
+            with self.subTest(state=state):
+                self.calls.clear()
+                code, out = self.run_main(
+                    "--cond", "water", service_state=state
+                )
+                self.assertEqual(code, 1, out)
+                self.assertIn("始めません", out)
+                self.assertEqual(self.calls, [])
+                self.assertEqual(self.sessions(), [])
+        code, out = self.run_main("--cond", "water", service_state="active")
+        self.assertIn("systemctl --user stop zaitaku-detector", out)
+        # 検出器がロックを取れずに H 行の前に 75 で終わる → ロックの文
+        code, out = self.run_main(
+            "--cond",
+            "water",
+            det={
+                "header": None,
+                "n": 0,
+                "wait_eof": False,
+                "exit_code": record.UNOQ_LOCK_BUSY,
+            },
+        )
+        self.assertEqual(code, 1, out)
+        self.assertIn("ロックを持っています", out)
+        self.assertEqual(self.sessions(), [])
+        # failed（Restart をやめた後）は止まっているので始める
+        code, out = self.run_main(
+            "--cond", "water", "--duration", "0.3", service_state="failed"
+        )
+        self.assertEqual(code, 0, out)
 
     def test_u4_argument_checks(self):
         for args, want in (
@@ -682,7 +722,8 @@ class CommandTest(unittest.TestCase):
         cmd = argv[-1]
         self.assertTrue(
             cmd.startswith(
-                "cd ~/zaitaku-mealpace-device && exec env OPENBLAS_NUM_THREADS=1"
+                "cd ~/zaitaku-mealpace-device && exec flock -n -F -E 75"
+                " /home/arduino env OPENBLAS_NUM_THREADS=1"
                 " OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -u -B detector.py --live"
             ),
             cmd,
@@ -699,6 +740,95 @@ class CommandTest(unittest.TestCase):
             record.swap_check_argv("h")[-1], "exec cat /proc/swaps"
         )
         self.assertIn("pgrep -x arecord", record.busy_check_argv("h")[-1])
+        # ロックのパスは ssh のユーザーで変わらない（0050 決定 4）
+        other = record.unoq_detector_argv("other@unoq.local", args)[-1]
+        self.assertIn("exec flock -n -F -E 75 /home/arduino env ", other)
+        self.assertNotIn("$HOME", other)
+        self.assertEqual(
+            record.service_check_argv("h")[-1],
+            "exec env XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user"
+            " is-active zaitaku-detector.service",
+        )
+
+    def test_c4_flock_lock_is_exclusive_and_freed_by_kill(self):
+        """record.py とユニットが前置きする flock の形で、持っている間は 75、
+        持ち手が kill -9 で終わればすぐ取れる（PC の flock。無ければ飛ばす）。"""
+        import shutil
+        import subprocess
+
+        flock = shutil.which("flock")
+        if flock is None:
+            self.skipTest("flock が無い")
+        help_text = subprocess.run(
+            [flock, "--help"], capture_output=True, text=True
+        ).stdout
+        if "--no-fork" not in help_text:
+            self.skipTest("flock に --no-fork（-F）が無い")
+        with tempfile.TemporaryDirectory() as d:
+            lock = ["-n", "-F", "-E", str(record.UNOQ_LOCK_BUSY), d]
+            before = set(os.listdir(d))
+            holder = subprocess.Popen([flock, *lock, "sleep", "10"])
+            try:
+                time.sleep(0.3)
+                r = subprocess.run([flock, *lock, "true"])
+                self.assertEqual(r.returncode, record.UNOQ_LOCK_BUSY)
+            finally:
+                holder.kill()
+                holder.wait()
+            r = subprocess.run([flock, *lock, "true"])
+            self.assertEqual(r.returncode, 0)
+            # ディレクトリのロックはファイルを作らない
+            self.assertEqual(set(os.listdir(d)), before)
+
+    def test_c5_lock_kept_by_child_after_holder_is_killed(self):
+        """ロックの持ち手（flock -F の後の python3。検出器の代わり）が
+        audio_in.lock_fds を pass_fds に渡して子（arecord の代わりの sleep）を
+        起こし、自分は SIGKILL で死ぬ。子が生きている間は 75、子が死ねば 0。"""
+        import shutil
+        import subprocess
+
+        flock = shutil.which("flock")
+        if flock is None:
+            self.skipTest("flock が無い")
+        help_text = subprocess.run(
+            [flock, "--help"], capture_output=True, text=True
+        ).stdout
+        if "--no-fork" not in help_text:
+            self.skipTest("flock に --no-fork（-F）が無い")
+        device = str(record.UNOQ_DEPLOY_DIR)
+        holder_src = (
+            "import os, signal, subprocess, sys\n"
+            f"sys.path.insert(0, {device!r})\n"
+            "import audio_in\n"
+            "p = subprocess.Popen(['sleep', '30'], stdout=subprocess.DEVNULL,"
+            " stderr=subprocess.DEVNULL, pass_fds=audio_in.lock_fds())\n"
+            "print(p.pid, flush=True)\n"
+            "os.kill(os.getpid(), signal.SIGKILL)\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            lock = ["-n", "-F", "-E", str(record.UNOQ_LOCK_BUSY), d]
+            r = subprocess.run(
+                [flock, *lock, sys.executable, "-I", "-c", holder_src],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(r.returncode, -signal.SIGKILL, r.stderr)
+            child = int(r.stdout.split()[0])
+            try:
+                t = subprocess.run([flock, *lock, "true"])
+                self.assertEqual(t.returncode, record.UNOQ_LOCK_BUSY)
+            finally:
+                os.kill(child, signal.SIGKILL)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(child, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            t = subprocess.run([flock, *lock, "true"])
+            self.assertEqual(t.returncode, 0)
 
     def test_c2_expected_values_come_from_fixed_eval(self):
         fixed_eval, m4_infer, _ = record.analysis_modules()
