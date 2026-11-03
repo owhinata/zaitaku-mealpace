@@ -285,6 +285,10 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
   systemctl --user start zaitaku-detector
   ```
 
+  11/3 に有効にした（#53）。今入っているリンクは `~/.config/systemd/user/zaitaku-detector.service` と `~/.config/systemd/user/default.target.wants/zaitaku-detector.service` の 2 本
+  （どちらも `~/zaitaku-mealpace-device/zaitaku-detector.service` を指す）。電源投入から動く。
+- **電源投入から波線まで（11/3 の実機）**: MCU の RPC が揃う前にユニットが 1〜2 回 1 で終わって再起動し、波線まで約 40 秒かかる（設計どおり。journal に「RPC を開けない」が出る）。
+
 - **止める・戻す**: `systemctl --user stop zaitaku-detector`（消灯して止まる。再起動しない）、`start`、外すときは `disable`（リンクは `systemctl --user disable` が `default.target.wants/` から外す。
   `~/.config/systemd/user/zaitaku-detector.service` のリンクは `rm` で外す）。
 - **状態**: `systemctl --user status zaitaku-detector`、`journalctl --user -u zaitaku-detector -b --no-pager`。止まった・失敗した理由の文は `detector: ` で始まる。
@@ -292,6 +296,7 @@ UNO Q の時計は起動の後に進むことがある（10/13、ファイルの
 - **再起動の上限**: 0 以外で終わると 2 秒後に起動し直す。120 秒に 10 回を超えると `failed` で止まる（アダプタを挿し忘れたなど）。直したら
   `systemctl --user reset-failed zaitaku-detector && systemctl --user start zaitaku-detector`。
   記録のロックが取れなかったとき（75）は再起動しない（`failed`）。記録の後に `start`。
+  アダプタ未接続では約 2 分で `failed` になる（11/3 の実機。終了コード 1）。挿してから `systemctl --user reset-failed zaitaku-detector && systemctl --user start zaitaku-detector`。
 - **配り直し**: `stop` → `cmake --build build-unoq --target deploy-unoq` → `systemctl --user daemon-reload` → `--selftest`（上の「検出器」）→ `start`。
   ユニットの `--expect-config`・`--expect-sha256` は重みと構成の値なので、直すのは重み・構成を替えたときだけ（`device/unoq/test_detector.py` の sa6 が `analysis/fixed_eval.py` と照らす）。
 - **記録の前に `stop`、後に `start`**: `record.py --unoq-detector` と UNO Q を通す `record.py --throat` は、起動前にユニットの状態を読み、動いている（`activating` = 再起動の待ちを含む）なら
