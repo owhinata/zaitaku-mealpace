@@ -248,8 +248,12 @@ class F4M4LinesMatch(unittest.TestCase):
             fixed_eval.assert_m4_eval(REAL_EVAL)
             fixed_eval.assert_m4_train(REAL_TRAIN)
             self.assertEqual(REAL_TRAIN[:21], M3_21)
-            self.assertTrue(all(n.endswith("_self_meal") for n in REAL_TRAIN[21:]))
-            self.assertTrue(all(n[:8] <= fixed_eval.M4_TRAIN_CUTOFF for n in REAL_TRAIN))
+            self.assertTrue(
+                all(n.endswith("_self_meal") for n in REAL_TRAIN[21:])
+            )
+            self.assertTrue(
+                all(n[:8] <= fixed_eval.M4_TRAIN_CUTOFF for n in REAL_TRAIN)
+            )
 
 
 CONFIG = (

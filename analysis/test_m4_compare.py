@@ -99,7 +99,9 @@ class ListingTest(unittest.TestCase):
         with mock.patch.object(split, "_meta", side_effect=spy):
             L = mc.list_train(root)
         self.assertEqual(L.train, sorted(M3_21 + (MEAL_1,)))
-        self.assertEqual(L.after_cutoff, [])  # 締めの翌日が窓の初日なので、ここに入る名前は無い
+        self.assertEqual(
+            L.after_cutoff, []
+        )  # 締めの翌日が窓の初日なので、ここに入る名前は無い
         self.assertEqual(L.eval_window, [LATE, EVAL_NAME])
         self.assertEqual(
             sorted(L.excluded), sorted([M1_NAME, DET_NAME, P1_NAME])
