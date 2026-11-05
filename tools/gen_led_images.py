@@ -24,9 +24,9 @@ OUT_DIR = ROOT / "docs" / "img"
 SHAPES = ROOT / "firmware" / "indicator" / "shapes" / "gen_shapes.py"
 
 ROWS, COLS = 8, 13
-PITCH = 14  # 点の間隔（px）
-RADIUS = 5  # 点の半径（px）
-MARGIN = 10  # 基板の縁（px）
+PITCH = 7  # 点の間隔（px）
+RADIUS = 2  # 点の半径（px）
+MARGIN = 5  # 基板の縁（px）
 BOARD = (28, 30, 34)
 OFF = (52, 55, 60)
 ON = (236, 64, 48)
