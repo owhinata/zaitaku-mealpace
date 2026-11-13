@@ -7,11 +7,16 @@
 MCU 側の LED マトリクスに「目安」を出す（流れる波線 = 動作中、微笑む顔 = 嚥下の目安）。生の音声は特徴量に変換した後に捨て、装置にも PC にも残さない。
 評価は開発者自身の実際の食事 4 食（収集日 3 日）で 1 回だけ行い、検出率 0.957（199/208）、誤検出率 1.25 回/分（70 回 / 56 分）。
 合格線（85% / 1 回/分以下）のうち誤検出率は満たさない（docs/decisions/0041・0042）。本人試用と姿勢の同時記録は未実施。
+混同行列は TP 199 / FN 9 / FP 70（イベント単位。TN は定義しない）。評価に使ったセッションは `20261030-201124_self_meal`・
+`20261031-145803_self_meal`・`20261031-195410_self_meal`・`20261101-134412_self_meal` の 4 本
+（セッションごとの数字は [docs/decisions/0042](docs/decisions/0042-gate-m4-throat-mic-detector.md)）。
 経緯: 基板の IMU＋PDM マイク（Nano RP2040 Connect、M1〜M2）→ 咽喉マイク（M3〜M4）。docs/decisions/0024・0025。
 
 **本装置は医療機器ではなく、誤嚥の検出や診断を目的としない。** LED の表示は嚥下の「目安」で、判定や指示ではない。
 食形態・姿勢の判断はしない。疾病の診断・治療・予防を目的とした嚥下機能評価については医療関係者に相談すること。
 
+- 作品ページ（ProtoPedia）: https://protopedia.net/prototype/10013
+- デモ動画: https://youtu.be/y1x6TrA4hLw
 - 企画書: [docs/proposal.md](docs/proposal.md)
 - 計画と関門: [docs/plan.md](docs/plan.md)
 - 現在地: [docs/status.md](docs/status.md)
