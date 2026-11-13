@@ -36,26 +36,37 @@ docs/data-schema.md  記録形式。先に固定
 docs/evaluation.md   評価の定義。先に固定
 docs/proposal.md     企画書（匿名化版）
 docs/workflow.md     Issue運用・セッションの入口と出口
-firmware/logger/     Nano RP2040 Connect 記録ファームウェア
+docs/unoq-setup.md   UNO Q の設定、書き込み、配置、自動起動の手順
+docs/recording-protocol.md  記録の手順
+docs/protopedia/     ProtoPedia の作品ページのストーリー
+docs/img/            作品ページの画像
+device/unoq/         UNO Q の Linux 側の検出器（音の取り込み、特徴量、CNN、後処理）
+firmware/unoq_mcu/   UNO Q の MCU 側のスケッチ（LED マトリクスの表示）
+firmware/logger/     Nano RP2040 Connect 記録ファームウェア（M1）
+firmware/detector/   Nano RP2040 Connect 検出器（M2。採らなかった構成）
+firmware/indicator/  UNO R4 WiFi 表示器（M2。図形の元は UNO Q でも使う）
 tools/record.py      PC側の記録スクリプト
 analysis/            解析・評価スクリプト
-models/              Edge Impulse から書き出したモデル
+models/              Edge Impulse から書き出したモデル（M2）
 data/                ローカルのみ（raw は除外）
-CMakeLists.txt       build / upload / record のタスク定義
+CMakeLists.txt       build / upload / deploy / record のタスク定義
 ```
 
-## 使い方（分岐点まで）
+## 使い方
 
-必要なもの: `arduino-cli`（1.5.1 で確認）、`cmake` 3.16 以上、`python3`。
+必要なもの: `arduino-cli`（1.5.1 で確認）、`cmake` 3.16 以上、`python3`、Arduino UNO Q、咽喉マイク（SH-12JK）、USB オーディオアダプタ。
 `arduino-cli` は公式手順でユーザー領域（`~/.local/bin` など）に入れてよい。
 
 ```
-cmake -S . -B build -DPORT=/dev/ttyACM0
-cmake --build build --target deps     # 初回のみ。ボードコア約 100 MB を取得する
-cmake --build build --target build
-cmake --build build --target upload
-cmake --build build --target record -- SUBJECT=self COND=water
+cmake -S . -B build-unoq -DSKETCH_NAME=unoq_mcu -DPORT=<ポート>
+cmake --build build-unoq --target deps          # 初回のみ。ボードコアを取得する
+cmake --build build-unoq --target build
+cmake --build build-unoq --target upload        # MCU 側のスケッチを書き込む
+cmake --build build-unoq --target deploy-unoq   # Linux 側の検出器を UNO Q に配る
 ```
+
+UNO Q の設定と、電源投入で検出器を起動する手順は [docs/unoq-setup.md](docs/unoq-setup.md)。
+PC 側の解析と評価のテストは `python3 -m unittest discover -s analysis`。
 
 Debian / Ubuntu のシステム Python は `pip install` を拒む（PEP 668,
 `externally-managed-environment`）。その場合は venv を作って `-DPYTHON3=` で渡す。
@@ -63,7 +74,7 @@ Debian / Ubuntu のシステム Python は `pip install` を拒む（PEP 668,
 
 ```
 python3 -m venv .venv
-cmake -S . -B build -DPORT=/dev/ttyACM0 -DPYTHON3=$PWD/.venv/bin/python3
+cmake -S . -B build-unoq -DSKETCH_NAME=unoq_mcu -DPORT=<ポート> -DPYTHON3=$PWD/.venv/bin/python3
 ```
 
 ## ライセンス
